@@ -27,6 +27,11 @@ pub struct PrInfo {
     pub merged: bool,
 }
 
+pub fn body_from_file(path: &str) -> Result<String> {
+    std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read body file `{path}`"))
+}
+
 pub fn create_pr(title: &str, body: &str, base: &str, head: &str, draft: bool) -> Result<PrInfo> {
     let mut args = vec![
         "pr", "create", "--title", title, "--body", body, "--base", base, "--head", head,
@@ -96,6 +101,22 @@ pub fn merge_pr(pr_number: u64, method: &str) -> Result<()> {
         flag,
         "--delete-branch",
     ])?;
+    Ok(())
+}
+
+pub fn edit_pr(pr_number: u64, title: Option<&str>, body: Option<&str>) -> Result<()> {
+    let number_str = pr_number.to_string();
+    let mut args: Vec<&str> = vec!["pr", "edit", &number_str];
+    if let Some(t) = title {
+        args.extend_from_slice(&["--title", t]);
+    }
+    if let Some(b) = body {
+        args.extend_from_slice(&["--body", b]);
+    }
+    if args.len() == 3 {
+        anyhow::bail!("No edits specified — provide --title or --body");
+    }
+    run_gh(&args)?;
     Ok(())
 }
 

@@ -62,6 +62,22 @@ pub enum Commands {
         /// Create a draft PR
         #[arg(long)]
         draft: bool,
+
+        /// PR title (defaults to first commit message)
+        #[arg(long)]
+        title: Option<String>,
+
+        /// PR body text
+        #[arg(long)]
+        body: Option<String>,
+
+        /// PR body from file
+        #[arg(long)]
+        body_file: Option<String>,
+
+        /// Override the PR base branch
+        #[arg(long)]
+        base: Option<String>,
     },
 
     /// Push and create/update PRs for the entire stack
@@ -69,6 +85,18 @@ pub enum Commands {
         /// Create draft PRs
         #[arg(long)]
         draft: bool,
+
+        /// PR title (defaults to first commit message)
+        #[arg(long)]
+        title: Option<String>,
+
+        /// PR body text
+        #[arg(long)]
+        body: Option<String>,
+
+        /// PR body from file
+        #[arg(long)]
+        body_file: Option<String>,
     },
 
     /// Fetch trunk, detect merged PRs, clean up, and restack

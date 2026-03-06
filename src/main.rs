@@ -27,8 +27,12 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Create { name, message, all } => cmd::create::run(&name, message.as_deref(), all),
         Commands::Commit { message, all } => cmd::commit::run(&message, all),
         Commands::Amend { message, all } => cmd::amend::run(message.as_deref(), all),
-        Commands::Push { draft } => cmd::push::run(draft),
-        Commands::Submit { draft } => cmd::submit::run(draft),
+        Commands::Push { draft, title, body, body_file, base } => {
+            cmd::push::run(draft, title.as_deref(), body.as_deref(), body_file.as_deref(), base.as_deref())
+        }
+        Commands::Submit { draft, title, body, body_file } => {
+            cmd::submit::run(draft, title.as_deref(), body.as_deref(), body_file.as_deref())
+        }
         Commands::Sync => cmd::sync::run(),
         Commands::Restack => cmd::restack::run(),
         Commands::Up => cmd::navigate::up(),

@@ -3,10 +3,11 @@ use anyhow::{Result, bail};
 use crate::cmd::push::push_or_update_pr;
 use crate::error::EzError;
 use crate::git;
+use crate::github;
 use crate::stack::StackState;
 use crate::ui;
 
-pub fn run(draft: bool) -> Result<()> {
+pub fn run(draft: bool, title: Option<&str>, body: Option<&str>, body_file: Option<&str>) -> Result<()> {
     let mut state = StackState::load()?;
     let current = git::current_branch()?;
 
@@ -17,6 +18,11 @@ pub fn run(draft: bool) -> Result<()> {
     if !state.is_managed(&current) {
         bail!(EzError::BranchNotInStack(current.clone()));
     }
+
+    let resolved_body: Option<String> = match body_file {
+        Some(path) => Some(github::body_from_file(path)?),
+        None => body.map(|s| s.to_string()),
+    };
 
     // path_to_trunk returns [current, ..., trunk].
     // We want to iterate bottom-to-top (trunk-side first), skipping trunk itself.
@@ -46,7 +52,7 @@ pub fn run(draft: bool) -> Result<()> {
         sp.finish_and_clear();
 
         // Create or update the PR.
-        let pr_url = push_or_update_pr(&mut state, branch, &parent, draft)?;
+        let pr_url = push_or_update_pr(&mut state, branch, &parent, draft, title, resolved_body.as_deref())?;
         pr_urls.push((branch.clone(), pr_url));
     }
 
