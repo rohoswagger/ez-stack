@@ -16,12 +16,16 @@ pub fn run(name: &str, message: Option<&str>) -> Result<()> {
     }
 
     if git::branch_exists(name) {
+        ui::hint(&format!("Use `ez checkout {}` to switch to it", name));
+        ui::hint(&format!("Use `ez delete {}` to delete and recreate it", name));
         bail!(EzError::BranchAlreadyExists(name.to_string()));
     }
 
     // If a commit message was provided, stage and commit on the current branch first.
     if let Some(msg) = message {
         if !git::has_staged_changes()? {
+            ui::hint("Stage your changes first:  git add <files>");
+            ui::hint(&format!("Or create the branch without committing:  ez create {name}"));
             bail!(EzError::NothingToCommit);
         }
         git::commit(msg)?;
