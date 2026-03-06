@@ -41,6 +41,9 @@ pub enum EzError {
     #[error("git command failed: {0}")]
     GitError(String),
 
+    #[error("push rejected: remote ref for `{0}` is stale\n  → Run: git fetch origin {0}\n  → Then retry: ez push")]
+    StaleRemoteRef(String),
+
     #[error("gh CLI error: {0}")]
     GhError(String),
 

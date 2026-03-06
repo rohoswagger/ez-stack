@@ -112,8 +112,14 @@ pub fn push(remote: &str, branch: &str, force: bool) -> Result<()> {
     if force {
         args.push("--force-with-lease");
     }
-    run_git(&args)?;
-    Ok(())
+    let (success, _, stderr) = run_git_with_status(&args)?;
+    if success {
+        return Ok(());
+    }
+    if stderr.contains("stale info") || stderr.contains("(stale)") {
+        bail!(crate::error::EzError::StaleRemoteRef(branch.to_string()));
+    }
+    bail!(crate::error::EzError::GitError(stderr));
 }
 
 pub fn delete_branch(branch: &str, force: bool) -> Result<()> {
@@ -169,4 +175,11 @@ pub fn remote_branch_exists(remote: &str, branch: &str) -> bool {
 pub fn branch_list() -> Result<Vec<String>> {
     let output = run_git(&["branch", "--format=%(refname:short)"])?;
     Ok(output.lines().map(|s| s.to_string()).collect())
+}
+
+pub fn fetch_branch(remote: &str, branch: &str) -> Result<()> {
+    // Silently update the remote-tracking ref for this branch before force-push.
+    // Ignore errors (branch may not exist on remote yet).
+    let _ = run_git(&["fetch", remote, branch]);
+    Ok(())
 }

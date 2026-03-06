@@ -23,6 +23,7 @@ pub fn run(draft: bool) -> Result<()> {
 
     // Push the branch with force-with-lease.
     let sp = ui::spinner(&format!("Pushing `{current}`..."));
+    git::fetch_branch(remote, &current)?;
     git::push(remote, &current, true)?;
     sp.finish_and_clear();
     ui::info(&format!("Pushed `{current}`"));
