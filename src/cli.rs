@@ -100,7 +100,11 @@ pub enum Commands {
     },
 
     /// Fetch trunk, detect merged PRs, clean up, and restack
-    Sync,
+    Sync {
+        /// Show what sync would do without making changes
+        #[arg(long)]
+        dry_run: bool,
+    },
 
     /// Rebase children onto the current branch tip
     Restack,

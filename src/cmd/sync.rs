@@ -5,7 +5,7 @@ use crate::github;
 use crate::stack::StackState;
 use crate::ui;
 
-pub fn run() -> Result<()> {
+pub fn run(dry_run: bool) -> Result<()> {
     let mut state = StackState::load()?;
     let original_branch = git::current_branch()?;
 
@@ -22,6 +22,28 @@ pub fn run() -> Result<()> {
         ui::warn("Could not fast-forward trunk — you may have local commits");
     } else {
         ui::success(&format!("Updated `{}` to latest", state.trunk));
+    }
+
+    if dry_run {
+        ui::info("[dry-run] Would fast-forward trunk to latest remote");
+
+        let order = state.topo_order();
+        for branch_name in &order {
+            let meta = state.get_branch(branch_name)?;
+            if meta.pr_number.is_some() {
+                ui::info(&format!("[dry-run] Would check PR status for `{branch_name}`"));
+            }
+            let parent = &meta.parent;
+            let stored_head = &meta.parent_head;
+            if let Ok(current_tip) = git::rev_parse(parent) {
+                if current_tip != *stored_head {
+                    ui::info(&format!("[dry-run] Would restack `{branch_name}` onto `{parent}`"));
+                }
+            }
+        }
+
+        ui::info("[dry-run] No changes made — rerun without --dry-run to apply");
+        return Ok(());
     }
 
     // Detect merged PRs and clean up.

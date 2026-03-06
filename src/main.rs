@@ -33,7 +33,7 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Submit { draft, title, body, body_file } => {
             cmd::submit::run(draft, title.as_deref(), body.as_deref(), body_file.as_deref())
         }
-        Commands::Sync => cmd::sync::run(),
+        Commands::Sync { dry_run } => cmd::sync::run(dry_run),
         Commands::Restack => cmd::restack::run(),
         Commands::Up => cmd::navigate::up(),
         Commands::Down => cmd::navigate::down(),
