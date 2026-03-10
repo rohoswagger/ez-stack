@@ -12,7 +12,12 @@ pub fn run(
     body: Option<&str>,
     body_file: Option<&str>,
     base_override: Option<&str>,
+    stack: bool,
 ) -> Result<()> {
+    if stack {
+        return crate::cmd::submit::run(draft, title, body, body_file);
+    }
+
     let mut state = StackState::load()?;
     let current = git::current_branch()?;
 

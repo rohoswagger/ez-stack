@@ -78,6 +78,10 @@ pub enum Commands {
         /// Override the PR base branch
         #[arg(long)]
         base: Option<String>,
+
+        /// Push all branches in the stack (equivalent to ez submit)
+        #[arg(long)]
+        stack: bool,
     },
 
     /// Push and create/update PRs for the entire stack

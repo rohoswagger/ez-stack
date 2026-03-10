@@ -34,12 +34,14 @@ fn run(cli: Cli) -> Result<()> {
             body,
             body_file,
             base,
+            stack,
         } => cmd::push::run(
             draft,
             title.as_deref(),
             body.as_deref(),
             body_file.as_deref(),
             base.as_deref(),
+            stack,
         ),
         Commands::Submit {
             draft,
