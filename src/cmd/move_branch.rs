@@ -76,8 +76,16 @@ pub fn run(onto: &str) -> Result<()> {
     let new_tip = git::rev_parse(&current)?;
     let children = state.children_of(&current);
     let mut restacked = 0;
+    let current_root = git::repo_root()?;
 
     for child_name in &children {
+        if let Ok(Some(wt_path)) = git::branch_checked_out_elsewhere(child_name, &current_root) {
+            ui::warn(&format!(
+                "`{child_name}` is checked out in worktree `{wt_path}` — skipping restack (run `ez restack` in that worktree)"
+            ));
+            continue;
+        }
+
         let child = state.get_branch(child_name)?;
         let child_parent_head = child.parent_head.clone();
 

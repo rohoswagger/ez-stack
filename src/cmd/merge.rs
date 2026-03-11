@@ -97,6 +97,7 @@ pub fn run(method: &str) -> Result<()> {
     // Restack remaining branches in topological order.
     let order = state.topo_order();
     let mut restacked = 0;
+    let current_root = git::repo_root()?;
 
     for branch_name in &order {
         let meta = state.get_branch(branch_name)?;
@@ -110,6 +111,13 @@ pub fn run(method: &str) -> Result<()> {
         };
 
         if current_parent_tip == stored_parent_head {
+            continue;
+        }
+
+        if let Ok(Some(wt_path)) = git::branch_checked_out_elsewhere(branch_name, &current_root) {
+            ui::warn(&format!(
+                "`{branch_name}` is checked out in worktree `{wt_path}` — skipping restack (run `ez restack` in that worktree)"
+            ));
             continue;
         }
 
