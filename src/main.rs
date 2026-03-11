@@ -83,5 +83,6 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Draft => cmd::draft::run(false),
         Commands::Ready => cmd::draft::run(true),
         Commands::PrLink => cmd::pr_link::run(),
+        Commands::Pr => cmd::pr_view::run(),
     }
 }

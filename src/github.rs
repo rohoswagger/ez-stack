@@ -152,6 +152,46 @@ pub fn get_pr_body(pr_number: u64) -> Result<String> {
     Ok(body)
 }
 
+/// Open the PR for a branch in the default browser.
+pub fn open_pr_in_browser(branch: &str) -> Result<()> {
+    run_gh(&["pr", "view", "--web", branch])?;
+    Ok(())
+}
+
+/// Get the latest CI run status for a branch.
+/// Returns a short status string: "✓", "✗", "⏳", or "" if no runs found.
+pub fn get_ci_status(branch: &str) -> String {
+    let output = run_gh(&[
+        "run",
+        "list",
+        "--branch",
+        branch,
+        "--limit",
+        "1",
+        "--json",
+        "status,conclusion",
+        "--jq",
+        ".[0]",
+    ]);
+    match output {
+        Ok(json_str) if !json_str.is_empty() && json_str != "null" => {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                let status = v["status"].as_str().unwrap_or("");
+                let conclusion = v["conclusion"].as_str().unwrap_or("");
+                match (status, conclusion) {
+                    ("completed", "success") => "✓".to_string(),
+                    ("completed", _) => "✗".to_string(),
+                    ("in_progress", _) | ("queued", _) | ("waiting", _) => "⏳".to_string(),
+                    _ => String::new(),
+                }
+            } else {
+                String::new()
+            }
+        }
+        _ => String::new(),
+    }
+}
+
 /// Set or unset draft status on a PR.
 /// `ready = true` → mark ready for review; `ready = false` → mark as draft.
 pub fn set_pr_ready(pr_number: u64, ready: bool) -> Result<()> {

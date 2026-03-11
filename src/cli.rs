@@ -35,7 +35,7 @@ pub enum Commands {
         all: bool,
 
         /// Create the branch from this base instead of the current branch (cannot combine with -m)
-        #[arg(long, conflicts_with = "message")]
+        #[arg(long, alias = "on", conflicts_with = "message")]
         from: Option<String>,
     },
 
@@ -204,4 +204,7 @@ pub enum Commands {
 
     /// Print the PR URL for the current branch to stdout
     PrLink,
+
+    /// Open the current branch's PR in the browser
+    Pr,
 }

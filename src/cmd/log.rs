@@ -113,6 +113,18 @@ fn render_tree(
         String::new()
     };
 
+    // Get CI status (best-effort, empty string if unavailable).
+    let ci_text = if meta.pr_number.is_some() {
+        let ci = github::get_ci_status(branch);
+        if ci.is_empty() {
+            String::new()
+        } else {
+            format!(" {ci}")
+        }
+    } else {
+        String::new()
+    };
+
     // Count commits on this branch
     let range = format!("{}..{}", meta.parent, branch);
     let commits = git::log_oneline(&range, 100).unwrap_or_default();
@@ -130,7 +142,7 @@ fn render_tree(
         String::new()
     };
 
-    let line_text = format!("{name_display}{pr_text}{commit_text}{current_marker}");
+    let line_text = format!("{name_display}{pr_text}{ci_text}{commit_text}{current_marker}");
     let line = ui::tree_line(depth, is_last, ancestors_last, &line_text);
     eprintln!("{line}");
 

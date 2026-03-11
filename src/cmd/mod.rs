@@ -11,6 +11,7 @@ pub mod move_branch;
 pub mod navigate;
 pub mod pr_edit;
 pub mod pr_link;
+pub mod pr_view;
 pub mod push;
 pub mod restack;
 pub mod status;
