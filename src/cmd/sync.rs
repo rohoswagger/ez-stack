@@ -5,7 +5,7 @@ use crate::github;
 use crate::stack::StackState;
 use crate::ui;
 
-pub fn run(dry_run: bool, _autostash: bool) -> Result<()> {
+pub fn run(dry_run: bool, autostash: bool) -> Result<()> {
     let state = StackState::load()?;
 
     if dry_run {
@@ -46,6 +46,31 @@ pub fn run(dry_run: bool, _autostash: bool) -> Result<()> {
         return Ok(());
     }
 
+    // Autostash: stash before any mutations.
+    let stashed = if autostash {
+        let did_stash = git::stash_push()?;
+        if did_stash {
+            ui::info("Stashed uncommitted changes (--autostash)");
+        }
+        did_stash
+    } else {
+        false
+    };
+
+    let result = run_sync_inner();
+
+    if stashed {
+        if let Err(e) = git::stash_pop() {
+            ui::warn(&format!("Failed to pop autostash: {e}"));
+        } else {
+            ui::info("Restored stashed changes");
+        }
+    }
+
+    result
+}
+
+fn run_sync_inner() -> Result<()> {
     let mut state = StackState::load()?;
     let original_branch = git::current_branch()?;
 
@@ -164,4 +189,14 @@ pub fn run(dry_run: bool, _autostash: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn run_signatures_compile() {
+        // Verifies the public API is correct at compile time.
+        let f: fn(bool, bool) -> anyhow::Result<()> = super::run;
+        let _ = std::mem::size_of_val(&f);
+    }
 }
