@@ -137,3 +137,29 @@ pub fn repo_name() -> Result<String> {
     }
     Ok(output)
 }
+
+/// Fetch the current body of a PR (raw markdown).
+pub fn get_pr_body(pr_number: u64) -> Result<String> {
+    let body = run_gh(&[
+        "pr",
+        "view",
+        &pr_number.to_string(),
+        "--json",
+        "body",
+        "-q",
+        ".body",
+    ])?;
+    Ok(body)
+}
+
+/// Set or unset draft status on a PR.
+/// `ready = true` → mark ready for review; `ready = false` → mark as draft.
+pub fn set_pr_ready(pr_number: u64, ready: bool) -> Result<()> {
+    let number = pr_number.to_string();
+    if ready {
+        run_gh(&["pr", "ready", &number])?;
+    } else {
+        run_gh(&["pr", "ready", "--undo", &number])?;
+    }
+    Ok(())
+}

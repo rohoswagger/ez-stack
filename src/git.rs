@@ -183,3 +183,38 @@ pub fn fetch_branch(remote: &str, branch: &str) -> Result<()> {
     let _ = run_git(&["fetch", remote, branch]);
     Ok(())
 }
+
+fn parse_porcelain_dirty(output: &str) -> bool {
+    output.lines().any(|l| !l.trim().is_empty())
+}
+
+pub fn has_uncommitted_changes() -> Result<bool> {
+    let output = run_git(&["status", "--porcelain"])?;
+    Ok(parse_porcelain_dirty(&output))
+}
+
+pub fn stash_push() -> Result<bool> {
+    if !has_uncommitted_changes()? {
+        return Ok(false);
+    }
+    run_git(&["stash", "push", "--include-untracked", "-m", "ez-autostash"])?;
+    Ok(true)
+}
+
+pub fn stash_pop() -> Result<()> {
+    run_git(&["stash", "pop"])?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_has_uncommitted_parses_dirty() {
+        assert!(parse_porcelain_dirty(" M file.txt\n?? untracked.txt\n"));
+        assert!(parse_porcelain_dirty("M  staged.rs\n"));
+        assert!(!parse_porcelain_dirty(""));
+        assert!(!parse_porcelain_dirty("\n"));
+    }
+}

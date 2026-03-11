@@ -38,6 +38,9 @@ pub enum EzError {
     #[error("no staged changes to commit")]
     NothingToCommit,
 
+    #[error("unstaged or uncommitted changes — stash them first, or use `ez sync --autostash`")]
+    UnstagedChanges,
+
     #[error("git command failed: {0}")]
     GitError(String),
 
