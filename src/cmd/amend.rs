@@ -63,12 +63,18 @@ pub fn run(message: Option<&str>, all: bool) -> Result<()> {
         }
     }
 
-    // Return to the original branch after restacking.
-    git::checkout(&current)?;
+    // Return to the original branch after restacking (only if we may have moved).
+    if !children.is_empty() {
+        git::checkout(&current)?;
+    }
 
     state.save()?;
-    ui::success(&format!(
-        "Amended `{current}` and restacked {restacked_count} child branch(es)"
-    ));
+    if restacked_count > 0 {
+        ui::success(&format!(
+            "Amended `{current}` and restacked {restacked_count} child branch(es)"
+        ));
+    } else {
+        ui::success(&format!("Amended `{current}`"));
+    }
     Ok(())
 }
