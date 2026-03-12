@@ -64,12 +64,23 @@ ez-stack is a CLI for managing stacked PRs on GitHub. When `.git/ez/stack.json` 
 |--------|---------|
 | Sync with trunk | `ez sync` |
 | Sync with dirty working tree | `ez sync --autostash` |
+| Sync and force-remove worktrees with uncommitted changes | `ez sync --force` |
 | Preview sync | `ez sync --dry-run` |
 | Restack after parent changes | `ez restack` |
 | Show stack tree (with CI status) | `ez log` |
 | Show stack tree as JSON | `ez log --json` |
 | Show current branch info | `ez status` |
 | Show status as JSON | `ez status --json` |
+
+### Worktrees
+
+| Intent | Command |
+|--------|---------|
+| Create stacked branch + worktree at `.worktrees/<name>` | `ez worktree create <name>` |
+| Create from specific base | `ez worktree create <name> --from <base>` |
+| Delete worktree and clean up branch | `ez worktree delete <name>` |
+| Force-delete worktree (discard uncommitted changes) | `ez worktree delete <name> --force` |
+| List all worktrees (name, branch, path) | `ez worktree list` |
 
 ## Agent-Specific Patterns
 
