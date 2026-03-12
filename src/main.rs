@@ -11,7 +11,7 @@ mod ui;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands};
+use cli::{Cli, Commands, WorktreeCommands};
 
 fn exit_code_for(e: &anyhow::Error) -> i32 {
     use crate::error::EzError;
@@ -85,7 +85,11 @@ fn run(cli: Cli) -> Result<()> {
             body.as_deref(),
             body_file.as_deref(),
         ),
-        Commands::Sync { dry_run, autostash } => cmd::sync::run(dry_run, autostash),
+        Commands::Sync {
+            dry_run,
+            autostash,
+            force,
+        } => cmd::sync::run(dry_run, autostash, force),
         Commands::Restack => cmd::restack::run(),
         Commands::Up => cmd::navigate::up(),
         Commands::Down => cmd::navigate::down(),
@@ -106,6 +110,13 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Ready => cmd::draft::run(true),
         Commands::PrLink => cmd::pr_link::run(),
         Commands::Pr => cmd::pr_view::run(),
+        Commands::Worktree(args) => match args.command {
+            WorktreeCommands::Create { name, from } => {
+                cmd::worktree::create(&name, from.as_deref())
+            }
+            WorktreeCommands::Delete { name, force } => cmd::worktree::delete(&name, force),
+            WorktreeCommands::List => cmd::worktree::list(),
+        },
     }
 }
 

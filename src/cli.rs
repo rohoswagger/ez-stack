@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -120,6 +120,10 @@ pub enum Commands {
         /// Stash uncommitted changes before sync and restore after
         #[arg(long)]
         autostash: bool,
+
+        /// Force-remove worktrees and branches even if they have uncommitted changes
+        #[arg(long)]
+        force: bool,
     },
 
     /// Rebase children onto the current branch tip
@@ -207,4 +211,39 @@ pub enum Commands {
 
     /// Open the current branch's PR in the browser
     Pr,
+
+    /// Manage git worktrees
+    Worktree(WorktreeArgs),
+}
+
+#[derive(Args)]
+pub struct WorktreeArgs {
+    #[command(subcommand)]
+    pub command: WorktreeCommands,
+}
+
+#[derive(Subcommand)]
+pub enum WorktreeCommands {
+    /// Create a stacked branch and check it out in a new worktree at .worktrees/<name>
+    Create {
+        /// Name for the branch and worktree directory
+        name: String,
+
+        /// Base branch to stack on (defaults to current branch)
+        #[arg(long, alias = "on")]
+        from: Option<String>,
+    },
+
+    /// Remove a worktree and its branch from the stack
+    Delete {
+        /// Worktree name (directory under .worktrees/)
+        name: String,
+
+        /// Force-remove even if the worktree has uncommitted changes
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// List all worktrees with their name, branch, and path
+    List,
 }

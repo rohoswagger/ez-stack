@@ -113,6 +113,7 @@ These features exist specifically to make ez useable by AI agents:
 | 0.1.7 | `ez sync` prunes merged worktrees; fix trunk fast-forward when current branch is trunk |
 | 0.1.8 | Fix `ez push` clobbering manual `gh pr edit --base` changes; only update PR base if stack parent is a git ancestor of the branch |
 | 0.1.9 | Fix `ez sync` non-fast-forward trunk warning (skip update when local trunk is equal/ahead/diverged); auto-clean stack entries for branches deleted outside ez |
+| 0.1.10 | `ez worktree create/delete/list`; `ez sync --force` to force-remove worktrees with uncommitted changes |
 
 ---
 

@@ -322,6 +322,19 @@ pub fn worktree_remove(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Force-remove a linked worktree at `path`, discarding any uncommitted changes.
+pub fn worktree_remove_force(path: &str) -> Result<()> {
+    run_git(&["worktree", "remove", "--force", path])?;
+    Ok(())
+}
+
+/// Add a linked worktree at `path` checking out `branch`.
+/// The branch must already exist.
+pub fn worktree_add(path: &str, branch: &str) -> Result<()> {
+    run_git(&["worktree", "add", path, branch])?;
+    Ok(())
+}
+
 /// Prune stale worktree admin entries (git worktree prune).
 pub fn worktree_prune() -> Result<()> {
     run_git(&["worktree", "prune"])?;

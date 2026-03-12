@@ -17,3 +17,4 @@ pub mod restack;
 pub mod status;
 pub mod submit;
 pub mod sync;
+pub mod worktree;

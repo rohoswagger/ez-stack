@@ -5,7 +5,7 @@ use crate::github;
 use crate::stack::StackState;
 use crate::ui;
 
-pub fn run(dry_run: bool, autostash: bool) -> Result<()> {
+pub fn run(dry_run: bool, autostash: bool, force: bool) -> Result<()> {
     let state = StackState::load()?;
 
     if dry_run {
@@ -66,7 +66,7 @@ pub fn run(dry_run: bool, autostash: bool) -> Result<()> {
         false
     };
 
-    let result = run_sync_inner();
+    let result = run_sync_inner(force);
 
     if stashed {
         if let Err(e) = git::stash_pop() {
@@ -79,7 +79,7 @@ pub fn run(dry_run: bool, autostash: bool) -> Result<()> {
     result
 }
 
-fn run_sync_inner() -> Result<()> {
+fn run_sync_inner(force: bool) -> Result<()> {
     let mut state = StackState::load()?;
     let original_branch = git::current_branch()?;
     let original_root = git::repo_root()?;
@@ -178,9 +178,16 @@ fn run_sync_inner() -> Result<()> {
 
         // Remove worktree for this branch (if any).
         if let Some(wt_path) = worktree_map.get(branch_name.as_str()) {
-            match git::worktree_remove(wt_path) {
+            let result = if force {
+                git::worktree_remove_force(wt_path)
+            } else {
+                git::worktree_remove(wt_path)
+            };
+            match result {
                 Ok(()) => ui::success(&format!("Removed worktree at `{wt_path}`")),
-                Err(e) => ui::warn(&format!("Could not remove worktree at `{wt_path}`: {e}")),
+                Err(e) => ui::warn(&format!(
+                    "Could not remove worktree at `{wt_path}`: {e}\n  Hint: use `ez sync --force` to discard uncommitted changes"
+                )),
             }
         }
 
@@ -277,7 +284,7 @@ mod tests {
     #[test]
     fn run_signatures_compile() {
         // Verifies the public API is correct at compile time.
-        let f: fn(bool, bool) -> anyhow::Result<()> = super::run;
+        let f: fn(bool, bool, bool) -> anyhow::Result<()> = super::run;
         let _ = std::mem::size_of_val(&f);
     }
 }
