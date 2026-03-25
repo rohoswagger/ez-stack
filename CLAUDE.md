@@ -109,6 +109,7 @@ These features exist specifically to make ez useable by AI agents:
 - Version: set in `Cargo.toml`, tagged as `v<semver>`
 - Release process: push tag `v*` → GitHub Actions builds binaries + `cargo publish`
 - Publish requires `CARGO_REGISTRY_TOKEN` repository secret
+- **NEVER reuse a version tag.** crates.io permanently rejects republished versions. If you need to add changes after a tag was pushed, bump to the next version. If a tag was accidentally deleted, restore it on the original commit — don't retag a different commit with the same version.
 
 ### Version History
 
