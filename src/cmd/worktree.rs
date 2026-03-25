@@ -6,9 +6,18 @@ use crate::github;
 use crate::stack::StackState;
 use crate::ui;
 
-/// Resolve the `.worktrees/<name>` path relative to the repo root.
+/// Resolve the `.worktrees/<name>` path relative to the main worktree root.
+/// Uses the first entry from `git worktree list` which is always the main worktree.
+fn main_worktree_root() -> Result<String> {
+    let worktrees = git::worktree_list()?;
+    worktrees
+        .first()
+        .map(|wt| wt.path.clone())
+        .ok_or_else(|| anyhow::anyhow!("could not determine main worktree root"))
+}
+
 fn worktree_path(name: &str) -> Result<String> {
-    let root = git::repo_root()?;
+    let root = main_worktree_root()?;
     Ok(format!("{root}/.worktrees/{name}"))
 }
 
@@ -51,14 +60,36 @@ pub fn create(name: &str, from: Option<&str>) -> Result<()> {
     ui::success(&format!(
         "Created branch `{name}` on top of `{parent}` in worktree `{wt_path}`"
     ));
+    ui::hint(&format!("cd {wt_path}"));
+
+    // Machine output: print path to stdout so agents/scripts can `cd $(ez worktree create <name>)`.
+    println!("{wt_path}");
 
     Ok(())
 }
 
-pub fn delete(name: &str, force: bool) -> Result<()> {
+pub fn delete(name: &str, force: bool, yes: bool) -> Result<()> {
     let mut state = StackState::load()?;
 
+    let repo_root = main_worktree_root()?;
     let wt_path = worktree_path(name)?;
+    let current_dir = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+        .unwrap_or_default();
+
+    // Detect if we're currently inside the worktree being deleted.
+    let inside_worktree = current_dir == wt_path || current_dir.starts_with(&format!("{wt_path}/"));
+
+    if inside_worktree && !yes {
+        ui::warn(&format!(
+            "You are inside the worktree `{name}` that you are about to delete"
+        ));
+        if !ui::confirm("Delete this worktree and switch to the repo root?") {
+            ui::info("Cancelled");
+            return Ok(());
+        }
+    }
 
     // Determine which branch is checked out in that worktree.
     let branch = git::worktree_list()?
@@ -134,6 +165,14 @@ pub fn delete(name: &str, force: bool) -> Result<()> {
     }
 
     let _ = git::worktree_prune();
+
+    // If we were inside the deleted worktree, print repo root to stdout
+    // so the caller can `cd $(ez worktree delete <name> --yes)`.
+    if inside_worktree {
+        ui::hint(&format!("cd {repo_root}"));
+        println!("{repo_root}");
+    }
+
     Ok(())
 }
 

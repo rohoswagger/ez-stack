@@ -89,9 +89,10 @@ ez-stack is a CLI for managing stacked PRs on GitHub. When `.git/ez/stack.json` 
 
 | Intent | Command |
 |--------|---------|
-| Create stacked branch + worktree at `.worktrees/<name>` | `ez worktree create <name>` |
-| Create from specific base | `ez worktree create <name> --from <base>` |
+| Create worktree + cd into it | `cd $(ez worktree create <name>)` |
+| Create from specific base + cd | `cd $(ez worktree create <name> --from <base>)` |
 | Delete worktree and clean up branch | `ez worktree delete <name>` |
+| Delete from inside the worktree (agent) | `cd $(ez worktree delete <name> --yes)` |
 | Force-delete worktree (discard uncommitted changes) | `ez worktree delete <name> --force` |
 | List all worktrees (name, branch, path) | `ez worktree list` |
 

@@ -39,8 +39,10 @@ pub fn run(message: &str, all: bool, if_changed: bool, paths: &[String]) -> Resu
     }
 
     git::commit(message)?;
+    let sha = git::rev_parse("HEAD")?;
+    let short_sha = &sha[..sha.len().min(7)];
     let subject = message.lines().next().unwrap_or(message);
-    ui::success(&format!("Committed on `{current}`: {subject}"));
+    ui::success(&format!("Committed {short_sha} on `{current}`: {subject}"));
 
     // Show diff stat so agents can verify what was committed.
     if let Ok(stat) = git::show_stat_head() {

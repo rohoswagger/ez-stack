@@ -15,6 +15,11 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize ez in the current git repository
+    #[command(after_help = "\
+Examples:
+  ez init
+  ez init --trunk main
+  ez init --trunk develop")]
     Init {
         /// Trunk branch name (auto-detected if not provided)
         #[arg(long)]
@@ -22,6 +27,12 @@ pub enum Commands {
     },
 
     /// Create a new stacked branch
+    #[command(after_help = "\
+Examples:
+  ez create feat/auth
+  ez create feat/auth -m \"add auth types\"
+  ez create feat/auth -am \"add auth types\"
+  ez create feat/auth --from main")]
     Create {
         /// Name for the new branch
         name: String,
@@ -40,6 +51,13 @@ pub enum Commands {
     },
 
     /// Commit staged changes and auto-restack children
+    #[command(after_help = "\
+Examples:
+  ez commit -m \"feat: add parser\"
+  ez commit -am \"feat: add parser\"
+  ez commit -m \"feat: add parser\" -m \"Implements recursive descent.\"
+  ez commit -m \"fix: typo\" -- src/main.rs
+  ez commit -m \"chore: format\" --if-changed")]
     Commit {
         /// Commit message (repeat -m for multi-paragraph, like git)
         #[arg(short, long, required = true)]
@@ -59,6 +77,11 @@ pub enum Commands {
     },
 
     /// Amend the current commit and auto-restack children
+    #[command(after_help = "\
+Examples:
+  ez amend
+  ez amend -m \"better message\"
+  ez amend -a")]
     Amend {
         /// New commit message (keeps existing if not provided)
         #[arg(short, long)]
@@ -70,6 +93,12 @@ pub enum Commands {
     },
 
     /// Push the current branch and create/update its PR
+    #[command(after_help = "\
+Examples:
+  ez push
+  ez push --title \"feat: add auth\" --body \"Adds login/logout.\"
+  ez push --draft
+  ez push --stack")]
     Push {
         /// Create a draft PR
         #[arg(long)]
@@ -97,6 +126,10 @@ pub enum Commands {
     },
 
     /// Push and create/update PRs for the entire stack
+    #[command(after_help = "\
+Examples:
+  ez submit
+  ez submit --draft")]
     Submit {
         /// Create draft PRs
         #[arg(long)]
@@ -116,6 +149,12 @@ pub enum Commands {
     },
 
     /// Fetch trunk, detect merged PRs, clean up, and restack
+    #[command(after_help = "\
+Examples:
+  ez sync
+  ez sync --autostash
+  ez sync --dry-run
+  ez sync --force")]
     Sync {
         /// Show what sync would do without making changes
         #[arg(long)]
@@ -146,12 +185,20 @@ pub enum Commands {
     Bottom,
 
     /// Switch to a branch by name or PR number (interactive if no argument)
+    #[command(after_help = "\
+Examples:
+  ez checkout feat/auth
+  ez checkout 42")]
     Checkout {
         /// Branch name or PR number to check out directly
         name: Option<String>,
     },
 
     /// Show the visual stack tree with PR status
+    #[command(after_help = "\
+Examples:
+  ez log
+  ez log --json")]
     Log {
         /// Output stack as JSON to stdout
         #[arg(long)]
@@ -159,6 +206,10 @@ pub enum Commands {
     },
 
     /// Show current branch info and stack position
+    #[command(after_help = "\
+Examples:
+  ez status
+  ez status --json")]
     Status {
         /// Output status as JSON to stdout
         #[arg(long)]
@@ -166,6 +217,11 @@ pub enum Commands {
     },
 
     /// Show diff of current branch vs its parent (what the PR reviewer sees)
+    #[command(after_help = "\
+Examples:
+  ez diff
+  ez diff --stat
+  ez diff --name-only")]
     Diff {
         /// Show only the diffstat summary
         #[arg(long)]
@@ -177,9 +233,18 @@ pub enum Commands {
     },
 
     /// Print the parent branch name to stdout
+    #[command(after_help = "\
+Examples:
+  ez parent
+  git diff $(ez parent)...HEAD --stat")]
     Parent,
 
     /// Delete a branch and reparent its children
+    #[command(after_help = "\
+Examples:
+  ez delete
+  ez delete feat/old-branch
+  ez delete --force")]
     Delete {
         /// Branch to delete (defaults to current branch)
         branch: Option<String>,
@@ -190,6 +255,10 @@ pub enum Commands {
     },
 
     /// Move (reparent) the current branch onto another branch
+    #[command(after_help = "\
+Examples:
+  ez move --onto main
+  ez move --onto feat/base")]
     Move {
         /// New parent branch
         #[arg(long)]
@@ -197,6 +266,11 @@ pub enum Commands {
     },
 
     /// Merge the bottom PR of the current stack via GitHub
+    #[command(after_help = "\
+Examples:
+  ez merge
+  ez merge --method squash
+  ez merge --method rebase")]
     Merge {
         /// Merge method: merge, squash, or rebase
         #[arg(long, default_value = "squash")]
@@ -204,6 +278,10 @@ pub enum Commands {
     },
 
     /// Edit the PR for the current branch
+    #[command(after_help = "\
+Examples:
+  ez pr-edit
+  ez pr-edit --title \"new title\" --body \"updated body\"")]
     PrEdit {
         /// New PR title
         #[arg(long)]
@@ -225,12 +303,21 @@ pub enum Commands {
     Ready,
 
     /// Print the PR URL for the current branch to stdout
+    #[command(after_help = "\
+Examples:
+  ez pr-link
+  open $(ez pr-link)")]
     PrLink,
 
     /// Open the current branch's PR in the browser
     Pr,
 
     /// Update ez to the latest version
+    #[command(after_help = "\
+Examples:
+  ez update
+  ez update --check
+  ez update --version v0.1.12")]
     Update {
         /// Install a specific version (e.g., v0.1.11)
         #[arg(long)]
@@ -254,6 +341,10 @@ pub struct WorktreeArgs {
 #[derive(Subcommand)]
 pub enum WorktreeCommands {
     /// Create a stacked branch and check it out in a new worktree at .worktrees/<name>
+    #[command(after_help = "\
+Examples:
+  cd $(ez worktree create feat/auth)
+  cd $(ez worktree create feat/auth --from main)")]
     Create {
         /// Name for the branch and worktree directory
         name: String,
@@ -264,6 +355,11 @@ pub enum WorktreeCommands {
     },
 
     /// Remove a worktree and its branch from the stack
+    #[command(after_help = "\
+Examples:
+  ez worktree delete feat/auth
+  ez worktree delete feat/auth --force
+  cd $(ez worktree delete feat/auth --yes)")]
     Delete {
         /// Worktree name (directory under .worktrees/)
         name: String,
@@ -271,6 +367,10 @@ pub enum WorktreeCommands {
         /// Force-remove even if the worktree has uncommitted changes
         #[arg(short, long)]
         force: bool,
+
+        /// Skip confirmation when deleting the worktree you are currently in
+        #[arg(short, long)]
+        yes: bool,
     },
 
     /// List all worktrees with their name, branch, and path

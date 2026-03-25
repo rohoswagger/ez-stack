@@ -26,7 +26,9 @@ pub fn run(message: Option<&str>, all: bool) -> Result<()> {
     }
 
     git::commit_amend(message)?;
-    ui::success("Amended commit");
+    let sha = git::rev_parse("HEAD")?;
+    let short_sha = &sha[..sha.len().min(7)];
+    ui::success(&format!("Amended commit {short_sha}"));
 
     // Show diff stat so agents can verify what was amended.
     if let Ok(stat) = git::show_stat_head() {

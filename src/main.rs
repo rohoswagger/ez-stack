@@ -175,7 +175,9 @@ fn run(cli: Cli) -> Result<()> {
             WorktreeCommands::Create { name, from } => {
                 cmd::worktree::create(&name, from.as_deref())
             }
-            WorktreeCommands::Delete { name, force } => cmd::worktree::delete(&name, force),
+            WorktreeCommands::Delete { name, force, yes } => {
+                cmd::worktree::delete(&name, force, yes)
+            }
             WorktreeCommands::List => cmd::worktree::list(),
         },
     }
