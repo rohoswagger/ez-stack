@@ -5,7 +5,7 @@ use crate::git;
 use crate::stack::StackState;
 use crate::ui;
 
-pub fn run(message: &str, all: bool, if_changed: bool) -> Result<()> {
+pub fn run(message: &str, all: bool, if_changed: bool, paths: &[String]) -> Result<()> {
     let mut state = StackState::load()?;
     let current = git::current_branch()?;
 
@@ -17,7 +17,15 @@ pub fn run(message: &str, all: bool, if_changed: bool) -> Result<()> {
         bail!(EzError::BranchNotInStack(current));
     }
 
-    if all {
+    if all && !paths.is_empty() {
+        bail!(EzError::UserMessage(
+            "cannot combine --all (-a) with path arguments\n  → Use `ez commit -am \"msg\"` to stage everything, or `ez commit -m \"msg\" -- <paths>` to stage specific files".to_string()
+        ));
+    }
+
+    if !paths.is_empty() {
+        git::add_paths(paths)?;
+    } else if all {
         git::add_all()?;
     }
 
@@ -31,7 +39,16 @@ pub fn run(message: &str, all: bool, if_changed: bool) -> Result<()> {
     }
 
     git::commit(message)?;
-    ui::success(&format!("Committed on `{current}`: {message}"));
+    let subject = message.lines().next().unwrap_or(message);
+    ui::success(&format!("Committed on `{current}`: {subject}"));
+
+    // Show diff stat so agents can verify what was committed.
+    if let Ok(stat) = git::show_stat_head() {
+        let stat = stat.trim();
+        if !stat.is_empty() {
+            eprintln!("{stat}");
+        }
+    }
 
     // Auto-restack children so they stay on top of the new HEAD.
     let new_head = git::rev_parse("HEAD")?;
@@ -55,7 +72,10 @@ pub fn run(message: &str, all: bool, if_changed: bool) -> Result<()> {
         ui::info(&format!("Restacking `{child}` onto `{current}`..."));
         let ok = git::rebase_onto(&new_head, &old_base, child)?;
         if !ok {
+            // Save progress so the user can fix conflicts and continue with `ez restack`.
+            state.save()?;
             git::checkout(&current)?;
+            ui::hint("Resolve the conflicts manually, then run `ez restack` to continue.");
             bail!(EzError::RebaseConflict(child.clone()));
         }
 

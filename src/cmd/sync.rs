@@ -19,6 +19,7 @@ pub fn run(dry_run: bool, autostash: bool, force: bool) -> Result<()> {
         let dry_worktree_map: std::collections::HashMap<String, String> = git::worktree_list()
             .unwrap_or_default()
             .into_iter()
+            .filter(|wt| wt.path.contains("/.worktrees/"))
             .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
             .collect();
 
@@ -114,9 +115,11 @@ fn run_sync_inner(force: bool) -> Result<()> {
     }
 
     // Build branch→worktree map for pruning merged branches.
+    // Only include worktrees under .worktrees/ — the main worktree must never be removed.
     let worktree_map: std::collections::HashMap<String, String> = git::worktree_list()
         .unwrap_or_default()
         .into_iter()
+        .filter(|wt| wt.path.contains("/.worktrees/"))
         .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
         .collect();
 

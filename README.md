@@ -97,6 +97,43 @@ ez log --json | jq '.[] | select(.needs_restack)'
 
 For agents that support local instruction files, [`AGENTS.md`](./AGENTS.md) contains a compact install-and-usage guide. For skills-based agents, install `ez-workflow` with `npx skills add` and use that skill directly.
 
+### Agent setup prompt
+
+Copy-paste this into any AI coding agent to get `ez` installed and configured:
+
+<blockquote>
+
+Install ez-stack, a CLI for stacked PRs on GitHub, and set it up in this repo.
+
+**Steps:**
+
+1. Install the binary: `cargo install ez-stack`
+2. Verify it works: `ez --version`
+3. Initialize in this repo: `ez init`
+4. Add these rules to the project's CLAUDE.md (or equivalent agent instructions file):
+
+```
+## ez-stack
+
+This repo uses `ez` for stacked PRs. When `.git/ez/stack.json` exists, use `ez` instead of raw git/gh commands:
+
+- `ez create <name>` instead of `git checkout -b`
+- `ez commit -m "msg"` instead of `git commit` (auto-restacks children, shows diff stat)
+- `ez commit -m "msg" -- path1 path2` to stage specific files
+- `ez diff --stat` instead of `git diff main...HEAD --stat`
+- `ez parent` instead of parsing `ez status` for the parent branch
+- `ez push` instead of `git push` / `gh pr create`
+- `ez submit` to push the entire stack
+- `ez sync --autostash` to sync with trunk
+
+Key flags: `--json` on status/log for machine output, `--if-changed` on commit to no-op when nothing staged, `--from <base>` on create to skip checkout.
+
+Output: every command appends `[ok | 45ms]` or `[exit:3 | 120ms]` to stderr.
+Exit codes: 0=ok, 2=gh error, 3=conflict, 4=stale ref, 5=usage error, 6=unstaged changes.
+```
+
+</blockquote>
+
 ## Commands
 
 ### Stack creation & editing
@@ -108,7 +145,9 @@ For agents that support local instruction files, [`AGENTS.md`](./AGENTS.md) cont
 | `ez create <name> -m "msg"` | Create branch and commit staged changes in one step |
 | `ez create <name> -am "msg"` | Create branch, stage all tracked changes, and commit |
 | `ez create <name> --from <base>` | Create branch from a specific base without checking it out first |
-| `ez commit -m <msg>` | Commit staged changes and restack children |
+| `ez commit -m <msg>` | Commit staged changes, restack children, show diff stat |
+| `ez commit -m "subj" -m "body"` | Multi-paragraph commit (repeated `-m`, like git) |
+| `ez commit -m <msg> -- <paths>` | Stage specific paths and commit |
 | `ez commit -m <msg> --if-changed` | Commit only if there are staged changes (no-op otherwise) |
 | `ez amend` | Amend the last commit and restack children |
 | `ez delete [<name>]` | Delete a branch from the stack and restack |
@@ -140,7 +179,7 @@ For agents that support local instruction files, [`AGENTS.md`](./AGENTS.md) cont
 | Command | Description |
 |---------|-------------|
 | `ez push` | Push **current branch only** and create/update its PR |
-| `ez push --title "..." --body "..."` | Push and set PR title/body on creation |
+| `ez push --title "..." --body "..."` | Push and set/update PR title and body |
 | `ez push --base <branch>` | Push and override the PR base branch |
 | `ez submit` | Push **all branches** in the stack and create/update all PRs |
 | `ez pr` | Open the current branch's PR in the browser |
@@ -151,7 +190,7 @@ For agents that support local instruction files, [`AGENTS.md`](./AGENTS.md) cont
 | `ez ready` | Mark the current PR as ready for review |
 | `ez merge` | Merge the bottom PR of the stack via GitHub |
 
-### Inspection
+### Inspection & diffing
 
 | Command | Description |
 |---------|-------------|
@@ -159,6 +198,10 @@ For agents that support local instruction files, [`AGENTS.md`](./AGENTS.md) cont
 | `ez log --json` | Show the full stack as a JSON array (machine-readable) |
 | `ez status` | Show the current branch and its position in the stack |
 | `ez status --json` | Show current branch info as JSON (machine-readable) |
+| `ez diff` | Show diff of current branch vs parent (what the PR reviewer sees) |
+| `ez diff --stat` | Show only the diffstat summary |
+| `ez diff --name-only` | Show only changed file names |
+| `ez parent` | Print the parent branch name to stdout (pipeable) |
 
 ### `ez push` vs `ez submit`
 

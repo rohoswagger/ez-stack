@@ -78,8 +78,36 @@ pub fn commit_amend(message: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Returns the `--stat` summary for HEAD (files changed, insertions, deletions).
+pub fn show_stat_head() -> Result<String> {
+    run_git(&["show", "--stat", "--no-patch", "--format=", "HEAD"])
+}
+
+/// Run `git diff` with the given range and optional flags.
+/// Returns the raw output (may be empty if no changes).
+pub fn diff(range: &str, stat: bool, name_only: bool) -> Result<String> {
+    let mut args = vec!["diff"];
+    if stat {
+        args.push("--stat");
+    }
+    if name_only {
+        args.push("--name-only");
+    }
+    args.push(range);
+    run_git(&args)
+}
+
 pub fn add_all() -> Result<()> {
     run_git(&["add", "-A"])?;
+    Ok(())
+}
+
+/// Stage specific paths.
+pub fn add_paths(paths: &[String]) -> Result<()> {
+    let mut args = vec!["add", "--"];
+    let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    args.extend(refs);
+    run_git(&args)?;
     Ok(())
 }
 

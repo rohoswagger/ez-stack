@@ -64,21 +64,14 @@ pub fn run(json: bool) -> Result<()> {
     }
 
     let current = git::current_branch()?;
-    let current_root = git::repo_root()?;
 
-    // Build map of branch → worktree_path for branches checked out in OTHER worktrees.
+    // Build map of branch → worktree_path for branches checked out in .worktrees/.
     // Called once here so render_tree doesn't make O(n) subprocess calls.
     let worktree_map: std::collections::HashMap<String, String> = git::worktree_list()
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|wt| {
-            // Exclude the current worktree; exclude detached HEADs (no branch).
-            if wt.path != current_root {
-                wt.branch.map(|b| (b, wt.path))
-            } else {
-                None
-            }
-        })
+        .filter(|wt| wt.path.contains("/.worktrees/"))
+        .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
         .collect();
 
     ui::header("Stack");
@@ -248,32 +241,37 @@ mod tests {
     }
 
     #[test]
-    fn test_worktree_map_excludes_current_root() {
+    fn test_worktree_map_only_includes_dot_worktrees() {
         use std::collections::HashMap;
 
-        let current_root = "/repo/main";
         let mock_worktrees: Vec<(String, Option<String>)> = vec![
-            ("/repo/main".to_string(), Some("main".to_string())),
-            ("/repo/feat-wt".to_string(), Some("feat/x".to_string())),
-            ("/repo/detached".to_string(), None),
+            ("/repo".to_string(), Some("main".to_string())),
+            (
+                "/repo/.worktrees/feat-x".to_string(),
+                Some("feat/x".to_string()),
+            ),
+            ("/somewhere/else".to_string(), Some("stray".to_string())),
+            ("/repo/.worktrees/detached".to_string(), None),
         ];
 
         let map: HashMap<String, String> = mock_worktrees
             .into_iter()
-            .filter_map(|(path, branch)| {
-                if path != current_root {
-                    branch.map(|b| (b, path))
-                } else {
-                    None
-                }
-            })
+            .filter(|(path, _)| path.contains("/.worktrees/"))
+            .filter_map(|(path, branch)| branch.map(|b| (b, path)))
             .collect();
 
         assert!(
             !map.contains_key("main"),
-            "current root must not appear in map"
+            "main worktree must not appear in map"
         );
-        assert!(!map.contains_key(""), "detached worktrees must not appear");
-        assert_eq!(map.get("feat/x").map(String::as_str), Some("/repo/feat-wt"));
+        assert!(
+            !map.contains_key("stray"),
+            "worktrees outside .worktrees/ must not appear"
+        );
+        assert_eq!(
+            map.get("feat/x").map(String::as_str),
+            Some("/repo/.worktrees/feat-x")
+        );
+        assert_eq!(map.len(), 1, "only the .worktrees/ branch should be in map");
     }
 }

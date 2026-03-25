@@ -40,9 +40,20 @@ ez-stack is a CLI for managing stacked PRs on GitHub. When `.git/ez/stack.json` 
 |--------|---------|
 | Commit (restacks children) | `ez commit -m "msg"` |
 | Stage all + commit | `ez commit -am "msg"` |
+| Multi-paragraph commit | `ez commit -m "subject" -m "body paragraph"` |
+| Stage specific paths + commit | `ez commit -m "msg" -- src/foo.rs src/bar.rs` |
 | No-op if nothing staged | `ez commit -m "msg" --if-changed` |
 | Amend last commit | `ez amend` |
 | Amend with new message | `ez amend -m "new msg"` |
+
+### Diffing and Inspecting
+
+| Intent | Command |
+|--------|---------|
+| Diff vs parent (PR reviewer view) | `ez diff` |
+| Diffstat only | `ez diff --stat` |
+| Changed file names only | `ez diff --name-only` |
+| Print parent branch name | `ez parent` |
 
 ### Pushing and PRs
 
@@ -73,6 +84,8 @@ ez-stack is a CLI for managing stacked PRs on GitHub. When `.git/ez/stack.json` 
 | Show status as JSON | `ez status --json` |
 
 ### Worktrees
+
+**All worktrees MUST live under `.worktrees/` in the repo root.** Never use `git worktree add` directly — always use `ez worktree create`, which places them at `.worktrees/<name>` automatically. `ez sync` only manages worktrees under `.worktrees/`; worktrees created elsewhere will not be cleaned up.
 
 | Intent | Command |
 |--------|---------|
@@ -119,6 +132,40 @@ ez checkout feat/my-branch
 ez checkout 42
 ```
 
+### Branch diff (self-review before push)
+
+```bash
+# See what the PR reviewer will see
+ez diff --stat
+# Just the file names (great for scoping work)
+ez diff --name-only
+# Full diff
+ez diff
+```
+
+### Get parent branch
+
+```bash
+# Print parent branch name (pipeable)
+ez parent
+# Use in scripts:
+git diff $(ez parent)...HEAD --stat
+```
+
+### Path-scoped commits
+
+```bash
+# Stage specific files and commit (no raw git add needed)
+ez commit -m "fix: update parser" -- src/parser.rs tests/parser_test.rs
+```
+
+### Multi-line commit messages
+
+```bash
+# Repeated -m flags join with blank line (like git)
+ez commit -m "feat: add parser" -m "Implements the recursive descent parser for config files."
+```
+
 ### Open PR in browser
 
 ```bash
@@ -126,6 +173,44 @@ ez pr
 # Or get just the URL for scripting:
 open $(ez pr-link)
 ```
+
+## Output Format
+
+Every command appends a status line to stderr:
+
+```
+[ok | 45ms]        ← success
+[exit:3 | 120ms]   ← failure with exit code
+```
+
+Use this to:
+- **Branch on exit status** without parsing error messages
+- **Learn command cost** — `12ms` = cheap (call freely), `3.2s` = moderate, `45s` = expensive
+
+### Progressive Help Discovery
+
+You don't need to load all documentation. Discover on-demand:
+
+```bash
+ez                    # Level 0: list all commands (exit 0)
+ez worktree           # Level 1: list subcommands (exit 0)
+ez create --help      # Level 2: full parameter details (exit 0)
+```
+
+Discovery commands always exit 0. Errors always include what to do next.
+
+### Commit Output
+
+`ez commit` and `ez amend` print the diff stat after committing:
+
+```
+✓ Committed on `feat/x`: add parser
+ src/parser.rs | 42 ++++++++++++
+ 1 file changed, 42 insertions(+)
+[ok | 85ms]
+```
+
+No need to run `git show --stat` separately.
 
 ## Exit Codes
 
@@ -145,18 +230,21 @@ open $(ez pr-link)
 # 1. Create a feature branch from a specific base
 ez create feat/my-feature --from main
 
-# 2. Make changes, commit (auto-restacks children)
-ez commit -am "feat: implement my feature"
+# 2. Make changes, commit specific files (auto-restacks children, shows diff stat)
+ez commit -m "feat: implement my feature" -- src/feature.rs tests/feature_test.rs
 
-# 3. Push and create PR
+# 3. Self-review: check what the PR will look like
+ez diff --stat
+
+# 4. Push and create PR
 ez push --title "feat: my feature"
 
-# 4. After trunk moves, sync without losing work
+# 5. After trunk moves, sync without losing work
 ez sync --autostash
 
-# 5. After PR merges, clean up
+# 6. After PR merges, clean up
 ez sync
 
-# 6. Check stack state programmatically
+# 7. Check stack state programmatically
 ez log --json | jq '.[] | select(.needs_restack)'
 ```

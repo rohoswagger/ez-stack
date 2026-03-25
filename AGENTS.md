@@ -34,7 +34,10 @@ This installs the workflow defined in [`SKILL.md`](./SKILL.md).
 When `.git/ez/stack.json` exists, prefer these commands:
 
 - Create branch: `ez create <name>`
-- Commit changes: `ez commit -m "msg"`
+- Commit changes: `ez commit -m "msg"` (shows diff stat, auto-restacks)
+- Commit specific files: `ez commit -m "msg" -- path1 path2`
+- Diff vs parent: `ez diff --stat` or `ez diff --name-only`
+- Get parent branch: `ez parent`
 - Push current branch and create/update PR: `ez push`
 - Push the stack: `ez submit`
 - Sync after trunk changes or merges: `ez sync` or `ez sync --autostash`
@@ -42,10 +45,18 @@ When `.git/ez/stack.json` exists, prefer these commands:
 
 Avoid these raw commands in an `ez`-managed repo:
 
-- `git checkout -b ...`
-- `git commit -m ...`
-- `git push`
-- `gh pr create`
+- `git checkout -b ...` → `ez create`
+- `git commit -m ...` → `ez commit -m`
+- `git push` → `ez push`
+- `gh pr create` → `ez push`
+- `git diff main...HEAD` → `ez diff`
+
+## Output format
+
+Every command appends a status line to stderr: `[ok | 45ms]` or `[exit:3 | 120ms]`.
+Use this to branch on exit status and learn command cost.
+
+Discovery: `ez` (no args) lists all commands (exit 0). `ez <command> --help` shows full details.
 
 ## Good agent patterns
 
@@ -56,8 +67,20 @@ test -f .git/ez/stack.json && echo "ez-managed"
 # Create from a specific base branch
 ez create feat/my-change --from main
 
+# Stage specific files and commit
+ez commit -m "fix: update parser" -- src/parser.rs
+
+# Multi-paragraph commit message
+ez commit -m "feat: add parser" -m "Implements recursive descent parsing."
+
 # Commit only if there are staged changes
 ez commit -m "chore: update" --if-changed
+
+# Self-review before push
+ez diff --stat
+
+# Get parent branch name for scripting
+ez parent
 
 # Sync safely with a dirty working tree
 ez sync --autostash

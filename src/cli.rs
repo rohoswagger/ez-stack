@@ -41,9 +41,9 @@ pub enum Commands {
 
     /// Commit staged changes and auto-restack children
     Commit {
-        /// Commit message
-        #[arg(short, long)]
-        message: String,
+        /// Commit message (repeat -m for multi-paragraph, like git)
+        #[arg(short, long, required = true)]
+        message: Vec<String>,
 
         /// Stage all changes before committing
         #[arg(short, long)]
@@ -52,6 +52,10 @@ pub enum Commands {
         /// No-op (exit 0) if there is nothing to commit
         #[arg(long)]
         if_changed: bool,
+
+        /// Stage only these paths before committing
+        #[arg(last = true)]
+        paths: Vec<String>,
     },
 
     /// Amend the current commit and auto-restack children
@@ -160,6 +164,20 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Show diff of current branch vs its parent (what the PR reviewer sees)
+    Diff {
+        /// Show only the diffstat summary
+        #[arg(long)]
+        stat: bool,
+
+        /// Show only changed file names
+        #[arg(long)]
+        name_only: bool,
+    },
+
+    /// Print the parent branch name to stdout
+    Parent,
 
     /// Delete a branch and reparent its children
     Delete {

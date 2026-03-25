@@ -6,13 +6,11 @@
 
 ## Product Mission
 
-**ez-stack makes stacked PRs on GitHub effortless for both humans and AI agents.**
+**ez-stack makes stacked PRs on GitHub effortless, primarily for AI coding agents.**
 
-The two audiences are equally important:
-- **Humans** need intuitive commands, good error messages, and a clear mental model
-- **AI agents** need machine-readable output, non-interactive flags, structured exit codes, and predictable behavior
+Agents are the primary audience. Humans benefit too, but when there's a design tradeoff, optimize for agents. Every command should be simpler, more intuitive, and more efficient than the raw git/gh equivalent — the goal is to make version control easier for agents, not to expose git's complexity through a different interface.
 
-Every feature should pass both tests: "Would a developer reach for this naturally?" and "Can an agent use this programmatically?"
+Every feature should be inherently more useful than the git commands it replaces.
 
 ---
 
@@ -36,6 +34,18 @@ Every feature should pass both tests: "Would a developer reach for this naturall
    - 4 = stale remote ref
    - 5 = usage error (on trunk, branch not tracked, etc.)
    - 6 = unstaged changes
+
+7. **Progressive help discovery.** The CLI is the agent's documentation. Three levels:
+   - Level 0: `ez` (no args) → full command list with one-line descriptions (exit 0)
+   - Level 1: `ez worktree` (no subcommand) → subcommand list (exit 0)
+   - Level 2: `ez create --help` → full parameter details
+   Discovery commands always exit 0. Agents drill down on-demand instead of loading all docs upfront.
+
+8. **Errors are navigation.** Every error message contains both "what went wrong" AND "what to do instead." Agents can't Google — the error itself must point to the fix. One-step correction, not blind guessing.
+
+9. **Consistent output metadata.** Every command appends `[ok | 45ms]` or `[exit:3 | 120ms]` to stderr. Agents learn command cost over time and can branch on exit status without parsing. This is always on — no `--agent` flag.
+
+10. **Show work by default.** `ez commit` prints the diff stat after committing. Agents need to verify what happened without running a separate command. Default to more information, not less.
 
 ---
 
@@ -114,6 +124,7 @@ These features exist specifically to make ez useable by AI agents:
 | 0.1.8 | Fix `ez push` clobbering manual `gh pr edit --base` changes; only update PR base if stack parent is a git ancestor of the branch |
 | 0.1.9 | Fix `ez sync` non-fast-forward trunk warning (skip update when local trunk is equal/ahead/diverged); auto-clean stack entries for branches deleted outside ez |
 | 0.1.10 | `ez worktree create/delete/list`; `ez sync --force` to force-remove worktrees with uncommitted changes |
+| 0.1.11 | Agent CLI UX: `ez diff`/`ez diff --stat`/`ez diff --name-only`, `ez parent`, `ez commit -m "a" -m "b"` multi-line, `ez commit -- <paths>` path-scoped staging, diff stat after commit/amend, timing metadata on all output (`[ok \| 45ms]`), progressive help discovery (bare commands exit 0), actionable error hints on all errors, worktree filter fix (only `.worktrees/`) |
 
 ---
 

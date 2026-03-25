@@ -85,6 +85,20 @@ pub fn dim(text: &str) -> String {
     format!("{}", text.dimmed())
 }
 
+pub fn exit_status(code: i32, elapsed: std::time::Duration) {
+    let duration = if elapsed.as_millis() < 1000 {
+        format!("{}ms", elapsed.as_millis())
+    } else {
+        format!("{:.1}s", elapsed.as_secs_f64())
+    };
+    let status = if code == 0 {
+        "ok".to_string()
+    } else {
+        format!("exit:{code}")
+    };
+    eprintln!("{}", format!("[{status} | {duration}]").dimmed());
+}
+
 pub fn confirm(prompt: &str) -> bool {
     let term = Term::stderr();
     eprint!("{} {} ", "?".blue().bold(), prompt);

@@ -28,6 +28,14 @@ pub fn run(message: Option<&str>, all: bool) -> Result<()> {
     git::commit_amend(message)?;
     ui::success("Amended commit");
 
+    // Show diff stat so agents can verify what was amended.
+    if let Ok(stat) = git::show_stat_head() {
+        let stat = stat.trim();
+        if !stat.is_empty() {
+            eprintln!("{stat}");
+        }
+    }
+
     // Auto-restack children of the current branch.
     let current_head = git::rev_parse("HEAD")?;
     let children = state.children_of(&current);
