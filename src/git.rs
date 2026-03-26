@@ -97,6 +97,12 @@ pub fn diff(range: &str, stat: bool, name_only: bool) -> Result<String> {
     run_git(&args)
 }
 
+/// Run `git cherry <upstream> <branch>` to find commits not yet applied upstream.
+/// Output lines starting with `- ` are already upstream; `+ ` are unique to the branch.
+pub fn cherry(upstream: &str, branch: &str) -> Result<String> {
+    run_git(&["cherry", upstream, branch])
+}
+
 pub fn add_all() -> Result<()> {
     run_git(&["add", "-A"])?;
     Ok(())
@@ -134,6 +140,22 @@ pub fn rebase_onto(new_base: &str, old_base: &str, branch: &str) -> Result<bool>
         // Some other rebase failure — try to abort and report
         let _ = run_git(&["rebase", "--abort"]);
         bail!(EzError::GitError(stderr));
+    }
+}
+
+/// Plain `git rebase <upstream> <branch>` — uses git's built-in patch-id detection
+/// to auto-skip commits already applied upstream. Returns true on success.
+pub fn rebase(upstream: &str, branch: &str) -> Result<bool> {
+    let (success, _, stderr) = run_git_with_status(&["rebase", upstream, branch])?;
+    if success {
+        Ok(true)
+    } else {
+        let _ = run_git(&["rebase", "--abort"]);
+        if stderr.contains("CONFLICT") || stderr.contains("conflict") {
+            Ok(false)
+        } else {
+            bail!(EzError::GitError(stderr));
+        }
     }
 }
 

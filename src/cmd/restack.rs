@@ -44,6 +44,37 @@ pub fn run() -> Result<()> {
             meta.parent_head = current_parent_tip;
             restacked += 1;
             ui::success(&format!("Restacked `{branch_name}` onto `{parent}`"));
+
+            // Auto-drop commits whose patches are already upstream.
+            if let Ok(cherry) = git::cherry(&parent, branch_name) {
+                let redundant: Vec<&str> = cherry.lines().filter(|l| l.starts_with("- ")).collect();
+                if !redundant.is_empty() {
+                    ui::info(&format!(
+                        "Dropping {} redundant commit(s) from `{branch_name}` (already in `{parent}`)",
+                        redundant.len()
+                    ));
+                    match git::rebase(&parent, branch_name) {
+                        Ok(true) => {
+                            ui::success(&format!(
+                                "Cleaned up `{branch_name}` — dropped redundant commits"
+                            ));
+                        }
+                        Ok(false) => {
+                            ui::warn(&format!(
+                                "Could not auto-drop redundant commits from `{branch_name}` (conflict)"
+                            ));
+                            ui::hint(&format!(
+                                "Run `git rebase {parent}` on `{branch_name}` manually and skip redundant commits"
+                            ));
+                        }
+                        Err(e) => {
+                            ui::warn(&format!(
+                                "Could not clean up redundant commits from `{branch_name}`: {e}"
+                            ));
+                        }
+                    }
+                }
+            }
         } else {
             git::checkout(&original_branch)?;
             state.save()?;
@@ -59,15 +90,6 @@ pub fn run() -> Result<()> {
 
     if restacked == 0 && skipped == 0 {
         ui::info("All branches are up to date — nothing to restack");
-    } else {
-        if restacked > 0 {
-            ui::success(&format!("Restacked {restacked} branch(es)"));
-        }
-        if skipped > 0 {
-            ui::info(&format!(
-                "Skipped {skipped} branch(es) checked out in other worktrees"
-            ));
-        }
     }
 
     Ok(())

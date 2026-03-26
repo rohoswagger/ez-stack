@@ -238,6 +238,39 @@ fn run_sync_inner(force: bool) -> Result<()> {
             meta.parent_head = current_parent_tip;
             restacked += 1;
             ui::success(&format!("Restacked `{branch_name}` onto `{parent}`"));
+
+            // Post-restack: use `git cherry` to detect commits whose patches
+            // are already upstream (landed via a different path). If found,
+            // run a plain `git rebase` which auto-drops them via patch-id matching.
+            if let Ok(cherry) = git::cherry(&parent, branch_name) {
+                let redundant: Vec<&str> = cherry.lines().filter(|l| l.starts_with("- ")).collect();
+                if !redundant.is_empty() {
+                    ui::info(&format!(
+                        "Dropping {} redundant commit(s) from `{branch_name}` (already in `{parent}`)",
+                        redundant.len()
+                    ));
+                    match git::rebase(&parent, branch_name) {
+                        Ok(true) => {
+                            ui::success(&format!(
+                                "Cleaned up `{branch_name}` — dropped redundant commits"
+                            ));
+                        }
+                        Ok(false) => {
+                            ui::warn(&format!(
+                                "Could not auto-drop redundant commits from `{branch_name}` (conflict)"
+                            ));
+                            ui::hint(&format!(
+                                "Run `git rebase {parent}` on `{branch_name}` manually and skip redundant commits"
+                            ));
+                        }
+                        Err(e) => {
+                            ui::warn(&format!(
+                                "Could not clean up redundant commits from `{branch_name}`: {e}"
+                            ));
+                        }
+                    }
+                }
+            }
         } else {
             // Save progress so the user can fix and continue.
             state.save()?;
