@@ -140,6 +140,7 @@ These features exist specifically to make ez useable by AI agents:
 | 0.1.23 | Fix `ez sync` not cleaning up merged branches in worktrees; add git-level merge detection (branch tip is ancestor of trunk) for branches without PR numbers |
 | 0.1.24 | Agent audit fixes: receipts on delete/move/merge/submit/worktree; fix delete.rs state corruption (git delete before state removal); worktree guard on delete; exit code 5 for all usage errors; branch/worktree list to stdout; amend hint fix |
 | 0.1.25 | `ez skill install` — bundles SKILL.md into the binary, installs to `.claude/skills/ez-workflow/SKILL.md` in the current repo. Agents in the repo auto-discover the skill. |
+| 0.1.26 | Fix `ez branch` to show trunk, all managed branches, and current branch even if untracked; hint when current branch was created outside ez |
 
 ---
 
