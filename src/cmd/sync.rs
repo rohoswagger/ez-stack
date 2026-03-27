@@ -151,8 +151,10 @@ fn run_sync_inner(force: bool) -> Result<()> {
             continue;
         }
 
-        // Only check branches that have a PR associated.
-        let merged = if pr_number.is_some() {
+        // Check if the branch is merged — two methods:
+        // 1. PR status via gh (if pr_number exists)
+        // 2. Git-level: branch tip is ancestor of trunk (catches merges without PRs)
+        let merged_via_pr = if pr_number.is_some() {
             let sp = ui::spinner(&format!("Checking PR status for `{branch_name}`..."));
             let status = github::get_pr_status(branch_name)?;
             sp.finish_and_clear();
@@ -160,6 +162,15 @@ fn run_sync_inner(force: bool) -> Result<()> {
         } else {
             false
         };
+
+        let merged_via_git = if !merged_via_pr {
+            // Branch tip is ancestor of trunk → all commits are in trunk
+            git::is_ancestor(branch_name, &state.trunk)
+        } else {
+            false
+        };
+
+        let merged = merged_via_pr || merged_via_git;
 
         if !merged {
             continue;

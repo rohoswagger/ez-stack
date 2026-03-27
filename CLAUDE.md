@@ -137,6 +137,7 @@ These features exist specifically to make ez useable by AI agents:
 | 0.1.20 | Auto-drop redundant commits during sync/restack via `git cherry` + `git rebase`; remove redundant restack summary |
 | 0.1.21 | Fix `ez sync` not switching off a branch before deleting it (stayed on cleaned-up branch) |
 | 0.1.22 | Mutation receipts: every mutating command (commit, amend, sync, restack, push, create) emits structured JSON receipt to stderr; `git::diff_stat_numbers()` helper; gh abstraction + scope-aware stacking documented as deferred |
+| 0.1.23 | Fix `ez sync` not cleaning up merged branches in worktrees; add git-level merge detection (branch tip is ancestor of trunk) for branches without PR numbers |
 
 ---
 
