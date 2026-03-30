@@ -302,6 +302,17 @@ pub fn log_oneline(range: &str, max: usize) -> Result<Vec<(String, String)>> {
         .collect())
 }
 
+/// Get seconds since the last commit on a branch. Returns None if no commits or error.
+pub fn log_oneline_time(branch: &str) -> Option<u64> {
+    let output = run_git(&["log", "-1", "--format=%ct", branch]).ok()?;
+    let timestamp: u64 = output.trim().parse().ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(now.saturating_sub(timestamp))
+}
+
 pub fn remote_branch_exists(remote: &str, branch: &str) -> bool {
     run_git(&["ls-remote", "--heads", remote, branch])
         .map(|out| !out.is_empty())
