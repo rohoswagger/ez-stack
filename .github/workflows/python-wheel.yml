@@ -76,6 +76,7 @@ jobs:
 
           # Set up package structure.
           cd python
+          cp ../README.md README.md
           mkdir -p ez_stack/bin
 
           # Copy binary into package.

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "ez-stack"
 dynamic = ["version"]
 description = "Stacked PRs for GitHub — agent-first CLI for parallel development"
-readme = "../README.md"
+readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.8"
 keywords = ["git", "github", "stacked-prs", "cli", "developer-tools", "ai-agents"]
