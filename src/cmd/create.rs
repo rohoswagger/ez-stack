@@ -96,12 +96,8 @@ pub fn run(
 
         state.save()?;
 
-        ui::success(&format!(
-            "Created branch `{name}` on top of `{parent}` in worktree `{wt_path}`"
-        ));
-        ui::hint(&format!("cd {wt_path}"));
+        ui::success(&format!("Created `{name}` → {wt_path}"));
 
-        // Emit post-create hook instructions for the agent.
         hooks::emit_hook("post-create", hook);
 
         ui::receipt(&serde_json::json!({
@@ -112,17 +108,13 @@ pub fn run(
             "worktree": wt_path,
         }));
 
-        // Print worktree path to stdout for shell cd.
         println!("{wt_path}");
     } else if from.is_some() {
         // Create at the tip of --from without switching branches.
         git::create_branch_at(name, &parent_head)?;
         state.add_branch(name, &parent, &parent_head);
         state.save()?;
-        ui::success(&format!(
-            "Created branch `{name}` from `{parent}` (not checked out)"
-        ));
-        ui::hint(&format!("Run `ez checkout {name}` to switch to it"));
+        ui::success(&format!("Created `{name}` from `{parent}`"));
 
         ui::receipt(&serde_json::json!({
             "cmd": "create",
@@ -135,7 +127,7 @@ pub fn run(
         git::create_branch(name)?;
         state.add_branch(name, &parent, &parent_head);
         state.save()?;
-        ui::success(&format!("Created branch `{name}` on top of `{parent}`"));
+        ui::success(&format!("Created `{name}` on `{parent}`"));
 
         ui::receipt(&serde_json::json!({
             "cmd": "create",
