@@ -1,0 +1,122 @@
+name: Python Wheel
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-wheel:
+    name: Build wheel (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            platform: manylinux_2_17_x86_64
+            python-platform: linux_x86_64
+
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            platform: manylinux_2_17_aarch64
+            python-platform: linux_aarch64
+
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            platform: macosx_10_12_x86_64
+            python-platform: macosx_10_12_x86_64
+
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            platform: macosx_11_0_arm64
+            python-platform: macosx_11_0_arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Extract version from Cargo.toml
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build wheel
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          PYTHON_PLATFORM="${{ matrix.python-platform }}"
+
+          # Set up package structure.
+          cd python
+          mkdir -p ez_stack/bin
+
+          # Copy binary into package.
+          cp ../target/$TARGET/release/ez ez_stack/bin/ez
+          chmod +x ez_stack/bin/ez
+
+          # Update version in __init__.py.
+          sed -i.bak "s/__version__ = \"0.0.0\"/__version__ = \"$VERSION\"/" ez_stack/__init__.py
+          rm -f ez_stack/__init__.py.bak
+
+          # Build the wheel.
+          pip install setuptools wheel
+          python setup.py bdist_wheel --plat-name "$PYTHON_PLATFORM"
+
+          # Rename to standard wheel naming.
+          ls dist/
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform }}
+          path: python/dist/*.whl
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build-wheel
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # For trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: wheels
+          pattern: wheel-*
+          merge-multiple: true
+
+      - name: List wheels
+        run: ls -la wheels/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: wheels/
