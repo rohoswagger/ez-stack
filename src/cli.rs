@@ -204,12 +204,15 @@ Examples:
     Bottom,
 
     /// Switch to a branch by name or PR number (interactive if no argument)
-    #[command(after_help = "\
+    #[command(
+        alias = "checkout",
+        after_help = "\
 Examples:
-  ez checkout feat/auth
-  ez checkout 42")]
-    Checkout {
-        /// Branch name or PR number to check out directly
+  ez switch feat/auth
+  ez switch 42"
+    )]
+    Switch {
+        /// Branch name or PR number to switch to directly
         name: Option<String>,
     },
 

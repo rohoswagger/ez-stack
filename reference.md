@@ -31,8 +31,8 @@ This is the full command reference. For the core workflow, see [SKILL.md](SKILL.
 
 | Intent | Command |
 |--------|---------|
-| Switch to branch | `ez checkout <name>` |
-| Switch by PR number | `ez checkout 42` |
+| Switch to branch | `ez switch <name>` |
+| Switch by PR number | `ez switch 42` |
 | Move up/down in stack | `ez up` / `ez down` / `ez top` / `ez bottom` |
 
 ## PR Management

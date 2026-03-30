@@ -151,9 +151,10 @@ fn run_sync_inner(force: bool) -> Result<()> {
             continue;
         }
 
-        // Check if the branch is merged — two methods:
+        // Check if the branch is merged — three methods:
         // 1. PR status via gh (if pr_number exists)
-        // 2. Git-level: branch tip is ancestor of trunk (catches merges without PRs)
+        // 2. Git-level: branch tip is ancestor of trunk (regular merge / fast-forward)
+        // 3. Diff-level: branch has no diff against trunk (squash merge — different SHAs but same content)
         let merged_via_pr = if pr_number.is_some() {
             let sp = ui::spinner(&format!("Checking PR status for `{branch_name}`..."));
             let status = github::get_pr_status(branch_name)?;
@@ -164,13 +165,23 @@ fn run_sync_inner(force: bool) -> Result<()> {
         };
 
         let merged_via_git = if !merged_via_pr {
-            // Branch tip is ancestor of trunk → all commits are in trunk
             git::is_ancestor(branch_name, &state.trunk)
         } else {
             false
         };
 
-        let merged = merged_via_pr || merged_via_git;
+        let merged_via_diff = if !merged_via_pr && !merged_via_git {
+            // Squash merges create new commits on trunk with the same content.
+            // The branch tip isn't an ancestor, but the diff is empty.
+            let range = format!("{}...{}", state.trunk, branch_name);
+            git::diff(&range, true, false)
+                .map(|stat| stat.trim().is_empty())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        let merged = merged_via_pr || merged_via_git || merged_via_diff;
 
         if !merged {
             continue;

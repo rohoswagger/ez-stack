@@ -123,4 +123,4 @@ Check `redundant_commits > 0` after sync/restack — means commits were auto-dro
 
 ## Advanced Commands
 
-See [reference.md](reference.md) for the full command reference: `ez commit`, `ez amend`, `ez diff`, `ez status`, `ez restack`, `ez log`, `ez move`, `ez merge`, `ez checkout`, `ez pr-edit`, `ez draft`/`ez ready`, `ez pr-link`, `ez update`, `ez setup`, `ez skill install`.
+See [reference.md](reference.md) for the full command reference: `ez commit`, `ez amend`, `ez diff`, `ez status`, `ez restack`, `ez log`, `ez move`, `ez merge`, `ez switch`, `ez pr-edit`, `ez draft`/`ez ready`, `ez pr-link`, `ez update`, `ez setup`, `ez skill install`.

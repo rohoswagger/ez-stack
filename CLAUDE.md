@@ -147,6 +147,7 @@ These features exist specifically to make ez useable by AI agents:
 | 0.2.1 | Declarative hooks: `.ez/hooks/<event>/<name>.md` are markdown instructions printed to agents (not executable scripts). `--hook <name>` selects a specific hook. Events: post-create, pre-push, post-sync, post-delete. Multiple named hooks per event. |
 | 0.2.2 | Version bump (v0.2.1 already published) |
 | 0.2.3 | Progressive hook discovery: `--hook` with no value lists available hooks. Agent flow: `--help` → sees `--hook`, tries `--hook` → gets list, picks one → gets instructions. |
+| 0.2.4 | Fix squash-merge detection in `ez sync`: adds diff-level check (empty diff against trunk) so squash-merged branches are cleaned up even when `is_ancestor` fails |
 
 ---
 
