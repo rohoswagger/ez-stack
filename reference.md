@@ -6,13 +6,19 @@ This is the full command reference. For the core workflow, see [SKILL.md](SKILL.
 
 | Intent | Command |
 |--------|---------|
-| Commit (restacks children) | `ez commit -m "msg"` |
+| Commit current staged set (restacks children) | `ez commit -m "msg"` |
 | Stage all + commit | `ez commit -am "msg"` |
 | Multi-paragraph commit | `ez commit -m "subject" -m "body"` |
 | Commit specific files only | `ez commit -m "msg" -- path1 path2` |
 | No-op if nothing staged | `ez commit -m "msg" --if-changed` |
 | Amend last commit | `ez amend` |
 | Amend with new message | `ez amend -m "new msg"` |
+
+Preferred workflow:
+
+- Focused commit: `ez commit -m "msg" -- path1 path2`
+- Bulk update: `ez commit -am "msg"`
+- Partial hunks: `git add -p` then `ez commit -m "msg"`
 
 ## Scope Guard
 

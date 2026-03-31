@@ -42,7 +42,7 @@ Examples:
         /// Name for the new branch
         name: String,
 
-        /// Commit staged changes with this message
+        /// Commit selected changes with this message
         #[arg(short, long)]
         message: Option<String>,
 
@@ -71,20 +71,22 @@ Examples:
         hook: Option<String>,
     },
 
-    /// Commit staged changes and auto-restack children
+    /// Commit selected changes and auto-restack children
     #[command(after_help = "\
 Examples:
-  ez commit -m \"feat: add parser\"
-  ez commit -am \"feat: add parser\"
-  ez commit -m \"feat: add parser\" -m \"Implements recursive descent.\"
   ez commit -m \"fix: typo\" -- src/main.rs
+  ez commit -m \"feat: add parser\" -- src/parser.rs src/ast.rs
+  ez commit -am \"feat: add parser\"
+  git add -p
+  ez commit -m \"fix: keep intended hunks only\"
+  ez commit -m \"feat: add parser\" -m \"Implements recursive descent.\"
   ez commit -m \"chore: format\" --if-changed")]
     Commit {
         /// Commit message (repeat -m for multi-paragraph, like git)
         #[arg(short, long, required = true)]
         message: Vec<String>,
 
-        /// Stage all changes before committing
+        /// Stage all tracked changes before committing
         #[arg(short, long)]
         all: bool,
 

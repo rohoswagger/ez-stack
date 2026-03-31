@@ -157,7 +157,9 @@ fn report_hook_changes(pre_modified: &[String]) {
     for file in &hook_changed {
         eprintln!("  {file}");
     }
-    ui::hint("Re-stage and retry: `ez commit -am \"...\"` or `git add -u && ez commit -m \"...\"`");
+    ui::hint(
+        "Re-stage and retry with `ez commit -m \"...\" -- <paths>`, `ez commit -am \"...\"`, or `git add -p && ez commit -m \"...\"`",
+    );
 }
 
 fn scope_mode_str(mode: ScopeMode) -> &'static str {

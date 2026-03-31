@@ -38,7 +38,7 @@ pub enum EzError {
     RebaseConflict(String),
 
     #[error(
-        "no staged changes to commit\n  → Stage files with `git add <files>`, or use `ez commit -am \"msg\"` to stage all"
+        "no changes selected for commit\n  → Preferred: `ez commit -m \"msg\" -- <paths>` for focused files\n  → Bulk update: `ez commit -am \"msg\"`\n  → Partial hunks: `git add -p` then `ez commit -m \"msg\"`"
     )]
     NothingToCommit,
 

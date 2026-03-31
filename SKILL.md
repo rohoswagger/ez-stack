@@ -19,7 +19,8 @@ ez sync --autostash              # 3. Sync: pull trunk, clean merged, restack
 ez delete feat/auth --yes        # 4. Done: remove worktree + branch + cd back
 ```
 
-That's it. No `git add`, no `git commit`, no `gh pr create`, no `cd`.
+That's it for normal flows. No raw `git commit`, no raw `git push`, no `gh pr create`, no manual `cd`.
+Use `git add -p` only when you need hunk-level selection before `ez commit`.
 
 ## Never use these directly
 
@@ -55,6 +56,17 @@ Hooks are markdown instructions for agents, not executable scripts. ez prints th
 ### Commit specific files (keeps changes focused)
 ```bash
 ez commit -m "feat: add types" -- src/types.rs src/mod.rs
+```
+
+### Bulk update when the whole tracked diff belongs together
+```bash
+ez commit -am "chore: regenerate fixtures"
+```
+
+### Partial hunks when one file mixes concerns
+```bash
+git add -p
+ez commit -m "fix: keep intended hunks only"
 ```
 
 ### Stack changes (multiple PRs from one workflow)
@@ -95,7 +107,9 @@ cd $(ez delete my-task --yes)   # removes worktree + branch, cd's to repo root
 - **One worktree per agent.** Never share a worktree.
 - **Always `--from main`** for independent tasks.
 - **Sync before push** to pick up other agents' merged work.
-- **Commit specific files** (`-- path1 path2`) not `-a` to avoid staging unintended changes.
+- **Preferred commit flow:** `ez commit -m "msg" -- path1 path2`
+- **Bulk update:** `ez commit -am "msg"`
+- **Partial hunks:** `git add -p` then `ez commit -m "msg"`
 
 ## Receipts
 

@@ -149,6 +149,7 @@ These features exist specifically to make ez useable by AI agents:
 | 0.2.3 | Progressive hook discovery: `--hook` with no value lists available hooks. Agent flow: `--help` → sees `--hook`, tries `--hook` → gets list, picks one → gets instructions. |
 | 0.2.4 | Fix squash-merge detection in `ez sync`: adds diff-level check (empty diff against trunk) so squash-merged branches are cleaned up even when `is_ancestor` fails |
 | 0.2.14 | Scope Guard: `ez create --scope ...`, `ez scope show|add|set|clear`, git-backed staged-file scope checks on `ez commit` and `ez push -am`, shared mutation guard path, scope metadata in `ez status --json` and receipts |
+| 0.2.15 | Make focused commits the intended workflow: CLI/help/docs/skill now default to `ez commit -m "..." -- <paths>`, keep `ez commit -am "..."` for bulk updates, and reserve `git add -p` for partial hunks |
 
 ---
 

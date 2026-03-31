@@ -43,8 +43,9 @@ This installs the workflow defined in [`SKILL.md`](./SKILL.md).
 When `.git/ez/stack.json` exists, prefer these commands:
 
 - Create branch: `ez create <name>`
-- Commit changes: `ez commit -m "msg"` (shows diff stat, auto-restacks)
 - Commit specific files: `ez commit -m "msg" -- path1 path2`
+- Commit all tracked changes: `ez commit -am "msg"`
+- Commit patch-selected hunks: `git add -p` then `ez commit -m "msg"`
 - Diff vs parent: `ez diff --stat` or `ez diff --name-only`
 - Get parent branch: `ez parent`
 - Push current branch and create/update PR: `ez push`
@@ -76,8 +77,15 @@ test -f .git/ez/stack.json && echo "ez-managed"
 # Create from a specific base branch
 ez create feat/my-change --from main
 
-# Stage specific files and commit
+# Preferred: stage specific files and commit in one step
 ez commit -m "fix: update parser" -- src/parser.rs
+
+# Bulk update: stage tracked files and commit in one step
+ez commit -am "chore: update generated fixtures"
+
+# Partial hunk selection stays in git
+git add -p
+ez commit -m "fix: keep only intended hunks"
 
 # Multi-paragraph commit message
 ez commit -m "feat: add parser" -m "Implements recursive descent parsing."

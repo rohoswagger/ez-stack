@@ -126,11 +126,17 @@ Use `--hook <name>` for project-specific hooks, or `--hook` alone to list availa
 
 | Command | Description |
 |---------|-------------|
-| `ez commit -m "msg"` | Commit + restack children |
+| `ez commit -m "msg"` | Commit the current staged set + restack children |
 | `ez commit -am "msg"` | Stage tracked files + commit |
 | `ez commit -m "msg" -- path1 path2` | Stage specific files + commit |
 | `ez commit --if-changed` | No-op if nothing staged |
 | `ez amend` | Amend last commit + restack |
+
+Intended workflow:
+
+- Focused commit: `ez commit -m "msg" -- path1 path2`
+- Bulk update: `ez commit -am "msg"`
+- Partial hunks: `git add -p` then `ez commit -m "msg"`
 
 ### Scope
 
