@@ -168,9 +168,10 @@ fn run_sync_inner(force: bool) -> Result<()> {
             false
         };
 
-        let merged_via_diff = if !merged_via_pr && !merged_via_git {
-            // Squash merges create new commits on trunk with the same content.
-            // The branch tip isn't an ancestor, but the diff is empty.
+        // Diff-level check: only for branches WITHOUT a PR.
+        // If a PR exists, the PR status is authoritative. An empty diff might just
+        // mean someone cherry-picked the changes, not that the PR was merged.
+        let merged_via_diff = if !merged_via_pr && !merged_via_git && pr_number.is_none() {
             let range = format!("{}...{}", state.trunk, branch_name);
             git::diff(&range, true, false)
                 .map(|stat| stat.trim().is_empty())
