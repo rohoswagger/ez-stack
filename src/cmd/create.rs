@@ -94,7 +94,11 @@ pub fn run(
             return Err(e);
         }
 
-        state.save()?;
+        if let Err(e) = state.save() {
+            let _ = git::worktree_remove(&wt_path);
+            let _ = git::delete_branch(name, true);
+            return Err(e);
+        }
 
         ui::success(&format!("Created `{name}` → {wt_path}"));
 
@@ -113,8 +117,13 @@ pub fn run(
         // Create at the tip of --from without switching branches.
         git::create_branch_at(name, &parent_head)?;
         state.add_branch(name, &parent, &parent_head);
-        state.save()?;
+        if let Err(e) = state.save() {
+            let _ = git::delete_branch(name, true);
+            return Err(e);
+        }
         ui::success(&format!("Created `{name}` from `{parent}`"));
+
+        hooks::emit_hook("post-create", hook);
 
         ui::receipt(&serde_json::json!({
             "cmd": "create",
@@ -126,8 +135,13 @@ pub fn run(
         // --no-worktree: original behavior — create and switch.
         git::create_branch(name)?;
         state.add_branch(name, &parent, &parent_head);
-        state.save()?;
+        if let Err(e) = state.save() {
+            let _ = git::delete_branch(name, true);
+            return Err(e);
+        }
         ui::success(&format!("Created `{name}` on `{parent}`"));
+
+        hooks::emit_hook("post-create", hook);
 
         ui::receipt(&serde_json::json!({
             "cmd": "create",

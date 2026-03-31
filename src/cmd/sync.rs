@@ -124,7 +124,16 @@ fn run_sync_inner(force: bool) -> Result<()> {
         .collect();
 
     // Detect merged PRs and clean up.
-    let managed_branches: Vec<String> = state.branches.keys().cloned().collect();
+    let managed_branches: Vec<String> = {
+        let mut order = state.topo_order();
+        // Also include branches not in topo order (orphaned branches).
+        for key in state.branches.keys() {
+            if !order.contains(key) {
+                order.push(key.clone());
+            }
+        }
+        order
+    };
     let mut cleaned = Vec::new();
 
     for branch_name in &managed_branches {
@@ -140,6 +149,17 @@ fn run_sync_inner(force: bool) -> Result<()> {
                     if let Ok(child) = state.get_branch_mut(child_name) {
                         child.parent = parent.clone();
                         child.parent_head = parent_tip.clone();
+                    }
+                }
+            } else {
+                // Parent also deleted — reparent children to trunk.
+                let trunk_name = state.trunk.clone();
+                if let Ok(trunk_tip) = git::rev_parse(&trunk_name) {
+                    for child_name in &children {
+                        if let Ok(child) = state.get_branch_mut(child_name) {
+                            child.parent = trunk_name.clone();
+                            child.parent_head = trunk_tip.clone();
+                        }
                     }
                 }
             }
@@ -217,7 +237,9 @@ fn run_sync_inner(force: bool) -> Result<()> {
 
         // If we're on the branch being deleted, switch to trunk first.
         if *branch_name == original_branch {
-            let _ = git::checkout(&state.trunk);
+            if let Err(e) = git::checkout(&state.trunk) {
+                ui::warn(&format!("Could not switch to trunk: {e}"));
+            }
         }
 
         // Delete local branch (ignore errors if already gone).
@@ -319,10 +341,12 @@ fn run_sync_inner(force: bool) -> Result<()> {
         }
     }
 
+    state.save()?;
+
     // Return to original branch if it still exists.
     // If it was cleaned up (merged), fall back to trunk — but trunk might be in another worktree.
     if git::branch_exists(&original_branch) {
-        git::checkout(&original_branch)?;
+        let _ = git::checkout(&original_branch);
     } else {
         match git::checkout(&state.trunk) {
             Ok(()) => ui::info(&format!(
@@ -335,8 +359,6 @@ fn run_sync_inner(force: bool) -> Result<()> {
             )),
         }
     }
-
-    state.save()?;
 
     if cleaned.is_empty() && restacked == 0 {
         ui::info("Everything is up to date");

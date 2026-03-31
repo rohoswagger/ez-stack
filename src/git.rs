@@ -482,7 +482,8 @@ pub fn main_worktree_root() -> Result<String> {
 /// Compute the `.worktrees/<name>` path relative to the main worktree root.
 pub fn worktree_path(name: &str) -> Result<String> {
     let root = main_worktree_root()?;
-    Ok(format!("{root}/.worktrees/{name}"))
+    let safe_name = name.replace('/', "-");
+    Ok(format!("{root}/.worktrees/{safe_name}"))
 }
 
 /// Run `git -C <dir> status --porcelain` and return counts of (staged, modified, untracked).
