@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 
+use crate::cmd::checkout::stale_switch_target_warning;
 use crate::error::EzError;
 use crate::git;
 use crate::stack::StackState;
@@ -49,12 +50,17 @@ pub fn up() -> Result<()> {
 
     let children = state.children_of(&current);
     let target = up_target(&children)?;
+    let stale_warning = stale_switch_target_warning(&state, &target)?;
     git::checkout(&target)?;
     ui::success(&format!(
         "Moved up: {} → {}",
         ui::branch_display(&current, false),
         ui::branch_display(&target, true),
     ));
+    if let Some(warning) = stale_warning {
+        ui::warn(&warning);
+        ui::hint("Run `ez restack`");
+    }
 
     Ok(())
 }
@@ -64,12 +70,17 @@ pub fn down() -> Result<()> {
     let current = git::current_branch()?;
 
     let parent = down_target(&state, &current)?;
+    let stale_warning = stale_switch_target_warning(&state, &parent)?;
     git::checkout(&parent)?;
     ui::success(&format!(
         "Moved down: {} → {}",
         ui::branch_display(&current, false),
         ui::branch_display(&parent, true),
     ));
+    if let Some(warning) = stale_warning {
+        ui::warn(&warning);
+        ui::hint("Run `ez restack`");
+    }
 
     Ok(())
 }
@@ -79,6 +90,7 @@ pub fn top() -> Result<()> {
     let current = git::current_branch()?;
 
     let target = top_target(&state, &current)?;
+    let stale_warning = stale_switch_target_warning(&state, &target)?;
 
     git::checkout(&target)?;
     ui::success(&format!(
@@ -86,6 +98,10 @@ pub fn top() -> Result<()> {
         ui::branch_display(&current, false),
         ui::branch_display(&target, true),
     ));
+    if let Some(warning) = stale_warning {
+        ui::warn(&warning);
+        ui::hint("Run `ez restack`");
+    }
 
     Ok(())
 }
@@ -95,6 +111,7 @@ pub fn bottom() -> Result<()> {
     let current = git::current_branch()?;
 
     let target = bottom_target(&state, &current)?;
+    let stale_warning = stale_switch_target_warning(&state, &target)?;
 
     git::checkout(&target)?;
     ui::success(&format!(
@@ -102,6 +119,10 @@ pub fn bottom() -> Result<()> {
         ui::branch_display(&current, false),
         ui::branch_display(&target, true),
     ));
+    if let Some(warning) = stale_warning {
+        ui::warn(&warning);
+        ui::hint("Run `ez restack`");
+    }
 
     Ok(())
 }

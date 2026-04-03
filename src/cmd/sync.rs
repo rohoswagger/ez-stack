@@ -147,38 +147,15 @@ fn run_sync_inner(force: bool) -> Result<()> {
     ui::info(&format!("Fetching from `{}`...", state.remote));
     git::fetch(&state.remote)?;
 
-    // Update trunk to latest. git fetch above already refreshed origin/<trunk>.
-    // Only attempt to fast-forward local trunk when it is strictly behind the remote-tracking
-    // ref — skip silently if local is equal, ahead, or diverged (nothing safe to do).
-    let remote_tracking = format!("{}/{}", state.remote, state.trunk);
-    let trunk_is_behind = git::is_ancestor(&state.trunk, &remote_tracking)
-        && !git::is_ancestor(&remote_tracking, &state.trunk);
-    if trunk_is_behind {
-        if original_branch == state.trunk {
-            // Currently on trunk: fast-forward via merge (fetch refupdate won't update HEAD).
-            let remote_ref = format!("{}/{}", state.remote, state.trunk);
-            match git::fast_forward_merge(&remote_ref) {
-                Ok(()) => ui::info(&format!("Updated `{}` to latest", state.trunk)),
-                Err(e) => ui::warn(&format!("Could not update `{}` — {e}", state.trunk)),
-            }
-        } else {
-            let remote_ref = format!("{}/{}", state.remote, state.trunk);
-            match git::branch_checked_out_elsewhere(&state.trunk, &original_root) {
-                Ok(Some(trunk_worktree)) => {
-                    match git::fast_forward_merge_at(&trunk_worktree, &remote_ref) {
-                        Ok(()) => ui::info(&format!("Updated `{}` to latest", state.trunk)),
-                        Err(e) => ui::warn(&format!("Could not update `{}` — {e}", state.trunk)),
-                    }
-                }
-                _ => {
-                    // Not on trunk: update ref directly without checkout.
-                    match git::fetch_refupdate(&state.remote, &state.trunk) {
-                        Ok(()) => ui::info(&format!("Updated `{}` to latest", state.trunk)),
-                        Err(e) => ui::warn(&format!("Could not update `{}` — {e}", state.trunk)),
-                    }
-                }
-            }
-        }
+    match git::update_branch_to_latest_remote(
+        &state.remote,
+        &state.trunk,
+        &original_branch,
+        &original_root,
+    ) {
+        Ok(true) => ui::info(&format!("Updated `{}` to latest", state.trunk)),
+        Ok(false) => {}
+        Err(e) => ui::warn(&format!("Could not update `{}` — {e}", state.trunk)),
     }
 
     // Build branch→worktree map for pruning merged branches.
@@ -236,25 +213,13 @@ fn run_sync_inner(force: bool) -> Result<()> {
                 continue;
             }
             let parent = parent.clone().expect("managed branch should have a parent");
-            let children = state.children_of(branch_name);
-            if let Ok(parent_tip) = git::rev_parse(&parent) {
-                for child_name in &children {
-                    if let Ok(child) = state.get_branch_mut(child_name) {
-                        child.parent = parent.clone();
-                        child.parent_head = parent_tip.clone();
-                    }
-                }
+            if git::branch_exists(&parent) {
+                let _ = state.reparent_children_preserving_parent_head(branch_name, &parent)?;
             } else {
-                // Parent also deleted — reparent children to trunk.
+                // Parent also deleted — reparent children to trunk, but keep their old base SHA
+                // so a later restack still knows what to rebase from.
                 let trunk_name = state.trunk.clone();
-                if let Ok(trunk_tip) = git::rev_parse(&trunk_name) {
-                    for child_name in &children {
-                        if let Ok(child) = state.get_branch_mut(child_name) {
-                            child.parent = trunk_name.clone();
-                            child.parent_head = trunk_tip.clone();
-                        }
-                    }
-                }
+                let _ = state.reparent_children_preserving_parent_head(branch_name, &trunk_name)?;
             }
             state.remove_branch(branch_name);
             ui::info(&format!("Cleaned up `{branch_name}` (deleted outside ez)"));
@@ -385,14 +350,7 @@ fn run_sync_inner(force: bool) -> Result<()> {
 
         if is_managed {
             let parent_name = parent.clone().expect("managed branch should have a parent");
-            let children = state.children_of(branch_name);
-            let parent_tip = git::rev_parse(&parent_name)?;
-
-            for child_name in &children {
-                let child = state.get_branch_mut(child_name)?;
-                child.parent = parent_name.clone();
-                child.parent_head = parent_tip.clone();
-            }
+            let _ = state.reparent_children_preserving_parent_head(branch_name, &parent_name)?;
 
             state.remove_branch(branch_name);
         }

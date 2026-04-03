@@ -11,6 +11,19 @@ pub fn run() -> Result<()> {
     let original_branch = git::current_branch()?;
     let current_root = git::repo_root()?;
 
+    ui::info(&format!("Fetching from `{}`...", state.remote));
+    git::fetch(&state.remote)?;
+    match git::update_branch_to_latest_remote(
+        &state.remote,
+        &state.trunk,
+        &original_branch,
+        &current_root,
+    ) {
+        Ok(true) => ui::info(&format!("Updated `{}` to latest", state.trunk)),
+        Ok(false) => {}
+        Err(e) => ui::warn(&format!("Could not update `{}` — {e}", state.trunk)),
+    }
+
     let order = state.topo_order();
     let mut restacked = 0;
     let mut skipped = 0;

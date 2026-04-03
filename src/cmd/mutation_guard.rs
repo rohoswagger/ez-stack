@@ -6,6 +6,12 @@ use crate::scope::{ScopeDecision, evaluate_scope};
 use crate::stack::{BranchMeta, ScopeMode, StackState};
 use crate::ui;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageMode {
+    Tracked,
+    All,
+}
+
 #[derive(Debug, Clone)]
 pub struct CommitOutcome {
     pub current: String,
@@ -26,7 +32,7 @@ pub struct ScopeReceiptData {
 
 pub fn commit_with_guard(
     message: &str,
-    all: bool,
+    stage_mode: Option<StageMode>,
     if_changed: bool,
     paths: &[String],
 ) -> Result<Option<CommitOutcome>> {
@@ -41,16 +47,19 @@ pub fn commit_with_guard(
         bail!(EzError::BranchNotInStack(current));
     }
 
-    if all && !paths.is_empty() {
+    if stage_mode.is_some() && !paths.is_empty() {
         bail!(EzError::UserMessage(
-            "cannot combine --all (-a) with path arguments\n  → Use `ez commit -am \"msg\"` to stage everything, or `ez commit -m \"msg\" -- <paths>` to stage specific files".to_string()
+            "cannot combine --all (-a) or --all-files (-A) with path arguments\n  → Use `ez commit -am \"msg\"` for tracked files, `ez commit -Am \"msg\"` to include untracked files, or `ez commit -m \"msg\" -- <paths>` to stage specific files".to_string()
         ));
     }
 
     if !paths.is_empty() {
         git::add_paths(paths)?;
-    } else if all {
-        git::add_all()?;
+    } else if let Some(stage_mode) = stage_mode {
+        match stage_mode {
+            StageMode::Tracked => git::add_all()?,
+            StageMode::All => git::add_all_including_untracked()?,
+        }
     }
 
     if if_changed && !git::has_staged_changes()? {
@@ -158,7 +167,7 @@ fn report_hook_changes(pre_modified: &[String]) {
         eprintln!("  {file}");
     }
     ui::hint(
-        "Re-stage and retry with `ez commit -m \"...\" -- <paths>`, `ez commit -am \"...\"`, or `git add -p && ez commit -m \"...\"`",
+        "Re-stage and retry with `ez commit -m \"...\" -- <paths>`, `ez commit -am \"...\"`, `ez commit -Am \"...\"`, or `git add -p && ez commit -m \"...\"`",
     );
 }
 
@@ -228,8 +237,7 @@ mod tests {
             .save()
             .expect("save state");
 
-        let err =
-            commit_with_guard("msg", false, false, &[]).expect_err("trunk commit should fail");
+        let err = commit_with_guard("msg", None, false, &[]).expect_err("trunk commit should fail");
         assert!(matches!(
             err.downcast_ref::<EzError>(),
             Some(EzError::OnTrunk)
@@ -247,7 +255,7 @@ mod tests {
         git::create_branch("scratch").expect("create scratch");
 
         let err =
-            commit_with_guard("msg", false, false, &[]).expect_err("unmanaged branch should fail");
+            commit_with_guard("msg", None, false, &[]).expect_err("unmanaged branch should fail");
         assert!(matches!(
             err.downcast_ref::<EzError>(),
             Some(EzError::BranchNotInStack(name)) if name == "scratch"
@@ -260,7 +268,7 @@ mod tests {
         let repo = init_managed_feature_repo("mutation-if-changed", None, None);
         let _cwd = CwdGuard::enter(&repo);
 
-        let outcome = commit_with_guard("msg", false, true, &[]).expect("guard should succeed");
+        let outcome = commit_with_guard("msg", None, true, &[]).expect("guard should succeed");
         assert!(outcome.is_none());
     }
 
@@ -270,11 +278,16 @@ mod tests {
         let repo = init_managed_feature_repo("mutation-all-paths", None, None);
         let _cwd = CwdGuard::enter(&repo);
 
-        let err = commit_with_guard("msg", true, false, &["tracked.txt".to_string()])
-            .expect_err("all plus paths should fail");
+        let err = commit_with_guard(
+            "msg",
+            Some(StageMode::Tracked),
+            false,
+            &["tracked.txt".to_string()],
+        )
+        .expect_err("all plus paths should fail");
         assert!(
             err.to_string()
-                .contains("cannot combine --all (-a) with path arguments"),
+                .contains("cannot combine --all (-a) or --all-files (-A) with path arguments"),
             "unexpected error: {err:#}"
         );
     }
@@ -292,7 +305,7 @@ mod tests {
 
         let err = commit_with_guard(
             "feat: wrong scope",
-            false,
+            None,
             false,
             &["src/billing/invoice.rs".to_string()],
         )
@@ -314,7 +327,7 @@ mod tests {
 
         let outcome = commit_with_guard(
             "feat: add selected file",
-            false,
+            None,
             false,
             &["selected.txt".to_string()],
         )
@@ -331,5 +344,28 @@ mod tests {
             "selected.txt"
         );
         assert_eq!(git::working_tree_status(), (0, 0, 1));
+    }
+
+    #[test]
+    fn commit_with_guard_all_files_stages_untracked_files() {
+        let _guard = take_env_lock();
+        let repo = init_managed_feature_repo("mutation-all-files", None, None);
+        let _cwd = CwdGuard::enter(&repo);
+        write_file(&repo, "new.txt", "new\n");
+
+        let outcome = commit_with_guard("feat: add new file", Some(StageMode::All), false, &[])
+            .expect("commit should succeed")
+            .expect("commit outcome");
+
+        assert_eq!(outcome.files_changed, 1);
+        assert_eq!(
+            cmd_output(
+                &repo,
+                "git",
+                &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]
+            ),
+            "new.txt"
+        );
+        assert_eq!(git::working_tree_status(), (0, 0, 0));
     }
 }

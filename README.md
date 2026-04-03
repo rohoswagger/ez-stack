@@ -154,7 +154,7 @@ Intended workflow:
 | `ez sync` | Fetch trunk, clean merged branches, restack |
 | `ez sync --autostash` | Stash before sync, restore after |
 | `ez sync --dry-run` | Preview what sync would do |
-| `ez restack` | Rebase children onto current branch tip |
+| `ez restack` | Fetch trunk, refresh it locally, and rebase stale branches onto their latest parent tips |
 
 ### Navigation
 

@@ -49,14 +49,9 @@ pub fn run(branch: Option<&str>, force: bool, yes: bool) -> Result<()> {
     let parent = meta.parent.clone();
     let pr_number = meta.pr_number;
 
-    let parent_head_for_children = git::rev_parse(&target)?;
-
     // Reparent children.
-    let children = state.children_of(&target);
+    let children = state.reparent_children_preserving_parent_head(&target, &parent)?;
     for child_name in &children {
-        let child = state.get_branch_mut(child_name)?;
-        child.parent = parent.clone();
-        child.parent_head = parent_head_for_children.clone();
         ui::info(&format!("Reparented `{child_name}` onto `{parent}`"));
     }
 
@@ -148,8 +143,6 @@ fn delete_with_worktree(
     let meta = state.get_branch(target)?;
     let parent = meta.parent.clone();
     let pr_number = meta.pr_number;
-    let parent_head_for_children =
-        git::rev_parse(target).unwrap_or_else(|_| meta.parent_head.clone());
     let children = state.children_of(target);
     let child_prs: Vec<(String, Option<u64>)> = children
         .iter()
@@ -206,11 +199,8 @@ fn delete_with_worktree(
     // --- Phase 3: Mutate stack state ---
 
     // Reparent children.
+    let children = state.reparent_children_preserving_parent_head(target, &parent)?;
     for child_name in &children {
-        if let Ok(child) = state.get_branch_mut(child_name) {
-            child.parent = parent.clone();
-            child.parent_head = parent_head_for_children.clone();
-        }
         ui::info(&format!("Reparented `{child_name}` onto `{parent}`"));
     }
 

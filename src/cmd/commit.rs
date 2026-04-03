@@ -1,15 +1,30 @@
 use anyhow::{Result, bail};
 
 use crate::cmd::mutation_guard;
+use crate::cmd::mutation_guard::StageMode;
 use crate::cmd::rebase_conflict;
 use crate::error::EzError;
 use crate::git;
 use crate::stack::StackState;
 use crate::ui;
 
-pub fn run(message: &str, all: bool, if_changed: bool, paths: &[String]) -> Result<()> {
+pub fn run(
+    message: &str,
+    all: bool,
+    all_files: bool,
+    if_changed: bool,
+    paths: &[String],
+) -> Result<()> {
     let mut state = StackState::load()?;
-    let Some(outcome) = mutation_guard::commit_with_guard(message, all, if_changed, paths)? else {
+    let stage_mode = if all_files {
+        Some(StageMode::All)
+    } else if all {
+        Some(StageMode::Tracked)
+    } else {
+        None
+    };
+    let Some(outcome) = mutation_guard::commit_with_guard(message, stage_mode, if_changed, paths)?
+    else {
         return Ok(());
     };
 

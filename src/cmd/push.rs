@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 
 use crate::cmd::mutation_guard;
+use crate::cmd::mutation_guard::StageMode;
 use crate::error::EzError;
 use crate::git;
 use crate::github;
@@ -48,6 +49,7 @@ pub fn run(
     base_override: Option<&str>,
     stack: bool,
     stage_all: bool,
+    stage_all_files: bool,
     commit_message: Option<&str>,
 ) -> Result<()> {
     if stack {
@@ -59,9 +61,16 @@ pub fn run(
     let mut commit_out_of_scope_files: Vec<String> = Vec::new();
 
     // If -a or -m was provided, do the commit first.
-    if stage_all || commit_message.is_some() {
+    if stage_all || stage_all_files || commit_message.is_some() {
         if let Some(msg) = commit_message {
-            let outcome = mutation_guard::commit_with_guard(msg, stage_all, false, &[])?
+            let stage_mode = if stage_all_files {
+                Some(StageMode::All)
+            } else if stage_all {
+                Some(StageMode::Tracked)
+            } else {
+                None
+            };
+            let outcome = mutation_guard::commit_with_guard(msg, stage_mode, false, &[])?
                 .expect("commit_with_guard returns Some when --if-changed is false");
             commit_scope_defined = outcome.scope.scope_defined;
             commit_scope_mode = outcome.scope.scope_mode.clone();

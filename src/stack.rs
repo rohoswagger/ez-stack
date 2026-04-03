@@ -122,6 +122,24 @@ impl StackState {
         children
     }
 
+    /// Reparent direct children to a new parent without changing `parent_head`.
+    ///
+    /// `parent_head` tracks the commit the child is currently based on. Reparenting
+    /// alone does not move the branch tip, so that old base must be preserved until
+    /// a later restack/rebase actually happens.
+    pub fn reparent_children_preserving_parent_head(
+        &mut self,
+        old_parent: &str,
+        new_parent: &str,
+    ) -> Result<Vec<String>> {
+        let children = self.children_of(old_parent);
+        for child_name in &children {
+            let child = self.get_branch_mut(child_name)?;
+            child.parent = new_parent.to_string();
+        }
+        Ok(children)
+    }
+
     pub fn is_trunk(&self, branch: &str) -> bool {
         branch == self.trunk
     }
@@ -302,6 +320,27 @@ mod tests {
                 .expect("branch")
                 .effective_scope_mode(),
             ScopeMode::Warn
+        );
+    }
+
+    #[test]
+    fn reparent_children_preserves_old_base_sha() {
+        let mut state = sample_state();
+        let original_parent_head = state
+            .get_branch("feat/b")
+            .expect("branch")
+            .parent_head
+            .clone();
+
+        let children = state
+            .reparent_children_preserving_parent_head("feat/a", "main")
+            .expect("reparent children");
+
+        assert_eq!(children, vec!["feat/b".to_string(), "feat/c".to_string()]);
+        assert_eq!(state.get_branch("feat/b").expect("branch").parent, "main");
+        assert_eq!(
+            state.get_branch("feat/b").expect("branch").parent_head,
+            original_parent_head
         );
     }
 }

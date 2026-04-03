@@ -50,18 +50,15 @@ pub fn run(method: &str) -> Result<()> {
     ui::info(&format!("Merged PR #{pr_number} for `{bottom}`"));
 
     // Reparent children of the merged branch to trunk.
-    let children = state.children_of(&bottom);
     let trunk = state.trunk.clone();
     let remote = state.remote.clone();
 
+    let children = state.reparent_children_preserving_parent_head(&bottom, &trunk)?;
     for child_name in &children {
-        let child = state.get_branch_mut(child_name)?;
-        child.parent = trunk.clone();
-        // parent_head will be updated after fetch during restack
         ui::info(&format!("Reparented `{child_name}` onto `{trunk}`"));
 
         // Update the PR base on GitHub if the child has a PR.
-        if let Some(child_pr) = child.pr_number
+        if let Some(child_pr) = state.get_branch(child_name)?.pr_number
             && let Err(e) = github::update_pr_base(child_pr, &trunk)
         {
             ui::warn(&format!("Failed to update PR base for `{child_name}`: {e}"));
@@ -86,14 +83,6 @@ pub fn run(method: &str) -> Result<()> {
     let sp = ui::spinner("Fetching latest changes...");
     git::fetch(&remote)?;
     sp.finish_and_clear();
-
-    // Update trunk ref for children's parent_head so restack works correctly.
-    let trunk_head = git::rev_parse(&format!("{remote}/{trunk}"))?;
-    for child_name in &children {
-        if let Ok(child) = state.get_branch_mut(child_name) {
-            child.parent_head = trunk_head.clone();
-        }
-    }
 
     // Restack remaining branches in topological order.
     let order = state.topo_order();

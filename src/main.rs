@@ -134,12 +134,13 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Commit {
             message,
             all,
+            all_files,
             if_changed,
             paths,
         } => {
             // Join repeated -m flags with double newline (matching git behavior).
             let full_message = message.join("\n\n");
-            cmd::commit::run(&full_message, all, if_changed, &paths)
+            cmd::commit::run(&full_message, all, all_files, if_changed, &paths)
         }
         Commands::Amend { message, all } => cmd::amend::run(message.as_deref(), all),
         Commands::Push {
@@ -150,6 +151,7 @@ fn run(cli: Cli) -> Result<()> {
             base,
             stack,
             stage_all,
+            stage_all_files,
             message,
         } => cmd::push::run(
             draft,
@@ -159,6 +161,7 @@ fn run(cli: Cli) -> Result<()> {
             base.as_deref(),
             stack,
             stage_all,
+            stage_all_files,
             message.as_deref(),
         ),
         Commands::Submit {

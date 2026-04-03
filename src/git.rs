@@ -217,6 +217,12 @@ pub fn add_all() -> Result<()> {
     Ok(())
 }
 
+/// Stage all changes, including untracked files.
+pub fn add_all_including_untracked() -> Result<()> {
+    run_git(&["add", "-A"])?;
+    Ok(())
+}
+
 /// Return counts of (staged, modified, untracked) files in the working tree.
 pub fn working_tree_status() -> (usize, usize, usize) {
     let output = run_git(&["status", "--porcelain"]).unwrap_or_default();
@@ -594,6 +600,34 @@ pub fn branch_checked_out_elsewhere(branch: &str, current_root: &str) -> Result<
     Ok(None)
 }
 
+/// Update a local branch to the latest fetched remote-tracking ref without requiring checkout.
+///
+/// Returns `Ok(true)` when the branch moved, `Ok(false)` when it was already up to date.
+pub fn update_branch_to_latest_remote(
+    remote: &str,
+    branch: &str,
+    current_branch: &str,
+    current_root: &str,
+) -> Result<bool> {
+    let remote_tracking = format!("{remote}/{branch}");
+    let branch_is_behind =
+        is_ancestor(branch, &remote_tracking) && !is_ancestor(&remote_tracking, branch);
+
+    if !branch_is_behind {
+        return Ok(false);
+    }
+
+    if current_branch == branch {
+        fast_forward_merge(&remote_tracking)?;
+    } else if let Some(branch_worktree) = branch_checked_out_elsewhere(branch, current_root)? {
+        fast_forward_merge_at(&branch_worktree, &remote_tracking)?;
+    } else {
+        fetch_refupdate(remote, branch)?;
+    }
+
+    Ok(true)
+}
+
 /// Updates a local branch ref to match the remote WITHOUT checking it out.
 ///
 /// Equivalent to `git fetch origin main:main`. This is different from `fetch_branch`
@@ -888,6 +922,12 @@ exit 0
         assert_eq!(
             staged_files().expect("staged files"),
             vec!["tracked.txt".to_string()]
+        );
+
+        add_all_including_untracked().expect("stage all changes");
+        assert_eq!(
+            staged_files().expect("staged files"),
+            vec!["new.txt".to_string(), "tracked.txt".to_string()]
         );
     }
 

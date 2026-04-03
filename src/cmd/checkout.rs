@@ -18,8 +18,43 @@ fn worktree_map() -> HashMap<String, String> {
         .collect()
 }
 
+pub(crate) fn stale_switch_target_warning(
+    state: &StackState,
+    target: &str,
+) -> Result<Option<String>> {
+    if state.is_trunk(target) || !state.is_managed(target) {
+        return Ok(None);
+    }
+
+    let meta = state.get_branch(target)?;
+    let parent = meta.parent.clone();
+
+    if state.is_trunk(&parent) {
+        // Best-effort refresh so the warning compares against latest trunk, not a stale local ref.
+        if let (Ok(current_branch), Ok(current_root)) = (git::current_branch(), git::repo_root()) {
+            let _ = git::fetch_branch(&state.remote, &state.trunk);
+            let _ = git::update_branch_to_latest_remote(
+                &state.remote,
+                &state.trunk,
+                &current_branch,
+                &current_root,
+            );
+        }
+    }
+
+    if git::is_ancestor(&parent, target) {
+        return Ok(None);
+    }
+
+    Ok(Some(format!(
+        "branch `{target}` is not restacked on `{parent}`"
+    )))
+}
+
 /// Switch to a branch. If it's in a worktree, print the path to stdout for cd.
-fn switch_to(target: &str, wt_map: &HashMap<String, String>) -> Result<()> {
+fn switch_to(state: &StackState, target: &str, wt_map: &HashMap<String, String>) -> Result<()> {
+    let stale_warning = stale_switch_target_warning(state, target)?;
+
     if let Some(wt_path) = wt_map.get(target) {
         // Branch is in a worktree — print path to stdout for shell wrapper to cd.
         ui::success(&format!("Switching to `{target}` in worktree `{wt_path}`"));
@@ -28,6 +63,12 @@ fn switch_to(target: &str, wt_map: &HashMap<String, String>) -> Result<()> {
         git::checkout(target)?;
         ui::success(&format!("Switched to `{target}`"));
     }
+
+    if let Some(warning) = stale_warning {
+        ui::warn(&warning);
+        ui::hint("Run `ez restack`");
+    }
+
     Ok(())
 }
 
@@ -61,7 +102,7 @@ pub fn run(name: Option<&str>) -> Result<()> {
             return Ok(());
         }
 
-        switch_to(&target, &wt_map)?;
+        switch_to(&state, &target, &wt_map)?;
         return Ok(());
     }
 
@@ -114,14 +155,16 @@ pub fn run(name: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    switch_to(selected, &wt_map)?;
+    switch_to(&state, selected, &wt_map)?;
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::stack::{BranchMeta, StackState};
+    use crate::test_support::{CwdGuard, init_git_repo, take_env_lock, write_file};
     use std::collections::HashMap;
 
     fn state_with_pr() -> StackState {
@@ -160,5 +203,47 @@ mod tests {
         assert!("99".parse::<u64>().is_ok());
         assert!("feat/x".parse::<u64>().is_err());
         assert!("0".parse::<u64>().is_ok());
+    }
+
+    #[test]
+    fn stale_switch_target_warning_reports_stale_branch() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("checkout-restack-guard");
+        let _cwd = CwdGuard::enter(&repo);
+
+        let parent_head = git::rev_parse("main").expect("main head");
+        git::create_branch_at("feat/test", "main").expect("create feature");
+
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/test", "main", &parent_head, None, None);
+        state.save().expect("save state");
+
+        write_file(&repo, "tracked.txt", "updated on main\n");
+        git::add_paths(&["tracked.txt".to_string()]).expect("stage main");
+        git::commit("advance main").expect("commit main");
+
+        let warning = stale_switch_target_warning(&state, "feat/test")
+            .expect("warning resolution should succeed")
+            .expect("stale branch should warn");
+        assert!(warning.contains("not restacked on `main`"));
+    }
+
+    #[test]
+    fn stale_switch_target_warning_skips_fresh_branch() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("checkout-restack-guard-clean");
+        let _cwd = CwdGuard::enter(&repo);
+
+        let parent_head = git::rev_parse("main").expect("main head");
+        git::create_branch_at("feat/test", "main").expect("create feature");
+
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/test", "main", &parent_head, None, None);
+
+        assert!(
+            stale_switch_target_warning(&state, "feat/test")
+                .expect("warning resolution should succeed")
+                .is_none()
+        );
     }
 }

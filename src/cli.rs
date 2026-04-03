@@ -77,6 +77,7 @@ Examples:
   ez commit -m \"fix: typo\" -- src/main.rs
   ez commit -m \"feat: add parser\" -- src/parser.rs src/ast.rs
   ez commit -am \"feat: add parser\"
+  ez commit -Am \"feat: add parser and new fixture\"
   git add -p
   ez commit -m \"fix: keep intended hunks only\"
   ez commit -m \"feat: add parser\" -m \"Implements recursive descent.\"
@@ -89,6 +90,10 @@ Examples:
         /// Stage all tracked changes before committing
         #[arg(short, long)]
         all: bool,
+
+        /// Stage all changes, including untracked files, before committing
+        #[arg(short = 'A', long = "all-files", conflicts_with = "all")]
+        all_files: bool,
 
         /// No-op (exit 0) if there is nothing to commit
         #[arg(long)]
@@ -122,7 +127,8 @@ Examples:
   ez push --title \"feat: add auth\" --body \"Adds login/logout.\"
   ez push --draft
   ez push --stack
-  ez push -am \"feat: add auth\"")]
+  ez push -am \"feat: add auth\"
+  ez push -Am \"feat: add auth and new snapshots\"")]
     Push {
         /// Create a draft PR
         #[arg(long)]
@@ -151,6 +157,15 @@ Examples:
         /// Stage all tracked changes before committing (requires -m)
         #[arg(short = 'a', long = "all", requires = "message")]
         stage_all: bool,
+
+        /// Stage all changes, including untracked files, before committing (requires -m)
+        #[arg(
+            short = 'A',
+            long = "all-files",
+            requires = "message",
+            conflicts_with = "stage_all"
+        )]
+        stage_all_files: bool,
 
         /// Commit with this message before pushing
         #[arg(short = 'm', long)]
@@ -201,7 +216,7 @@ Examples:
         force: bool,
     },
 
-    /// Rebase children onto the current branch tip
+    /// Fetch trunk, refresh it locally, and rebase stale branches onto their latest parent tips
     Restack,
 
     /// Move up one branch in the stack
@@ -588,11 +603,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_commit_all_files_combined_short_flags() {
+        let cli = Cli::try_parse_from(["ez", "commit", "-Am", "feat: add new files"])
+            .expect("parse commit -Am");
+
+        match cli.command {
+            Commands::Commit {
+                message,
+                all,
+                all_files,
+                ..
+            } => {
+                assert_eq!(message, vec!["feat: add new files".to_string()]);
+                assert!(!all);
+                assert!(all_files);
+            }
+            _ => panic!("expected commit command"),
+        }
+    }
+
+    #[test]
     fn parses_branch_alias_to_list() {
         let cli = Cli::try_parse_from(["ez", "branch"]).expect("parse branch alias");
         match cli.command {
             Commands::List { json } => assert!(!json),
             _ => panic!("expected list command"),
+        }
+    }
+
+    #[test]
+    fn parses_push_all_files_combined_short_flags() {
+        let cli = Cli::try_parse_from(["ez", "push", "-Am", "feat: ship new files"])
+            .expect("parse push -Am");
+
+        match cli.command {
+            Commands::Push {
+                message,
+                stage_all,
+                stage_all_files,
+                ..
+            } => {
+                assert_eq!(message.as_deref(), Some("feat: ship new files"));
+                assert!(!stage_all);
+                assert!(stage_all_files);
+            }
+            _ => panic!("expected push command"),
         }
     }
 
