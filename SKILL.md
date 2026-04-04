@@ -14,7 +14,8 @@ ez-stack makes version control invisible for AI coding agents. Four commands cov
 ```bash
 ez create feat/auth              # 1. Start: worktree + branch + cd
 # ... do your work ...
-ez push -am "feat: add auth"     # 2. Ship: stage + commit + push + create PR
+ez push -am "feat: add auth"     # 2. Ship tracked changes
+ez push -Am "feat: add auth"     #    or include untracked files too
 ez sync --autostash              # 3. Sync: pull trunk, clean merged, restack
 ez delete feat/auth --yes        # 4. Done: remove worktree + branch, stop branch dev server, + cd back
 ```
@@ -27,7 +28,7 @@ Use `git add -p` only when you need hunk-level selection before `ez commit`.
 | Instead of | Use |
 |------------|-----|
 | `git checkout -b` | `ez create` |
-| `git commit` | `ez commit` or `ez push -am` |
+| `git commit` | `ez commit`, `ez push -am`, or `ez push -Am` |
 | `git push` | `ez push` |
 | `gh pr create` | `ez push` |
 | `git diff main...HEAD` | `ez diff` |
@@ -45,6 +46,15 @@ cd $(ez create my-task --from main)
 # 3. You're in .worktrees/my-task with your own branch. Work here.
 ```
 
+After any `ez create`, `ez switch`, `ez checkout`, `ez delete`, or `ez sync` that may change directories, immediately re-anchor file operations to the active worktree root:
+
+```bash
+pwd
+git rev-parse --show-toplevel
+```
+
+Use that path, not the main repo checkout, for every subsequent read or write. Never reuse an absolute file path captured before switching into a linked worktree.
+
 **Always use `--from main`** for independent tasks. Without it, ez stacks on the current branch.
 
 **Hooks:** If `.ez/hooks/post-create/default.md` exists in the repo, ez prints its instructions after worktree creation. Follow them to set up the worktree (install deps, copy env, etc.). Use `--hook <name>` for a specific hook: `ez create feat/auth --hook setup-node` reads `.ez/hooks/post-create/setup-node.md`.
@@ -61,6 +71,11 @@ ez commit -m "feat: add types" -- src/types.rs src/mod.rs
 ### Bulk update when the whole tracked diff belongs together
 ```bash
 ez commit -am "chore: regenerate fixtures"
+```
+
+### Bulk update including untracked files
+```bash
+ez commit -Am "feat: add new docs and generated fixtures"
 ```
 
 ### Partial hunks when one file mixes concerns
@@ -87,7 +102,8 @@ ez status            # stack info + working tree state
 
 ### Ship it
 ```bash
-ez push -am "feat: done"               # stage + commit + push + create PR
+ez push -am "feat: done"               # stage tracked changes + commit + push + create PR
+ez push -Am "feat: done"               # include untracked files too
 ez push --title "feat: auth" --body "..." # with PR metadata
 ez submit                                # push entire stack
 ```
@@ -108,7 +124,8 @@ cd $(ez delete my-task --yes)   # removes worktree + branch, stops the branch de
 - **Always `--from main`** for independent tasks.
 - **Sync before push** to pick up other agents' merged work.
 - **Preferred commit flow:** `ez commit -m "msg" -- path1 path2`
-- **Bulk update:** `ez commit -am "msg"`
+- **Bulk tracked update:** `ez commit -am "msg"`
+- **Bulk tracked + untracked update:** `ez commit -Am "msg"`
 - **Partial hunks:** `git add -p` then `ez commit -m "msg"`
 
 ## Receipts

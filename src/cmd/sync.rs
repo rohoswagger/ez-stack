@@ -61,6 +61,9 @@ fn inside_worktree_path(current_dir: &str, worktree_path: &str) -> bool {
 
 pub fn run(dry_run: bool, autostash: bool, force: bool) -> Result<()> {
     let state = StackState::load()?;
+    if let Some(root) = git::current_linked_worktree_root()? {
+        ui::linked_worktree_warning(&root);
+    }
 
     if dry_run {
         ui::header("Sync preview (--dry-run, no changes will be made)");

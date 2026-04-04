@@ -32,7 +32,8 @@ Install the ez-workflow skill into the current repo so all agents auto-discover 
 
 ```bash
 ez skill install
-# Installs to .claude/skills/ez-workflow/SKILL.md
+# Installs canonical skill to .agents/skills/ez-workflow/SKILL.md
+# Symlinks agent-specific skill roots like .claude/skills/ and .codex/skills/
 # Commit the file so other agents in this repo use it too
 ```
 
@@ -45,6 +46,7 @@ When `.git/ez/stack.json` exists, prefer these commands:
 - Create branch: `ez create <name>`
 - Commit specific files: `ez commit -m "msg" -- path1 path2`
 - Commit all tracked changes: `ez commit -am "msg"`
+- Commit tracked + untracked changes: `ez commit -Am "msg"`
 - Commit patch-selected hunks: `git add -p` then `ez commit -m "msg"`
 - Diff vs parent: `ez diff --stat` or `ez diff --name-only`
 - Get parent branch: `ez parent`
@@ -82,6 +84,9 @@ ez commit -m "fix: update parser" -- src/parser.rs
 
 # Bulk update: stage tracked files and commit in one step
 ez commit -am "chore: update generated fixtures"
+
+# Bulk update including new untracked files
+ez commit -Am "feat: add generated fixtures and new docs"
 
 # Partial hunk selection stays in git
 git add -p

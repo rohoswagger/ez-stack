@@ -9,6 +9,9 @@ use crate::ui;
 
 pub fn run(method: &str) -> Result<()> {
     let mut state = StackState::load()?;
+    if let Some(root) = git::current_linked_worktree_root()? {
+        ui::linked_worktree_warning(&root);
+    }
     let current = git::current_branch()?;
 
     if state.is_trunk(&current) {

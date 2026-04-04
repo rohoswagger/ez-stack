@@ -16,6 +16,9 @@ pub fn run(
     paths: &[String],
 ) -> Result<()> {
     let mut state = StackState::load()?;
+    if let Some(root) = git::current_linked_worktree_root()? {
+        ui::linked_worktree_warning(&root);
+    }
     let stage_mode = if all_files {
         Some(StageMode::All)
     } else if all {

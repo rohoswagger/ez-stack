@@ -9,6 +9,8 @@ use crate::ui;
 pub fn run(json: bool) -> Result<()> {
     let state = StackState::load()?;
     let current = git::current_branch()?;
+    let active_edit_root = git::active_edit_root()?;
+    let in_linked_worktree = git::current_linked_worktree_root()?.is_some();
 
     let (staged, modified, untracked) = git::working_tree_status();
 
@@ -36,6 +38,8 @@ pub fn run(json: bool) -> Result<()> {
                     "staged_files": staged,
                     "modified_files": modified,
                     "untracked_files": untracked,
+                    "active_edit_root": active_edit_root,
+                    "in_linked_worktree": in_linked_worktree,
                 })
             );
             return Ok(());
@@ -118,6 +122,8 @@ pub fn run(json: bool) -> Result<()> {
                 "staged_files": staged,
                 "modified_files": modified,
                 "untracked_files": untracked,
+                "active_edit_root": active_edit_root,
+                "in_linked_worktree": in_linked_worktree,
             })
         );
         return Ok(());
@@ -129,6 +135,7 @@ pub fn run(json: bool) -> Result<()> {
             "On trunk branch: {}",
             ui::branch_display(&current, true)
         ));
+        ui::active_edit_root(&active_edit_root);
         let children = state.children_of(&current);
         if children.is_empty() {
             ui::info("No stacked branches yet.");
@@ -167,6 +174,7 @@ pub fn run(json: bool) -> Result<()> {
 
     // Branch name header
     ui::header(&format!("Branch: {}", ui::branch_display(&current, true)));
+    ui::active_edit_root(&active_edit_root);
 
     // Parent
     ui::info(&format!(

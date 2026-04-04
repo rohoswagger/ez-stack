@@ -12,6 +12,16 @@ pub enum StageMode {
     All,
 }
 
+pub(crate) fn tracked_only_untracked_hint(untracked_count: usize) -> Option<&'static str> {
+    if untracked_count > 0 {
+        Some(
+            "Untracked files detected. `-a` stages tracked files only, use `-A`/`-Am` to include them.",
+        )
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CommitOutcome {
     pub current: String,
@@ -51,6 +61,13 @@ pub fn commit_with_guard(
         bail!(EzError::UserMessage(
             "cannot combine --all (-a) or --all-files (-A) with path arguments\n  → Use `ez commit -am \"msg\"` for tracked files, `ez commit -Am \"msg\"` to include untracked files, or `ez commit -m \"msg\" -- <paths>` to stage specific files".to_string()
         ));
+    }
+
+    if matches!(stage_mode, Some(StageMode::Tracked)) {
+        let (_, _, untracked) = git::working_tree_status();
+        if let Some(hint) = tracked_only_untracked_hint(untracked) {
+            ui::hint(hint);
+        }
     }
 
     if !paths.is_empty() {
@@ -209,6 +226,16 @@ mod tests {
         assert!(!receipt.scope_defined);
         assert!(receipt.scope_mode.is_none());
         assert!(receipt.out_of_scope_files.is_empty());
+    }
+
+    #[test]
+    fn tracked_only_untracked_hint_only_shows_when_needed() {
+        assert!(tracked_only_untracked_hint(0).is_none());
+        assert!(
+            tracked_only_untracked_hint(1)
+                .expect("hint")
+                .contains("`-A`/`-Am`")
+        );
     }
 
     #[test]

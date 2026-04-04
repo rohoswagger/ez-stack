@@ -204,7 +204,7 @@ Install the skill so agents auto-discover ez:
 ez skill install
 ```
 
-This writes the ez-workflow skill to `.claude/skills/ez-workflow/SKILL.md`. Agents using Claude Code (or any tool that reads `.claude/skills/`) will automatically use ez for all git operations.
+This writes the canonical skill to `.agents/skills/ez-workflow/SKILL.md`, then creates compatibility symlinks for agent-specific skill roots such as `.claude/skills/ez-workflow` and `.codex/skills/ez-workflow`.
 
 See [SKILL.md](./SKILL.md) for the full agent workflow, and [reference.md](./reference.md) for the complete command reference.
 

@@ -36,6 +36,7 @@ Examples:
   ez create feat/auth --hook setup-node
   ez create feat/auth -m \"add auth types\"
   ez create feat/auth -am \"add auth types\"
+  ez create feat/auth -Am \"add auth types and new files\"
   ez create feat/auth --from main
   ez create feat/auth --no-worktree")]
     Create {
@@ -49,6 +50,15 @@ Examples:
         /// Stage all tracked changes before committing (requires -m)
         #[arg(short = 'a', long, requires = "message")]
         all: bool,
+
+        /// Stage all changes, including untracked files, before committing (requires -m)
+        #[arg(
+            short = 'A',
+            long = "all-files",
+            requires = "message",
+            conflicts_with = "all"
+        )]
+        all_files: bool,
 
         /// Create the branch from this base instead of the current branch (cannot combine with -m)
         #[arg(long, alias = "on", conflicts_with = "message")]
@@ -529,7 +539,7 @@ pub struct SkillArgs {
 
 #[derive(Subcommand)]
 pub enum SkillCommands {
-    /// Install the ez-workflow skill into this repo's .claude/skills/
+    /// Install the ez-workflow skill into this repo's .agents/skills/ with agent-specific symlinks
     #[command(after_help = "\
 Examples:
   ez skill install")]
@@ -597,6 +607,26 @@ mod tests {
                 assert_eq!(from.as_deref(), Some("main"));
                 assert_eq!(scope, vec!["src/auth/**".to_string()]);
                 assert_eq!(scope_mode, Some(ScopeMode::Strict));
+            }
+            _ => panic!("expected create command"),
+        }
+    }
+
+    #[test]
+    fn parses_create_all_files_combined_short_flags() {
+        let cli = Cli::try_parse_from(["ez", "create", "feat/auth", "-Am", "feat: add files"])
+            .expect("parse create -Am");
+
+        match cli.command {
+            Commands::Create {
+                message,
+                all,
+                all_files,
+                ..
+            } => {
+                assert_eq!(message.as_deref(), Some("feat: add files"));
+                assert!(!all);
+                assert!(all_files);
             }
             _ => panic!("expected create command"),
         }

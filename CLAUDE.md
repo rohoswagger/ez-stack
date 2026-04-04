@@ -140,7 +140,7 @@ These features exist specifically to make ez useable by AI agents:
 | 0.1.22 | Mutation receipts: every mutating command (commit, amend, sync, restack, push, create) emits structured JSON receipt to stderr; `git::diff_stat_numbers()` helper; gh abstraction + scope-aware stacking documented as deferred |
 | 0.1.23 | Fix `ez sync` not cleaning up merged branches in worktrees; add git-level merge detection (branch tip is ancestor of trunk) for branches without PR numbers |
 | 0.1.24 | Agent audit fixes: receipts on delete/move/merge/submit/worktree; fix delete.rs state corruption (git delete before state removal); worktree guard on delete; exit code 5 for all usage errors; branch/worktree list to stdout; amend hint fix |
-| 0.1.25 | `ez skill install` — bundles SKILL.md into the binary, installs to `.claude/skills/ez-workflow/SKILL.md` in the current repo. Agents in the repo auto-discover the skill. |
+| 0.1.25 | `ez skill install` — bundles SKILL.md into the binary, installs canonically to `.agents/skills/ez-workflow/SKILL.md`, and symlinks agent-specific skill roots in the current repo. |
 | 0.1.26 | Fix `ez branch` to show trunk, all managed branches, and current branch even if untracked; hint when current branch was created outside ez |
 | 0.1.27 | Fix `-a` flag to use `git add -u` (tracked only, not untracked); hook failure detection (shows which files pre-commit hooks modified); push error messages wrapped with context; `ez status` shows working tree (staged/modified/untracked counts); SKILL.md discoverability improvements |
 | 0.2.0 | Flagship command redesign: `ez create` defaults to worktree (`--no-worktree` for old behavior); `ez list` replaces `ez branch` (adds `--json`, working tree state, worktree paths); `ez delete` auto-detects and removes worktrees; `ez push -am "msg"` for stage+commit+push; `ez worktree create/delete/list` become aliases |
@@ -153,6 +153,7 @@ These features exist specifically to make ez useable by AI agents:
 | 0.2.16 | Sync/list hardening: list all local branches with metadata overlay, paginate PR lookups, clean merged/closed branches safely (including current worktree cleanup via shell auto-cd), improve conflict receipts, and stop dev-port listeners on delete |
 | 0.2.17 | Stream `git fetch` progress during `ez sync` and surface `ez worktree delete --yes` as the non-interactive path when deleting the current worktree |
 | 0.2.18 | Add `-A`/`--all-files` for commit and push, preserve stale-base metadata until real restacks happen across sync/delete/merge, refresh trunk during `ez restack`, and warn after switching to a branch that is not restacked on latest main |
+| 0.2.19 | Canonicalize `ez skill install` under `.agents/skills` with safe link-or-copy compatibility targets, improve worktree-awareness messaging and status output, and teach agents when to use `-A`/`-Am` for untracked files |
 
 ---
 

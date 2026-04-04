@@ -115,6 +115,10 @@ pub fn repo_root() -> Result<String> {
     run_git(&["rev-parse", "--show-toplevel"])
 }
 
+fn normalize_path_for_compare(path: &str) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path))
+}
+
 pub fn current_branch() -> Result<String> {
     run_git(&["rev-parse", "--abbrev-ref", "HEAD"])
 }
@@ -672,6 +676,23 @@ pub fn main_worktree_root() -> Result<String> {
         .first()
         .map(|wt| wt.path.clone())
         .ok_or_else(|| anyhow::anyhow!("could not determine main worktree root"))
+}
+
+/// The directory agents should edit within for the current checkout.
+pub fn active_edit_root() -> Result<String> {
+    repo_root()
+}
+
+/// Returns the current linked worktree root if the active checkout is not the main worktree.
+pub fn current_linked_worktree_root() -> Result<Option<String>> {
+    let current_root = repo_root()?;
+    let main_root = main_worktree_root().unwrap_or_else(|_| current_root.clone());
+
+    if normalize_path_for_compare(&current_root) == normalize_path_for_compare(&main_root) {
+        Ok(None)
+    } else {
+        Ok(Some(current_root))
+    }
 }
 
 /// Compute the `.worktrees/<name>` path relative to the main worktree root.

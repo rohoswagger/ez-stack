@@ -18,6 +18,12 @@ fn worktree_map() -> HashMap<String, String> {
         .collect()
 }
 
+fn worktree_edit_hint(wt_path: &str) -> String {
+    format!(
+        "Edit files under `{wt_path}`. This branch lives in a linked worktree, not the main repo checkout."
+    )
+}
+
 pub(crate) fn stale_switch_target_warning(
     state: &StackState,
     target: &str,
@@ -58,6 +64,7 @@ fn switch_to(state: &StackState, target: &str, wt_map: &HashMap<String, String>)
     if let Some(wt_path) = wt_map.get(target) {
         // Branch is in a worktree — print path to stdout for shell wrapper to cd.
         ui::success(&format!("Switching to `{target}` in worktree `{wt_path}`"));
+        ui::hint(&worktree_edit_hint(wt_path));
         println!("{wt_path}");
     } else {
         git::checkout(target)?;
@@ -245,5 +252,12 @@ mod tests {
                 .expect("warning resolution should succeed")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn worktree_edit_hint_mentions_worktree_path_and_main_checkout() {
+        let hint = worktree_edit_hint("/repo/.worktrees/feat-x");
+        assert!(hint.contains("/repo/.worktrees/feat-x"));
+        assert!(hint.contains("main repo checkout"));
     }
 }

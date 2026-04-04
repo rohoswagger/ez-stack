@@ -8,6 +8,9 @@ use crate::ui;
 
 pub fn run() -> Result<()> {
     let mut state = StackState::load()?;
+    if let Some(root) = git::current_linked_worktree_root()? {
+        ui::linked_worktree_warning(&root);
+    }
     let original_branch = git::current_branch()?;
     let current_root = git::repo_root()?;
 

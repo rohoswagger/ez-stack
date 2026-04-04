@@ -10,6 +10,9 @@ use crate::ui;
 
 pub fn run(branch: Option<&str>, force: bool, yes: bool) -> Result<()> {
     let mut state = StackState::load()?;
+    if let Some(root) = git::current_linked_worktree_root()? {
+        ui::linked_worktree_warning(&root);
+    }
     let current = git::current_branch()?;
 
     let target = branch.unwrap_or(&current).to_string();

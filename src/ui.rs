@@ -23,6 +23,15 @@ pub fn hint(msg: &str) {
     eprintln!("  {} {}", "→".dimmed(), msg.dimmed());
 }
 
+pub fn active_edit_root(root: &str) {
+    info(&format!("Active edit root: `{root}`"));
+}
+
+pub fn linked_worktree_warning(root: &str) {
+    warn(&format!("Working in linked worktree `{root}`"));
+    hint("Edit and run commands here, not in the main repo checkout.");
+}
+
 pub fn header(msg: &str) {
     eprintln!("\n{}", msg.bold());
 }

@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 
+use crate::cmd::mutation_guard::tracked_only_untracked_hint;
 use crate::error::EzError;
 use crate::git;
 use crate::hooks;
@@ -11,6 +12,7 @@ pub fn run(
     name: &str,
     message: Option<&str>,
     all: bool,
+    all_files: bool,
     from: Option<&str>,
     no_worktree: bool,
     scope: &[String],
@@ -65,7 +67,13 @@ pub fn run(
     // stage and commit on the current branch first.
     if let Some(msg) = message {
         if all {
+            let (_, _, untracked) = git::working_tree_status();
+            if let Some(hint) = tracked_only_untracked_hint(untracked) {
+                ui::hint(hint);
+            }
             git::add_all()?;
+        } else if all_files {
+            git::add_all_including_untracked()?;
         }
         if !git::has_staged_changes()? {
             ui::hint(
@@ -110,6 +118,7 @@ pub fn run(
         }
 
         ui::success(&format!("Created `{name}` → {wt_path}"));
+        ui::hint(&worktree_edit_hint(&wt_path));
 
         hooks::emit_hook("post-create", hook);
 
@@ -192,6 +201,12 @@ fn scope_mode_str(mode: ScopeMode) -> &'static str {
     }
 }
 
+fn worktree_edit_hint(wt_path: &str) -> String {
+    format!(
+        "Edit files under `{wt_path}`. This branch lives in a linked worktree, not the main repo checkout."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +262,13 @@ mod tests {
     }
 
     #[test]
+    fn worktree_edit_hint_mentions_worktree_path_and_main_checkout() {
+        let hint = worktree_edit_hint("/repo/.worktrees/feat-x");
+        assert!(hint.contains("/repo/.worktrees/feat-x"));
+        assert!(hint.contains("main repo checkout"));
+    }
+
+    #[test]
     fn create_rejects_unmanaged_current_branch_without_from() {
         let _guard = take_env_lock();
         let repo = init_git_repo("create-unmanaged-current");
@@ -256,7 +278,7 @@ mod tests {
         state.save().expect("save state");
         git::create_branch("scratch").expect("create scratch");
 
-        let err = run("feat/new", None, false, None, true, &[], None, None)
+        let err = run("feat/new", None, false, false, None, true, &[], None, None)
             .expect_err("unmanaged current branch should fail");
         assert!(
             err.to_string()
@@ -278,6 +300,7 @@ mod tests {
         let err = run(
             "feat/new",
             None,
+            false,
             false,
             Some("scratch"),
             true,

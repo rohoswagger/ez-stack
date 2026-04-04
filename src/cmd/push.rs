@@ -56,6 +56,10 @@ pub fn run(
         return crate::cmd::submit::run(draft, title, body, body_file);
     }
 
+    if let Some(root) = git::current_linked_worktree_root()? {
+        ui::linked_worktree_warning(&root);
+    }
+
     let mut commit_scope_defined = false;
     let mut commit_scope_mode: Option<String> = None;
     let mut commit_out_of_scope_files: Vec<String> = Vec::new();
