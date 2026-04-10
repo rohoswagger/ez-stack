@@ -402,6 +402,16 @@ pub fn fast_forward_merge_at(dir: &str, remote_ref: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn hard_reset(remote_ref: &str) -> Result<()> {
+    run_git(&["reset", "--hard", remote_ref])?;
+    Ok(())
+}
+
+pub fn hard_reset_at(dir: &str, remote_ref: &str) -> Result<()> {
+    run_git(&["-C", dir, "reset", "--hard", remote_ref])?;
+    Ok(())
+}
+
 pub fn push(remote: &str, branch: &str, force: bool) -> Result<()> {
     let mut args = vec!["push", remote, branch];
     if force {
@@ -632,6 +642,32 @@ pub fn update_branch_to_latest_remote(
     Ok(true)
 }
 
+/// Force-align a local branch to the fetched remote-tracking ref, discarding local
+/// divergence. This is intentionally stronger than `update_branch_to_latest_remote`
+/// and is used by `ez sync` so trunk matches the latest remote state exactly.
+pub fn reset_branch_to_latest_remote(
+    remote: &str,
+    branch: &str,
+    current_branch: &str,
+    current_root: &str,
+) -> Result<bool> {
+    let remote_tracking = format!("{remote}/{branch}");
+
+    if rev_parse(branch)? == rev_parse(&remote_tracking)? {
+        return Ok(false);
+    }
+
+    if current_branch == branch {
+        hard_reset(&remote_tracking)?;
+    } else if let Some(branch_worktree) = branch_checked_out_elsewhere(branch, current_root)? {
+        hard_reset_at(&branch_worktree, &remote_tracking)?;
+    } else {
+        fetch_refupdate(remote, branch)?;
+    }
+
+    Ok(true)
+}
+
 /// Updates a local branch ref to match the remote WITHOUT checking it out.
 ///
 /// Equivalent to `git fetch origin main:main`. This is different from `fetch_branch`
@@ -732,7 +768,8 @@ pub fn working_tree_status_at(dir: &str) -> (usize, usize, usize) {
 mod tests {
     use super::*;
     use crate::test_support::{
-        CwdGuard, PathGuard, init_git_repo, install_fake_bin, take_env_lock, write_file,
+        CwdGuard, PathGuard, init_git_repo, install_fake_bin, run_cmd, take_env_lock, temp_dir,
+        write_file,
     };
 
     #[test]
@@ -995,5 +1032,61 @@ exit 0
 
         worktree_remove_force(&wt_path).expect("remove worktree");
         worktree_prune().expect("prune");
+    }
+
+    #[test]
+    fn reset_branch_to_latest_remote_discards_local_divergence() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-reset-remote");
+        let remote = temp_dir("git-reset-remote-origin");
+        run_cmd(&remote, "git", &["init", "--bare", "--initial-branch=main"]);
+        run_cmd(
+            &repo,
+            "git",
+            &["remote", "add", "origin", remote.to_str().expect("remote")],
+        );
+        run_cmd(&repo, "git", &["push", "-u", "origin", "main"]);
+
+        let updater = temp_dir("git-reset-remote-updater");
+        run_cmd(
+            &std::env::temp_dir(),
+            "git",
+            &[
+                "clone",
+                remote.to_str().expect("remote"),
+                updater.to_str().expect("updater"),
+            ],
+        );
+        run_cmd(&updater, "git", &["config", "user.name", "Test User"]);
+        run_cmd(
+            &updater,
+            "git",
+            &["config", "user.email", "test@example.com"],
+        );
+        write_file(&updater, "tracked.txt", "remote version\n");
+        run_cmd(&updater, "git", &["add", "tracked.txt"]);
+        run_cmd(&updater, "git", &["commit", "-m", "remote advance"]);
+        run_cmd(&updater, "git", &["push", "origin", "main"]);
+
+        let _cwd = CwdGuard::enter(&repo);
+        write_file(&repo, "tracked.txt", "local divergence\n");
+        add_paths(&["tracked.txt".to_string()]).expect("stage local divergence");
+        commit("local divergence").expect("commit local divergence");
+        let local_diverged = rev_parse("main").expect("local diverged");
+
+        fetch("origin").expect("fetch origin");
+        let updated =
+            reset_branch_to_latest_remote("origin", "main", "main", &repo_root().expect("root"))
+                .expect("reset branch");
+        assert!(updated);
+        assert_ne!(rev_parse("main").expect("post-reset"), local_diverged);
+        assert_eq!(
+            rev_parse("main").expect("main"),
+            rev_parse("origin/main").expect("origin/main")
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("tracked.txt")).expect("tracked"),
+            "remote version\n"
+        );
     }
 }

@@ -150,13 +150,16 @@ fn run_sync_inner(force: bool) -> Result<()> {
     ui::info(&format!("Fetching from `{}`...", state.remote));
     git::fetch(&state.remote)?;
 
-    match git::update_branch_to_latest_remote(
+    match git::reset_branch_to_latest_remote(
         &state.remote,
         &state.trunk,
         &original_branch,
         &original_root,
     ) {
-        Ok(true) => ui::info(&format!("Updated `{}` to latest", state.trunk)),
+        Ok(true) => ui::info(&format!(
+            "Reset `{}` to latest `{}/{}`",
+            state.trunk, state.remote, state.trunk
+        )),
         Ok(false) => {}
         Err(e) => ui::warn(&format!("Could not update `{}` — {e}", state.trunk)),
     }

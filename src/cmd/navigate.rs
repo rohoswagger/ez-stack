@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 
-use crate::cmd::checkout::stale_switch_target_warning;
+use crate::cmd::checkout::{switch_to, worktree_map};
 use crate::error::EzError;
 use crate::git;
 use crate::stack::StackState;
@@ -50,17 +50,12 @@ pub fn up() -> Result<()> {
 
     let children = state.children_of(&current);
     let target = up_target(&children)?;
-    let stale_warning = stale_switch_target_warning(&state, &target)?;
-    git::checkout(&target)?;
+    switch_to(&state, &target, &worktree_map())?;
     ui::success(&format!(
         "Moved up: {} → {}",
         ui::branch_display(&current, false),
         ui::branch_display(&target, true),
     ));
-    if let Some(warning) = stale_warning {
-        ui::warn(&warning);
-        ui::hint("Run `ez restack`");
-    }
 
     Ok(())
 }
@@ -70,17 +65,12 @@ pub fn down() -> Result<()> {
     let current = git::current_branch()?;
 
     let parent = down_target(&state, &current)?;
-    let stale_warning = stale_switch_target_warning(&state, &parent)?;
-    git::checkout(&parent)?;
+    switch_to(&state, &parent, &worktree_map())?;
     ui::success(&format!(
         "Moved down: {} → {}",
         ui::branch_display(&current, false),
         ui::branch_display(&parent, true),
     ));
-    if let Some(warning) = stale_warning {
-        ui::warn(&warning);
-        ui::hint("Run `ez restack`");
-    }
 
     Ok(())
 }
@@ -90,18 +80,12 @@ pub fn top() -> Result<()> {
     let current = git::current_branch()?;
 
     let target = top_target(&state, &current)?;
-    let stale_warning = stale_switch_target_warning(&state, &target)?;
-
-    git::checkout(&target)?;
+    switch_to(&state, &target, &worktree_map())?;
     ui::success(&format!(
         "Jumped to top: {} → {}",
         ui::branch_display(&current, false),
         ui::branch_display(&target, true),
     ));
-    if let Some(warning) = stale_warning {
-        ui::warn(&warning);
-        ui::hint("Run `ez restack`");
-    }
 
     Ok(())
 }
@@ -111,18 +95,12 @@ pub fn bottom() -> Result<()> {
     let current = git::current_branch()?;
 
     let target = bottom_target(&state, &current)?;
-    let stale_warning = stale_switch_target_warning(&state, &target)?;
-
-    git::checkout(&target)?;
+    switch_to(&state, &target, &worktree_map())?;
     ui::success(&format!(
         "Jumped to bottom: {} → {}",
         ui::branch_display(&current, false),
         ui::branch_display(&target, true),
     ));
-    if let Some(warning) = stale_warning {
-        ui::warn(&warning);
-        ui::hint("Run `ez restack`");
-    }
 
     Ok(())
 }

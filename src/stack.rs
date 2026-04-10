@@ -270,6 +270,7 @@ impl BranchMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::take_env_lock;
 
     fn sample_state() -> StackState {
         let mut state = StackState::new("main".to_string());
@@ -295,6 +296,7 @@ mod tests {
 
     #[test]
     fn test_meta_dir_ends_with_ez() {
+        let _guard = take_env_lock();
         // The test suite runs inside the ez-stack git repo, so meta_dir() will
         // resolve against the real .git directory. We verify the path ends with "ez".
         let path = StackState::meta_dir().expect("meta_dir() should succeed in git repo");

@@ -6,7 +6,7 @@ fn shell_script() -> &'static str {
 
 ez() {{
     case "$1" in
-        create|delete|switch|checkout|co)
+        create|delete|switch|checkout|co|up|down|top|bottom)
             local _ez_path
             _ez_path=$(command ez "$@")
             local _ez_exit=$?
@@ -53,7 +53,7 @@ mod tests {
     #[test]
     fn shell_script_wraps_sync_and_worktree_navigation() {
         let script = shell_script();
-        assert!(script.contains("create|delete|switch|checkout|co"));
+        assert!(script.contains("create|delete|switch|checkout|co|up|down|top|bottom"));
         assert!(script.contains("sync)"));
         assert!(script.contains("worktree)"));
         assert!(script.contains("command ez \"$@\""));

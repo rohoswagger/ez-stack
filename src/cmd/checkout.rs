@@ -8,20 +8,28 @@ use crate::github;
 use crate::stack::StackState;
 use crate::ui;
 
-/// Build a map of branch name → worktree path for branches in worktrees.
-fn worktree_map() -> HashMap<String, String> {
-    git::worktree_list()
-        .unwrap_or_default()
+fn branch_worktree_map(
+    worktrees: impl IntoIterator<Item = git::WorktreeInfo>,
+) -> HashMap<String, String> {
+    worktrees
         .into_iter()
-        .filter(|wt| wt.path.contains("/.worktrees/"))
         .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
         .collect()
 }
 
+/// Build a map of branch name → worktree path for branches in worktrees.
+pub(crate) fn worktree_map() -> HashMap<String, String> {
+    branch_worktree_map(git::worktree_list().unwrap_or_default())
+}
+
 fn worktree_edit_hint(wt_path: &str) -> String {
-    format!(
-        "Edit files under `{wt_path}`. This branch lives in a linked worktree, not the main repo checkout."
-    )
+    if wt_path.contains("/.worktrees/") {
+        format!(
+            "Edit files under `{wt_path}`. This branch lives in a linked worktree, not the main repo checkout."
+        )
+    } else {
+        format!("Edit files under `{wt_path}`.")
+    }
 }
 
 pub(crate) fn stale_switch_target_warning(
@@ -58,7 +66,11 @@ pub(crate) fn stale_switch_target_warning(
 }
 
 /// Switch to a branch. If it's in a worktree, print the path to stdout for cd.
-fn switch_to(state: &StackState, target: &str, wt_map: &HashMap<String, String>) -> Result<()> {
+pub(crate) fn switch_to(
+    state: &StackState,
+    target: &str,
+    wt_map: &HashMap<String, String>,
+) -> Result<()> {
     let stale_warning = stale_switch_target_warning(state, target)?;
 
     if let Some(wt_path) = wt_map.get(target) {
@@ -259,5 +271,30 @@ mod tests {
         let hint = worktree_edit_hint("/repo/.worktrees/feat-x");
         assert!(hint.contains("/repo/.worktrees/feat-x"));
         assert!(hint.contains("main repo checkout"));
+    }
+
+    #[test]
+    fn branch_worktree_map_includes_main_and_linked_worktrees() {
+        let wt_map = branch_worktree_map(vec![
+            git::WorktreeInfo {
+                path: "/repo".to_string(),
+                branch: Some("main".to_string()),
+            },
+            git::WorktreeInfo {
+                path: "/repo/.worktrees/feat-x".to_string(),
+                branch: Some("feat/x".to_string()),
+            },
+            git::WorktreeInfo {
+                path: "/repo/detached".to_string(),
+                branch: None,
+            },
+        ]);
+
+        assert_eq!(wt_map.get("main"), Some(&"/repo".to_string()));
+        assert_eq!(
+            wt_map.get("feat/x"),
+            Some(&"/repo/.worktrees/feat-x".to_string())
+        );
+        assert!(!wt_map.contains_key("detached"));
     }
 }
