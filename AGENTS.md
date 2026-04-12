@@ -53,6 +53,7 @@ When `.git/ez/stack.json` exists, prefer these commands:
 - Push current branch and create/update PR: `ez push`
 - Push the stack: `ez submit`
 - Sync after trunk changes or merges: `ez sync` or `ez sync --autostash`
+- Adopt branches from GitHub PRs: `ez adopt` or `ez adopt --pr 42`
 - Inspect state programmatically: `ez status --json` and `ez log --json`
 
 Avoid these raw commands in an `ez`-managed repo:
@@ -110,6 +111,15 @@ ez sync --autostash
 # Read current stack state as JSON
 ez status --json
 ez log --json
+
+# Adopt open PRs from GitHub into the local stack (multi-machine collaboration)
+ez adopt
+
+# Adopt a specific PR and its dependency chain
+ez adopt --pr 42
+
+# Adopt specific branches by name
+ez adopt feat/auth feat/db
 ```
 
 ## Exit codes
