@@ -204,6 +204,9 @@ mod tests {
             remote: "origin".to_string(),
             default_from: None,
             repo: None,
+            draft: None,
+            no_pr: None,
+            rerere: None,
             branches,
         }
     }

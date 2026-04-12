@@ -13,10 +13,32 @@ const KNOWN_KEYS: &[(&str, &str)] = &[
         "Default parent for `ez create` when on trunk",
     ),
     ("repo", "GitHub repo for PR operations (owner/name)"),
+    ("draft", "Default new PRs to draft (true/false)"),
+    ("no_pr", "Default push to skip PR creation (true/false)"),
+    ("rerere", "Enable git rerere for conflict recording (true/false)"),
 ];
+
+/// Keys that accept only boolean values.
+const BOOL_KEYS: &[&str] = &["draft", "no_pr", "rerere"];
 
 fn is_known_key(key: &str) -> bool {
     KNOWN_KEYS.iter().any(|(k, _)| *k == key)
+}
+
+fn is_bool_key(key: &str) -> bool {
+    BOOL_KEYS.contains(&key)
+}
+
+/// Parse a user-supplied string as a boolean.
+/// Accepts: true, false, 1, 0, yes, no (case-insensitive).
+fn parse_bool(value: &str) -> Result<bool> {
+    match value.to_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        _ => bail!(EzError::UserMessage(format!(
+            "invalid boolean value `{value}`\n  → Accepted values: true, false, 1, 0, yes, no"
+        ))),
+    }
 }
 
 pub fn list() -> Result<()> {
@@ -108,11 +130,19 @@ fn get_value(state: &StackState, key: &str) -> Option<String> {
         "remote" => Some(state.remote.clone()),
         "default_from" => state.default_from.clone(),
         "repo" => state.repo.clone(),
+        "draft" => state.draft.map(|v| v.to_string()),
+        "no_pr" => state.no_pr.map(|v| v.to_string()),
+        "rerere" => state.rerere.map(|v| v.to_string()),
         _ => None,
     }
 }
 
 fn set_value(state: &mut StackState, key: &str, value: &str) -> Result<()> {
+    // Validate bool keys before setting.
+    if is_bool_key(key) {
+        let _ = parse_bool(value)?;
+    }
+
     match key {
         "trunk" => {
             state.trunk = value.to_string();
@@ -126,11 +156,53 @@ fn set_value(state: &mut StackState, key: &str, value: &str) -> Result<()> {
         "repo" => {
             state.repo = Some(value.to_string());
         }
+        "draft" => {
+            state.draft = Some(parse_bool(value)?);
+        }
+        "no_pr" => {
+            state.no_pr = Some(parse_bool(value)?);
+        }
+        "rerere" => {
+            let enabled = parse_bool(value)?;
+            state.rerere = Some(enabled);
+            if enabled {
+                enable_rerere();
+            }
+        }
         _ => {
             bail!(EzError::UserMessage(format!("unknown config key `{key}`")));
         }
     }
     Ok(())
+}
+
+/// Enable git rerere. Falls back to creating .git/rr-cache if git config fails.
+fn enable_rerere() {
+    let config_ok = std::process::Command::new("git")
+        .args(["config", "rerere.enabled", "true"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    let autoupdate_ok = std::process::Command::new("git")
+        .args(["config", "rerere.autoupdate", "true"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !config_ok || !autoupdate_ok {
+        // Fallback: create the rr-cache directory directly.
+        if let Ok(git_dir) = crate::git::git_common_dir() {
+            let rr_cache = git_dir.join("rr-cache");
+            if let Err(e) = std::fs::create_dir_all(&rr_cache) {
+                crate::ui::warn(&format!("Could not create rr-cache directory: {e}"));
+            } else {
+                crate::ui::warn(
+                    "Could not set git config — created rr-cache directory directly",
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -253,6 +325,9 @@ mod tests {
         assert!(is_known_key("remote"));
         assert!(is_known_key("default_from"));
         assert!(is_known_key("repo"));
+        assert!(is_known_key("draft"));
+        assert!(is_known_key("no_pr"));
+        assert!(is_known_key("rerere"));
         assert!(!is_known_key("garbage"));
     }
 
@@ -295,6 +370,65 @@ mod tests {
     }
 
     #[test]
+    fn parse_bool_accepts_valid_values() {
+        assert!(parse_bool("true").unwrap());
+        assert!(parse_bool("True").unwrap());
+        assert!(parse_bool("TRUE").unwrap());
+        assert!(parse_bool("1").unwrap());
+        assert!(parse_bool("yes").unwrap());
+        assert!(parse_bool("Yes").unwrap());
+        assert!(!parse_bool("false").unwrap());
+        assert!(!parse_bool("False").unwrap());
+        assert!(!parse_bool("0").unwrap());
+        assert!(!parse_bool("no").unwrap());
+        assert!(!parse_bool("No").unwrap());
+    }
+
+    #[test]
+    fn parse_bool_rejects_invalid_values() {
+        let err = parse_bool("maybe").expect_err("should fail");
+        assert!(err.to_string().contains("invalid boolean value"));
+    }
+
+    #[test]
+    fn set_draft_validates_bool() {
+        let _guard = take_env_lock();
+        let (_repo, _cwd) = setup_state();
+
+        set("draft", "true").expect("set draft true");
+        let state = StackState::load().unwrap();
+        assert_eq!(state.draft, Some(true));
+
+        set("draft", "false").expect("set draft false");
+        let state = StackState::load().unwrap();
+        assert_eq!(state.draft, Some(false));
+
+        let err = set("draft", "maybe").expect_err("should fail");
+        assert!(err.to_string().contains("invalid boolean value"));
+    }
+
+    #[test]
+    fn set_no_pr_validates_bool() {
+        let _guard = take_env_lock();
+        let (_repo, _cwd) = setup_state();
+
+        set("no_pr", "yes").expect("set no_pr yes");
+        let state = StackState::load().unwrap();
+        assert_eq!(state.no_pr, Some(true));
+    }
+
+    #[test]
+    fn get_returns_bool_keys_as_string() {
+        let _guard = take_env_lock();
+        let (_repo, _cwd) = setup_state();
+
+        let state = StackState::load().unwrap();
+        assert_eq!(get_value(&state, "draft"), None);
+        assert_eq!(get_value(&state, "no_pr"), None);
+        assert_eq!(get_value(&state, "rerere"), None);
+    }
+
+    #[test]
     fn backward_compat_loads_old_state_without_new_fields() {
         let _guard = take_env_lock();
         let repo = init_git_repo("config-compat");
@@ -315,5 +449,8 @@ mod tests {
         assert_eq!(state.remote, "origin");
         assert_eq!(state.default_from, None);
         assert_eq!(state.repo, None);
+        assert_eq!(state.draft, None);
+        assert_eq!(state.no_pr, None);
+        assert_eq!(state.rerere, None);
     }
 }
