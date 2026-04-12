@@ -453,4 +453,85 @@ mod tests {
         // Cycles can't reach trunk, so nothing is adoptable.
         assert!(graph.is_empty());
     }
+
+    #[test]
+    fn build_adopt_graph_empty_prs_returns_empty() {
+        let prs = HashMap::new();
+        let graph = build_adopt_graph("main", &prs);
+        assert!(graph.is_empty());
+    }
+
+    #[test]
+    fn build_adopt_graph_single_pr_on_trunk() {
+        let mut prs = HashMap::new();
+        let (k, v) = make_pr("feat/solo", "main", 42);
+        prs.insert(k, v);
+
+        let graph = build_adopt_graph("main", &prs);
+
+        assert_eq!(graph.len(), 1);
+        assert_eq!(graph[0].branch, "feat/solo");
+        assert_eq!(graph[0].pr_number, 42);
+        assert_eq!(graph[0].base, "main");
+    }
+
+    #[test]
+    fn build_adopt_graph_deep_chain() {
+        let mut prs = HashMap::new();
+        // Chain of 5 deep: a→b→c→d→e
+        let (k, v) = make_pr("feat/a", "main", 1);
+        prs.insert(k, v);
+        let (k, v) = make_pr("feat/b", "feat/a", 2);
+        prs.insert(k, v);
+        let (k, v) = make_pr("feat/c", "feat/b", 3);
+        prs.insert(k, v);
+        let (k, v) = make_pr("feat/d", "feat/c", 4);
+        prs.insert(k, v);
+        let (k, v) = make_pr("feat/e", "feat/d", 5);
+        prs.insert(k, v);
+
+        let graph = build_adopt_graph("main", &prs);
+        assert_eq!(graph.len(), 5);
+
+        // Verify topological order.
+        let names: Vec<&str> = graph.iter().map(|c| c.branch.as_str()).collect();
+        for i in 0..names.len() - 1 {
+            assert!(
+                names.iter().position(|&n| n == names[i]).unwrap()
+                    < names.iter().position(|&n| n == names[i + 1]).unwrap(),
+                "{} should come before {}",
+                names[i],
+                names[i + 1]
+            );
+        }
+    }
+
+    #[test]
+    fn build_adopt_graph_preserves_draft_flag() {
+        let mut prs = HashMap::new();
+        let (k, mut v) = make_pr("feat/draft-branch", "main", 10);
+        v.is_draft = true;
+        prs.insert(k, v);
+
+        let graph = build_adopt_graph("main", &prs);
+        assert_eq!(graph.len(), 1);
+        assert!(graph[0].is_draft);
+    }
+
+    #[test]
+    fn build_adopt_graph_partial_chain_missing_middle() {
+        let mut prs = HashMap::new();
+        // feat/a → main (exists)
+        // feat/c → feat/b (feat/b has NO PR — missing link)
+        let (k, v) = make_pr("feat/a", "main", 1);
+        prs.insert(k, v);
+        let (k, v) = make_pr("feat/c", "feat/b", 3);
+        prs.insert(k, v);
+
+        let graph = build_adopt_graph("main", &prs);
+
+        // Only feat/a should be adoptable; feat/c can't reach trunk through feat/b.
+        assert_eq!(graph.len(), 1);
+        assert_eq!(graph[0].branch, "feat/a");
+    }
 }
