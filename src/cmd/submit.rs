@@ -18,6 +18,7 @@ fn branches_to_submit(path_to_trunk: &[String], trunk: &str) -> Vec<String> {
 
 pub fn run(
     draft: bool,
+    no_draft: bool,
     title: Option<&str>,
     body: Option<&str>,
     body_file: Option<&str>,
@@ -35,6 +36,15 @@ pub fn run(
     if !state.is_managed(&current) {
         bail!(EzError::BranchNotInStack(current.clone()));
     }
+
+    // Resolve draft: --draft/--no-draft flags > config > false
+    let effective_draft = if no_draft {
+        false
+    } else if draft {
+        true
+    } else {
+        state.draft.unwrap_or(false)
+    };
 
     let resolved_body: Option<String> = match body_file {
         Some(path) => Some(github::body_from_file(path)?),
@@ -69,7 +79,7 @@ pub fn run(
             &mut state,
             branch,
             &parent,
-            draft,
+            effective_draft,
             title,
             resolved_body.as_deref(),
             body_explicitly_set,

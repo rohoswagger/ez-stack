@@ -147,6 +147,8 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Amend { message, all } => cmd::amend::run(message.as_deref(), all),
         Commands::Push {
             draft,
+            no_draft,
+            no_pr,
             title,
             body,
             body_file,
@@ -157,6 +159,8 @@ fn run(cli: Cli) -> Result<()> {
             message,
         } => cmd::push::run(
             draft,
+            no_draft,
+            no_pr,
             title.as_deref(),
             body.as_deref(),
             body_file.as_deref(),
@@ -168,11 +172,13 @@ fn run(cli: Cli) -> Result<()> {
         ),
         Commands::Submit {
             draft,
+            no_draft,
             title,
             body,
             body_file,
         } => cmd::submit::run(
             draft,
+            no_draft,
             title.as_deref(),
             body.as_deref(),
             body_file.as_deref(),

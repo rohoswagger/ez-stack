@@ -43,6 +43,8 @@ fn stack_ancestors(
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     draft: bool,
+    no_draft: bool,
+    no_pr: bool,
     title: Option<&str>,
     body: Option<&str>,
     body_file: Option<&str>,
@@ -53,7 +55,7 @@ pub fn run(
     commit_message: Option<&str>,
 ) -> Result<()> {
     if stack {
-        return crate::cmd::submit::run(draft, title, body, body_file);
+        return crate::cmd::submit::run(draft, no_draft, title, body, body_file);
     }
 
     if let Some(root) = git::current_linked_worktree_root()? {
@@ -113,6 +115,18 @@ pub fn run(
 
     let remote = &state.remote.clone();
 
+    // Resolve --no-pr: flag > config > false
+    let skip_pr = no_pr || state.no_pr.unwrap_or(false);
+
+    // Resolve draft: --draft/--no-draft flags > config > false
+    let effective_draft = if no_draft {
+        false
+    } else if draft {
+        true
+    } else {
+        state.draft.unwrap_or(false)
+    };
+
     let resolved_body: Option<String> = match body_file {
         Some(path) => Some(github::body_from_file(path)?),
         None => body.map(|s| s.to_string()),
@@ -131,6 +145,21 @@ pub fn run(
     sp.finish_and_clear();
     ui::info(&format!("Pushed `{current}`"));
 
+    if skip_pr {
+        state.save()?;
+        ui::success(&format!("Pushed `{current}` (no PR)"));
+        ui::receipt(&serde_json::json!({
+            "cmd": "push",
+            "branch": current,
+            "no_pr": true,
+            "scope_defined": commit_scope_defined,
+            "scope_mode": commit_scope_mode,
+            "out_of_scope_count": commit_out_of_scope_files.len(),
+            "out_of_scope_files": commit_out_of_scope_files,
+        }));
+        return Ok(());
+    }
+
     let body_explicitly_set = body.is_some() || body_file.is_some();
 
     // Create or update the PR.
@@ -144,7 +173,7 @@ pub fn run(
         &mut state,
         &current,
         &parent,
-        draft,
+        effective_draft,
         title,
         resolved_body.as_deref(),
         body_explicitly_set,
