@@ -441,6 +441,9 @@ Examples:
   eval \"$(ez shell-init)\"")]
     ShellInit,
 
+    /// View and update ez settings for the current repo
+    Config(ConfigArgs),
+
     /// Manage git worktrees
     Worktree(WorktreeArgs),
 }
@@ -494,6 +497,46 @@ Examples:
 Examples:
   ez scope clear")]
     Clear,
+}
+
+#[derive(Args)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: ConfigCommands,
+}
+
+#[derive(Subcommand)]
+pub enum ConfigCommands {
+    /// List all config settings
+    #[command(after_help = "\
+Examples:
+  ez config list")]
+    List,
+
+    /// Get the value of a config key
+    #[command(after_help = "\
+Examples:
+  ez config get trunk
+  ez config get remote")]
+    Get {
+        /// Config key to read
+        key: String,
+    },
+
+    /// Set a config key to a new value
+    #[command(after_help = "\
+Examples:
+  ez config set trunk develop
+  ez config set remote fork
+  ez config set default_from dev
+  ez config set repo owner/name")]
+    Set {
+        /// Config key to update
+        key: String,
+
+        /// New value
+        value: String,
+    },
 }
 
 #[derive(Args)]

@@ -231,6 +231,8 @@ mod tests {
         StackState {
             trunk: "main".to_string(),
             remote: "origin".to_string(),
+            default_from: None,
+            repo: None,
             branches,
         }
     }

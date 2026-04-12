@@ -2,6 +2,7 @@ pub mod amend;
 pub mod branch;
 pub mod checkout;
 pub mod commit;
+pub mod config;
 pub mod create;
 pub mod delete;
 pub mod diff;
