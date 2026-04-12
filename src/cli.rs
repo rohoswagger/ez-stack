@@ -28,6 +28,21 @@ Examples:
         trunk: Option<String>,
     },
 
+    /// Adopt branches from GitHub PRs into the local stack
+    #[command(after_help = "\
+Examples:
+  ez adopt
+  ez adopt --pr 42
+  ez adopt feat/auth feat/db")]
+    Adopt {
+        /// Adopt the chain for a specific PR number
+        #[arg(long)]
+        pr: Option<u64>,
+
+        /// Specific branch names to adopt
+        branches: Vec<String>,
+    },
+
     /// Create a new stacked branch (worktree by default)
     #[command(after_help = "\
 Examples:

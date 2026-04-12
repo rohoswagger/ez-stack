@@ -1,3 +1,4 @@
+pub mod adopt;
 pub mod amend;
 pub mod branch;
 pub mod checkout;
