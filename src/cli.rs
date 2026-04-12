@@ -141,8 +141,16 @@ Examples:
   ez push -Am \"feat: add auth and new snapshots\"")]
     Push {
         /// Create a draft PR
-        #[arg(long)]
+        #[arg(long, conflicts_with = "no_pr")]
         draft: bool,
+
+        /// Override draft config to create a ready-for-review PR
+        #[arg(long, conflicts_with = "no_pr")]
+        no_draft: bool,
+
+        /// Push the branch without creating or updating a PR
+        #[arg(long, conflicts_with_all = ["draft", "no_draft", "title", "body", "body_file"])]
+        no_pr: bool,
 
         /// PR title (defaults to first commit message)
         #[arg(long)]
@@ -186,11 +194,18 @@ Examples:
     #[command(after_help = "\
 Examples:
   ez submit
-  ez submit --draft")]
+  ez submit --draft
+
+Note: --draft only affects newly created PRs. Existing PRs are not changed.
+Use `ez ready` to undraft an existing PR.")]
     Submit {
-        /// Create draft PRs
+        /// Create draft PRs (only affects new PRs, not existing ones)
         #[arg(long)]
         draft: bool,
+
+        /// Override draft config to create ready-for-review PRs
+        #[arg(long)]
+        no_draft: bool,
 
         /// PR title (defaults to first commit message)
         #[arg(long)]
@@ -441,6 +456,9 @@ Examples:
   eval \"$(ez shell-init)\"")]
     ShellInit,
 
+    /// View and update ez settings for the current repo
+    Config(ConfigArgs),
+
     /// Manage git worktrees
     Worktree(WorktreeArgs),
 }
@@ -494,6 +512,46 @@ Examples:
 Examples:
   ez scope clear")]
     Clear,
+}
+
+#[derive(Args)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: ConfigCommands,
+}
+
+#[derive(Subcommand)]
+pub enum ConfigCommands {
+    /// List all config settings
+    #[command(after_help = "\
+Examples:
+  ez config list")]
+    List,
+
+    /// Get the value of a config key
+    #[command(after_help = "\
+Examples:
+  ez config get trunk
+  ez config get remote")]
+    Get {
+        /// Config key to read
+        key: String,
+    },
+
+    /// Set a config key to a new value
+    #[command(after_help = "\
+Examples:
+  ez config set trunk develop
+  ez config set remote fork
+  ez config set default_from dev
+  ez config set repo owner/name")]
+    Set {
+        /// Config key to update
+        key: String,
+
+        /// New value
+        value: String,
+    },
 }
 
 #[derive(Args)]
@@ -681,13 +739,68 @@ mod tests {
                 message,
                 stage_all,
                 stage_all_files,
+                no_pr,
+                no_draft,
                 ..
             } => {
                 assert_eq!(message.as_deref(), Some("feat: ship new files"));
                 assert!(!stage_all);
                 assert!(stage_all_files);
+                assert!(!no_pr);
+                assert!(!no_draft);
             }
             _ => panic!("expected push command"),
+        }
+    }
+
+    #[test]
+    fn parses_push_no_pr_flag() {
+        let cli = Cli::try_parse_from(["ez", "push", "--no-pr"]).expect("parse push --no-pr");
+
+        match cli.command {
+            Commands::Push { no_pr, draft, .. } => {
+                assert!(no_pr);
+                assert!(!draft);
+            }
+            _ => panic!("expected push command"),
+        }
+    }
+
+    #[test]
+    fn push_no_pr_conflicts_with_draft() {
+        let result = Cli::try_parse_from(["ez", "push", "--no-pr", "--draft"]);
+        assert!(result.is_err(), "--no-pr and --draft should conflict");
+    }
+
+    #[test]
+    fn parses_push_no_draft_flag() {
+        let cli =
+            Cli::try_parse_from(["ez", "push", "--no-draft"]).expect("parse push --no-draft");
+
+        match cli.command {
+            Commands::Push {
+                no_draft, draft, ..
+            } => {
+                assert!(no_draft);
+                assert!(!draft);
+            }
+            _ => panic!("expected push command"),
+        }
+    }
+
+    #[test]
+    fn parses_submit_no_draft_flag() {
+        let cli =
+            Cli::try_parse_from(["ez", "submit", "--no-draft"]).expect("parse submit --no-draft");
+
+        match cli.command {
+            Commands::Submit {
+                no_draft, draft, ..
+            } => {
+                assert!(no_draft);
+                assert!(!draft);
+            }
+            _ => panic!("expected submit command"),
         }
     }
 

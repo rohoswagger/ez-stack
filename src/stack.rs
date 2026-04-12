@@ -32,6 +32,16 @@ pub struct BranchMeta {
 pub struct StackState {
     pub trunk: String,
     pub remote: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_pr: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerere: Option<bool>,
     pub branches: HashMap<String, BranchMeta>,
 }
 
@@ -40,6 +50,11 @@ impl StackState {
         Self {
             trunk,
             remote: "origin".to_string(),
+            default_from: None,
+            repo: None,
+            draft: None,
+            no_pr: None,
+            rerere: None,
             branches: HashMap::new(),
         }
     }
