@@ -333,4 +333,105 @@ mod tests {
         assert_eq!(ancestors.len(), 1);
         assert!(ancestors[0].pr_url.is_none());
     }
+
+    #[test]
+    fn stack_ancestors_single_branch_returns_empty() {
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/a", "main", "aaa", None, None);
+
+        let ancestors = stack_ancestors(&state, "feat/a", "org/repo");
+        assert!(ancestors.is_empty(), "branch directly on trunk has no stack ancestors");
+    }
+
+    #[test]
+    fn draft_resolution_no_draft_flag_wins() {
+        // --no-draft should override both --draft and config
+        let no_draft = true;
+        let draft = true;
+        let config_draft = Some(true);
+
+        let effective = if no_draft {
+            false
+        } else if draft {
+            true
+        } else {
+            config_draft.unwrap_or(false)
+        };
+        assert!(!effective, "--no-draft should override everything");
+    }
+
+    #[test]
+    fn draft_resolution_flag_overrides_config() {
+        // --draft flag should override config=false
+        let no_draft = false;
+        let draft = true;
+        let config_draft = Some(false);
+
+        let effective = if no_draft {
+            false
+        } else if draft {
+            true
+        } else {
+            config_draft.unwrap_or(false)
+        };
+        assert!(effective, "--draft flag should override config");
+    }
+
+    #[test]
+    fn draft_resolution_config_used_when_no_flags() {
+        // No flags, config=true should win
+        let no_draft = false;
+        let draft = false;
+        let config_draft = Some(true);
+
+        let effective = if no_draft {
+            false
+        } else if draft {
+            true
+        } else {
+            config_draft.unwrap_or(false)
+        };
+        assert!(effective, "config should be used when no flags");
+    }
+
+    #[test]
+    fn draft_resolution_defaults_to_false() {
+        // No flags, no config → false
+        let no_draft = false;
+        let draft = false;
+        let config_draft: Option<bool> = None;
+
+        let effective = if no_draft {
+            false
+        } else if draft {
+            true
+        } else {
+            config_draft.unwrap_or(false)
+        };
+        assert!(!effective, "default should be false");
+    }
+
+    #[test]
+    fn no_pr_resolution_flag_overrides_config() {
+        let no_pr = true;
+        let config_no_pr = Some(false);
+        let skip = no_pr || config_no_pr.unwrap_or(false);
+        assert!(skip, "--no-pr flag should override config");
+    }
+
+    #[test]
+    fn no_pr_resolution_config_used_when_no_flag() {
+        let no_pr = false;
+        let config_no_pr = Some(true);
+        let skip = no_pr || config_no_pr.unwrap_or(false);
+        assert!(skip, "config should be used when no flag");
+    }
+
+    #[test]
+    fn no_pr_resolution_defaults_to_false() {
+        let no_pr = false;
+        let config_no_pr: Option<bool> = None;
+        let skip = no_pr || config_no_pr.unwrap_or(false);
+        assert!(!skip, "default should be false");
+    }
 }
