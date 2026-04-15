@@ -286,8 +286,18 @@ mod tests {
         state.save().expect("save state");
 
         // ez create feat/test --from main should create a worktree.
-        run("feat/test", None, false, false, Some("main"), false, &[], None, None)
-            .expect("create with --from should succeed");
+        run(
+            "feat/test",
+            None,
+            false,
+            false,
+            Some("main"),
+            false,
+            &[],
+            None,
+            None,
+        )
+        .expect("create with --from should succeed");
 
         // Verify the branch exists.
         assert!(git::branch_exists("feat/test"));
@@ -322,8 +332,18 @@ mod tests {
         state.save().expect("save state");
 
         // ez create feat/test --from main --no-worktree should NOT create a worktree.
-        run("feat/test", None, false, false, Some("main"), true, &[], None, None)
-            .expect("create with --from --no-worktree should succeed");
+        run(
+            "feat/test",
+            None,
+            false,
+            false,
+            Some("main"),
+            true,
+            &[],
+            None,
+            None,
+        )
+        .expect("create with --from --no-worktree should succeed");
 
         assert!(git::branch_exists("feat/test"));
 
@@ -373,8 +393,18 @@ mod tests {
         state.save().expect("save state");
 
         // Create child from managed (non-trunk) parent.
-        run("feat/child", None, false, false, Some("feat/base"), true, &[], None, None)
-            .expect("create from managed parent should succeed");
+        run(
+            "feat/child",
+            None,
+            false,
+            false,
+            Some("feat/base"),
+            true,
+            &[],
+            None,
+            None,
+        )
+        .expect("create from managed parent should succeed");
 
         let reloaded = StackState::load().expect("reload state");
         let meta = reloaded.get_branch("feat/child").expect("child meta");
@@ -392,12 +422,32 @@ mod tests {
         state.save().expect("save state");
 
         // Create the branch first.
-        run("feat/test", None, false, false, Some("main"), true, &[], None, None)
-            .expect("first create should succeed");
+        run(
+            "feat/test",
+            None,
+            false,
+            false,
+            Some("main"),
+            true,
+            &[],
+            None,
+            None,
+        )
+        .expect("first create should succeed");
 
         // Second create with same name should fail.
-        let err = run("feat/test", None, false, false, Some("main"), true, &[], None, None)
-            .expect_err("duplicate should fail");
+        let err = run(
+            "feat/test",
+            None,
+            false,
+            false,
+            Some("main"),
+            true,
+            &[],
+            None,
+            None,
+        )
+        .expect_err("duplicate should fail");
         assert!(
             err.to_string().contains("already exists"),
             "unexpected error: {err:#}"

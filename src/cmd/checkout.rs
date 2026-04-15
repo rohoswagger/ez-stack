@@ -82,9 +82,7 @@ pub(crate) fn switch_to(
         // Managed branch without a worktree — create one and cd into it.
         let wt_path = git::worktree_path(target)?;
         git::worktree_add(&wt_path, target)?;
-        ui::success(&format!(
-            "Created worktree for `{target}` → {wt_path}"
-        ));
+        ui::success(&format!("Created worktree for `{target}` → {wt_path}"));
         ui::hint(&worktree_edit_hint(&wt_path));
         println!("{wt_path}");
     } else {
@@ -403,7 +401,10 @@ mod tests {
             .iter()
             .filter(|wt| wt.branch.as_deref() == Some("feat/test"))
             .count();
-        assert_eq!(wt_count, 1, "should have exactly one worktree for feat/test");
+        assert_eq!(
+            wt_count, 1,
+            "should have exactly one worktree for feat/test"
+        );
     }
 
     #[test]
