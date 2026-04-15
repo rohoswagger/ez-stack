@@ -20,10 +20,7 @@ struct AdoptCandidate {
 /// Build the adoption graph from open PRs.
 /// Returns candidates keyed by branch name, only including branches whose
 /// base chain leads back to trunk.
-fn build_adopt_graph(
-    trunk: &str,
-    prs: &HashMap<String, github::PrInfo>,
-) -> Vec<AdoptCandidate> {
+fn build_adopt_graph(trunk: &str, prs: &HashMap<String, github::PrInfo>) -> Vec<AdoptCandidate> {
     // Filter to open PRs only.
     let open_prs: HashMap<&str, &github::PrInfo> = prs
         .iter()
@@ -193,15 +190,16 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
         // Check for branches that have no PRs.
         for branch in specific_branches {
             if !filtered.contains_key(branch.as_str()) {
-                ui::warn(&format!(
-                    "Branch `{branch}` has no open PR — skipping"
-                ));
+                ui::warn(&format!("Branch `{branch}` has no open PR — skipping"));
             }
         }
 
         let graph = build_adopt_graph(&state.trunk, &filtered);
         if graph.is_empty() {
-            bail!("None of the specified branches have open PRs rooted on `{}`", state.trunk);
+            bail!(
+                "None of the specified branches have open PRs rooted on `{}`",
+                state.trunk
+            );
         }
         graph
     } else {
@@ -215,10 +213,7 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
     };
 
     // Report what we found.
-    ui::header(&format!(
-        "Found {} branch(es) to adopt",
-        candidates.len()
-    ));
+    ui::header(&format!("Found {} branch(es) to adopt", candidates.len()));
     for c in &candidates {
         let draft = if c.is_draft { " [draft]" } else { "" };
         let already = if state.is_managed(&c.branch) {
@@ -254,10 +249,7 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
 
         // Ensure the local branch exists. Fetch from remote if needed.
         if !git::branch_exists(&candidate.branch) {
-            ui::info(&format!(
-                "Fetching `{}` from remote...",
-                candidate.branch
-            ));
+            ui::info(&format!("Fetching `{}` from remote...", candidate.branch));
             git::fetch_branch(&state.remote, &candidate.branch)?;
 
             // Create local tracking branch.
@@ -278,8 +270,7 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
         let parent = &candidate.base;
         let parent_head = git::rev_parse(parent).unwrap_or_else(|_| {
             // Parent might be a remote branch.
-            git::rev_parse(&format!("{}/{}", state.remote, parent))
-                .unwrap_or_default()
+            git::rev_parse(&format!("{}/{}", state.remote, parent)).unwrap_or_default()
         });
 
         if parent_head.is_empty() {
@@ -292,13 +283,7 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
         }
 
         // Add to stack state.
-        state.add_branch(
-            &candidate.branch,
-            parent,
-            &parent_head,
-            None,
-            None,
-        );
+        state.add_branch(&candidate.branch, parent, &parent_head, None, None);
 
         // Set the PR number.
         if let Ok(meta) = state.get_branch_mut(&candidate.branch) {
@@ -318,9 +303,7 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
 
     // Summary.
     if adopted == 0 && skipped > 0 {
-        ui::info(&format!(
-            "All {skipped} branch(es) were already tracked"
-        ));
+        ui::info(&format!("All {skipped} branch(es) were already tracked"));
     } else {
         ui::success(&format!(
             "Adopted {adopted} branch(es), {skipped} already tracked"
