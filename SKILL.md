@@ -115,6 +115,15 @@ ez merge --stack --yes                   # merge the current linear stack bottom
 ez sync --autostash   # pulls trunk, cleans merged PRs, restacks your branches
 ```
 
+### Adopt branches from another machine or collaborator
+```bash
+ez adopt              # adopt all open PRs rooted on trunk
+ez adopt --pr 42      # adopt PR #42 and its dependency chain
+ez adopt feat/a feat/b  # adopt specific branches by name
+```
+
+`ez adopt` reads the PR graph from GitHub and reconstructs `stack.json` locally. Use it to continue working on someone else's stack from a fresh clone.
+
 ### Finish
 ```bash
 cd $(ez delete my-task --yes)   # removes worktree + branch, stops the branch dev server, cd's to repo root
@@ -156,4 +165,4 @@ Check `redundant_commits > 0` after sync/restack — means commits were auto-dro
 
 ## Advanced Commands
 
-See [reference.md](reference.md) for the full command reference: `ez commit`, `ez amend`, `ez diff`, `ez status`, `ez restack`, `ez log`, `ez move`, `ez merge`, `ez switch`, `ez pr-edit`, `ez draft`/`ez ready`, `ez pr-link`, `ez update`, `ez setup`, `ez skill install`.
+See [reference.md](reference.md) for the full command reference: `ez adopt`, `ez commit`, `ez amend`, `ez diff`, `ez status`, `ez restack`, `ez log`, `ez move`, `ez merge`, `ez switch`, `ez pr-edit`, `ez draft`/`ez ready`, `ez pr-link`, `ez update`, `ez setup`, `ez skill install`.
