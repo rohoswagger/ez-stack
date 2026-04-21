@@ -47,8 +47,23 @@ pub fn run(
             )));
         }
         base.to_string()
+    } else if state.is_trunk(&current) {
+        // On trunk with no --from: use default_from config if set.
+        if let Some(ref default_from) = state.default_from {
+            if state.is_trunk(default_from) || state.is_managed(default_from) {
+                ui::info(&format!("Using default parent `{default_from}` (from config)"));
+                default_from.clone()
+            } else {
+                ui::warn(&format!(
+                    "Configured default_from `{default_from}` is not a tracked branch — using trunk"
+                ));
+                current.clone()
+            }
+        } else {
+            current.clone()
+        }
     } else {
-        if !state.is_trunk(&current) && !state.is_managed(&current) {
+        if !state.is_managed(&current) {
             bail!(EzError::UserMessage(format!(
                 "current branch `{current}` is not tracked by ez — switch to a managed branch or trunk first"
             )));
@@ -220,6 +235,11 @@ mod tests {
         StackState {
             trunk: "main".to_string(),
             remote: "origin".to_string(),
+            default_from: None,
+            repo: None,
+            draft: None,
+            no_pr: None,
+            rerere: None,
             branches,
         }
     }
