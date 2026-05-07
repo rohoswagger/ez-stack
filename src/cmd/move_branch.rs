@@ -7,8 +7,12 @@ use crate::github;
 use crate::stack::StackState;
 use crate::ui;
 
-pub fn run(onto: &str) -> Result<()> {
+pub fn run(onto: Option<&str>) -> Result<()> {
     let mut state = StackState::load()?;
+    let Some(onto) = onto.filter(|value| !value.trim().is_empty()) else {
+        bail!(EzError::UserMessage(missing_onto_message(&state)));
+    };
+
     if let Some(root) = git::current_linked_worktree_root()? {
         ui::linked_worktree_warning(&root);
     }
@@ -140,4 +144,40 @@ pub fn run(onto: &str) -> Result<()> {
     }));
 
     Ok(())
+}
+
+fn missing_onto_message(state: &StackState) -> String {
+    let mut branches = vec![format!("{} (trunk)", state.trunk)];
+    branches.extend(state.topo_order());
+
+    let mut message = String::from("Missing target branch for `ez move --onto`\n");
+    message.push_str("Available branches:\n");
+    for branch in branches {
+        message.push_str(&format!("  - {branch}\n"));
+    }
+    message.push_str("  -> Run: `ez move --onto <branch>`");
+    message
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_state() -> StackState {
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/base", "main", "aaa", None, None);
+        state.add_branch("feat/top", "feat/base", "bbb", None, None);
+        state
+    }
+
+    #[test]
+    fn missing_onto_message_lists_trunk_and_managed_branches() {
+        let message = missing_onto_message(&sample_state());
+
+        assert!(message.contains("Missing target branch for `ez move --onto`"));
+        assert!(message.contains("Available branches:"));
+        assert!(message.contains("  - main (trunk)"));
+        assert!(message.contains("  - feat/base"));
+        assert!(message.contains("  - feat/top"));
+    }
 }
