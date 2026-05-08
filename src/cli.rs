@@ -16,21 +16,30 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize ez in the current git repository
+    /// Initialize this repo for ez by writing repo-local stack metadata
     #[command(after_help = "\
+What it changes:
+  Writes repo-local ez metadata under .git/ez/. It does not edit your shell config.
+
 Examples:
-  ez init
   ez init --yes
-  ez init --trunk main
-  ez init --trunk develop")]
+  ez init --trunk main --yes
+  ez init --trunk main --rerere
+  ez init                    # prints this help")]
     Init {
         /// Trunk branch name (auto-detected if not provided)
         #[arg(long)]
         trunk: Option<String>,
 
-        /// Accept recommended defaults without prompting (for agents and scripts)
+        /// Accept recommended repo defaults (for agents and scripts). Currently includes
+        /// initializing with the detected trunk and enabling git rerere; more may be added later.
         #[arg(short, long)]
         yes: bool,
+
+        /// Enable git rerere when initializing (included in `--yes`; use without `--yes` to opt in
+        /// only to rerere alongside other flags)
+        #[arg(long)]
+        rerere: bool,
     },
 
     /// Adopt branches from GitHub PRs into the local stack
@@ -459,15 +468,24 @@ Examples:
         check: bool,
     },
 
-    /// Configure shell integration (PATH + auto-cd for worktrees)
+    /// Configure this machine's shell integration for ez
     #[command(after_help = "\
+What it changes:
+  Updates your shell rc file so ez can manage PATH and auto-cd for worktrees.
+  It does not initialize the current repo. Use `ez init` for repo setup.
+
 Examples:
-  ez setup
-  ez setup --yes")]
+  ez setup --yes
+  ez setup --interactive
+  ez setup                   # prints this help")]
     Setup {
         /// Skip confirmation (for agents and scripts)
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "interactive")]
         yes: bool,
+
+        /// Preview shell config edits and prompt before applying them
+        #[arg(short, long)]
+        interactive: bool,
     },
 
     /// Manage the current branch's scope configuration
@@ -652,19 +670,92 @@ Examples:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn top_level_help_distinguishes_repo_init_from_machine_setup() {
+        let help = Cli::command().render_help().to_string();
+        assert!(help.contains("Initialize this repo for ez"));
+        assert!(help.contains("Configure this machine's shell integration"));
+    }
 
     #[test]
     fn parses_init_yes_flag() {
         let cli = Cli::try_parse_from(["ez", "init", "--yes"]).expect("parse init --yes");
 
         match cli.command {
-            Commands::Init { yes, trunk } => {
+            Commands::Init { yes, trunk, rerere } => {
                 assert!(yes);
                 assert!(trunk.is_none());
+                assert!(!rerere);
             }
             _ => panic!("expected init command"),
         }
+    }
+
+    #[test]
+    fn parses_init_rerere_flag() {
+        let cli = Cli::try_parse_from(["ez", "init", "--rerere"]).expect("parse init --rerere");
+
+        match cli.command {
+            Commands::Init { yes, rerere, .. } => {
+                assert!(!yes);
+                assert!(rerere);
+            }
+            _ => panic!("expected init command"),
+        }
+    }
+
+    #[test]
+    fn parses_init_yes_and_rerere_together() {
+        let cli = Cli::try_parse_from(["ez", "init", "--yes", "--rerere"])
+            .expect("parse init --yes --rerere");
+
+        match cli.command {
+            Commands::Init { yes, rerere, .. } => {
+                assert!(yes);
+                assert!(rerere);
+            }
+            _ => panic!("expected init command"),
+        }
+    }
+
+    #[test]
+    fn parses_init_trunk_and_rerere() {
+        let cli = Cli::try_parse_from(["ez", "init", "--trunk", "develop", "--rerere"])
+            .expect("parse init trunk rerere");
+
+        match cli.command {
+            Commands::Init { trunk, rerere, yes } => {
+                assert_eq!(trunk.as_deref(), Some("develop"));
+                assert!(rerere);
+                assert!(!yes);
+            }
+            _ => panic!("expected init command"),
+        }
+    }
+
+    #[test]
+    fn parses_setup_interactive_flag() {
+        let cli =
+            Cli::try_parse_from(["ez", "setup", "--interactive"]).expect("parse setup interactive");
+
+        match cli.command {
+            Commands::Setup { yes, interactive } => {
+                assert!(!yes);
+                assert!(interactive);
+            }
+            _ => panic!("expected setup command"),
+        }
+    }
+
+    #[test]
+    fn setup_yes_conflicts_with_interactive() {
+        let err = match Cli::try_parse_from(["ez", "setup", "--yes", "--interactive"]) {
+            Ok(_) => panic!("yes and interactive should conflict"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

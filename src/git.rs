@@ -469,7 +469,7 @@ pub fn default_branch() -> Result<String> {
         }
     }
 
-    bail!("could not detect default branch — set it manually with `ez init --trunk <branch>`")
+    bail!("could not detect default branch — set it manually with `ez init --trunk <branch> --yes`")
 }
 
 pub fn log_oneline(range: &str, max: usize) -> Result<Vec<(String, String)>> {

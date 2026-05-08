@@ -11,7 +11,8 @@ Instructions for AI agents working with `ez-stack`.
 ```bash
 # First install
 pip install ez-stack
-ez setup --yes    # configures shell integration (PATH + worktree auto-cd)
+ez setup --yes    # one-time machine shell setup (PATH + worktree auto-cd)
+ez init --yes    # one-time repo setup + recommended defaults (includes rerere; add `--trunk` if detection fails)
 
 # Update to latest (auto-detects install method)
 ez update
@@ -19,6 +20,10 @@ ez update
 # Check for updates without installing
 ez update --check
 ```
+
+Bare `ez setup` and `ez init` are discovery commands: they print help instead of mutating.
+Use `ez setup --interactive` when a human wants a confirmation prompt before editing shell rc files.
+Enable git rerere without other defaults via `ez init --rerere` (for example with `--trunk main`), or use `ez config set rerere true` later.
 
 Requirements:
 

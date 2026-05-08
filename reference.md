@@ -84,9 +84,14 @@ Preferred workflow:
 
 | Intent | Command |
 |--------|---------|
-| Initialize ez non-interactively | `ez init --yes` |
+| Initialize this repo for ez (detected trunk + recommended defaults, including rerere) | `ez init --yes` |
+| Initialize with explicit trunk + rerere only | `ez init --trunk main --rerere` |
+| Initialize with explicit trunk and full defaults | `ez init --trunk main --yes` |
+| Show init help (no mutation) | `ez init` |
 | Install skill in repo | `ez skill install` |
-| Shell integration | `ez setup --yes` |
+| Configure this machine's shell integration | `ez setup --yes` |
+| Show setup help without prompting | `ez setup` |
+| Prompt before shell config edits | `ez setup --interactive` |
 | List repo config | `ez config list` |
 | Read repo config | `ez config get default_from` |
 | Update repo config | `ez config set draft true` |

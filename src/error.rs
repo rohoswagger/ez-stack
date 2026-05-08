@@ -8,7 +8,9 @@ pub enum EzError {
     )]
     NotARepo,
 
-    #[error("ez is not initialized in this repo — run `ez init` first")]
+    #[error(
+        "ez is not initialized in this repo — run `ez init --yes` to apply recommended defaults (use `ez init` for help)"
+    )]
     NotInitialized,
 
     #[error("ez is already initialized in this repo — run `ez log` to see the current stack")]
@@ -69,7 +71,7 @@ mod tests {
         assert!(
             EzError::NotInitialized
                 .to_string()
-                .contains("run `ez init` first")
+                .contains("ez init --yes")
         );
         assert!(
             EzError::BranchNotInStack("feat/x".into())

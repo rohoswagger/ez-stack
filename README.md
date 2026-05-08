@@ -14,8 +14,8 @@
 
 ```bash
 pip install ez-stack
-ez setup --yes
-ez init
+ez setup --yes  # one-time machine shell setup
+ez init --yes   # one-time repo setup (includes git rerere)
 ```
 
 ## The 4 Commands
@@ -194,8 +194,12 @@ Intended workflow:
 
 | Command | Description |
 |---------|-------------|
-| `ez init --yes` | Initialize ez and accept recommended non-interactive defaults |
-| `ez setup --yes` | Configure shell integration |
+| `ez init --yes` | Agent path: initialize with detected trunk under `.git/ez/` and enable recommended defaults (including git rerere) |
+| `ez init --trunk main --yes` | Same with an explicit trunk |
+| `ez init --trunk main --rerere` | Initialize with explicit trunk and rerere only (no `--yes`) |
+| `ez setup --yes` | Agent path: configure this machine's shell integration for PATH and worktree auto-cd |
+| `ez init` / `ez setup` | Discovery path: print command help instead of mutating |
+| `ez setup --interactive` | Human path: preview shell rc edits and prompt before applying |
 | `ez config list/get/set` | View or update repo settings such as `default_from`, `draft`, `no_pr`, and `rerere` |
 | `ez skill install` | Install the ez-workflow skill for AI agents |
 | `ez update` | Update to latest version |

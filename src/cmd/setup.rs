@@ -99,7 +99,7 @@ fn planned_setup_lines(
     lines_to_add
 }
 
-pub fn run(yes: bool) -> Result<()> {
+pub fn run(yes: bool, interactive: bool) -> Result<()> {
     let shell = detect_shell();
 
     let Some(shell) = shell else {
@@ -144,7 +144,7 @@ pub fn run(yes: bool) -> Result<()> {
         eprintln!("  {line}");
     }
 
-    if !yes && !ui::confirm("Add these lines?") {
+    if !yes && interactive && !ui::confirm("Add these lines?") {
         ui::info("Cancelled — add manually if needed");
         return Ok(());
     }

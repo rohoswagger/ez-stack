@@ -5,7 +5,11 @@ use crate::git;
 use crate::stack::StackState;
 use crate::ui;
 
-pub fn run(trunk: Option<String>, yes: bool) -> Result<()> {
+/// Initialize this repo for ez: write stack metadata under `.git/ez/`.
+///
+/// When `with_rerere` is true, enables git rerere if not already on. The CLI sets this for `--yes`
+/// (recommended defaults) and/or `--rerere`.
+pub fn run(trunk: Option<String>, with_rerere: bool) -> Result<()> {
     if !git::is_repo() {
         bail!(EzError::NotARepo);
     }
@@ -21,14 +25,7 @@ pub fn run(trunk: Option<String>, yes: bool) -> Result<()> {
 
     let mut state = StackState::new(trunk.clone());
 
-    // Suggest enabling rerere for conflict recording.
-    let rerere_enabled = is_rerere_enabled();
-    if !rerere_enabled
-        && (yes
-            || ui::confirm(
-                "Enable git rerere for automatic conflict resolution recording? (Recommended for stacked PRs)",
-            ))
-    {
+    if !is_rerere_enabled() && with_rerere {
         enable_rerere();
         state.rerere = Some(true);
     }
@@ -120,6 +117,7 @@ mod tests {
         let state = StackState::load().expect("load state");
         assert_eq!(state.trunk, "main");
         assert_eq!(state.remote, "origin");
+        assert_ne!(state.rerere, Some(true));
     }
 
     #[test]
@@ -138,16 +136,27 @@ mod tests {
     }
 
     #[test]
-    fn init_yes_enables_rerere_without_prompting() {
+    fn init_recommended_defaults_enable_git_rerere() {
         let _guard = take_env_lock();
-        let repo = init_git_repo("init-yes");
+        let repo = init_git_repo("init-rerere");
         let _cwd = CwdGuard::enter(&repo);
 
+        // Same `with_rerere` the CLI passes for `ez init --yes` or `ez init --rerere`.
         run(None, true).expect("init should succeed");
         let state = StackState::load().expect("load state");
         assert_eq!(state.rerere, Some(true));
         assert_eq!(git_config("rerere.enabled"), "true");
         assert_eq!(git_config("rerere.autoupdate"), "true");
+    }
+
+    #[test]
+    fn init_trunk_with_rerere_only_enables_rerere() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("init-trunk-rerere");
+        let _cwd = CwdGuard::enter(&repo);
+
+        run(Some("main".into()), true).expect("init should succeed");
+        assert_eq!(git_config("rerere.enabled"), "true");
     }
 
     fn git_config(key: &str) -> String {

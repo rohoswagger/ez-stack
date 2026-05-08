@@ -15,7 +15,7 @@ mod test_support;
 mod ui;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use cli::{Cli, Commands, ConfigCommands, ScopeCommands, SkillCommands, WorktreeCommands};
 use std::time::Instant;
 
@@ -59,9 +59,11 @@ fn main() {
 
     match run(cli) {
         Ok(()) => {
-            // First-run hint: prompt to run `ez setup` once.
+            // First-run hint: prompt to configure this machine's shell once.
             if !is_setup_command && !cmd::setup::is_setup_done() {
-                ui::hint("Shell not configured — run `ez setup` for PATH and worktree auto-cd");
+                ui::hint(
+                    "Machine shell not configured — run `ez setup --yes` for PATH and worktree auto-cd",
+                );
             }
             ui::exit_status(0, start.elapsed());
         }
@@ -111,7 +113,13 @@ fn handle_clap_error(e: clap::Error, start: Instant) {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Commands::Init { trunk, yes } => cmd::init::run(trunk, yes),
+        Commands::Init { trunk, yes, rerere } => {
+            if trunk.is_none() && !yes && !rerere {
+                print_subcommand_help("init")
+            } else {
+                cmd::init::run(trunk, yes || rerere)
+            }
+        }
         Commands::Adopt { pr, branches } => cmd::adopt::run(pr, &branches),
         Commands::Create {
             name,
@@ -215,7 +223,13 @@ fn run(cli: Cli) -> Result<()> {
         Commands::PrLink => cmd::pr_link::run(),
         Commands::Pr => cmd::pr_view::run(),
         Commands::Update { version, check } => cmd::update::run(version.as_deref(), check),
-        Commands::Setup { yes } => cmd::setup::run(yes),
+        Commands::Setup { yes, interactive } => {
+            if !yes && !interactive {
+                print_subcommand_help("setup")
+            } else {
+                cmd::setup::run(yes, interactive)
+            }
+        }
         Commands::Scope(args) => match args.command {
             ScopeCommands::Show => cmd::scope::show(),
             ScopeCommands::Add { mode, patterns } => cmd::scope::add(&patterns, mode),
@@ -242,6 +256,15 @@ fn run(cli: Cli) -> Result<()> {
             WorktreeCommands::List => cmd::list::run(false),
         },
     }
+}
+
+fn print_subcommand_help(name: &str) -> Result<()> {
+    let mut command = Cli::command();
+    if let Some(subcommand) = command.find_subcommand_mut(name) {
+        subcommand.print_help()?;
+        println!();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
