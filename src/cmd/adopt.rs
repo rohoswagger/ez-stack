@@ -105,21 +105,10 @@ fn adoption_parent_head(branch: &str, parent: &str) -> Result<String> {
     git::merge_base(branch, parent)
 }
 
-/// Walk the ancestor chain of every PR in `prs` and fetch any missing parent
-/// PRs in batches. Terminates once no new bases are discovered.
-///
-/// Each iteration issues at most one GraphQL request via `get_pr_statuses_for`.
-/// Bounded by stack depth, not by repo PR count.
 fn expand_ancestor_chains(prs: &mut HashMap<String, github::PrInfo>, remote: &str, trunk: &str) {
     expand_ancestor_chains_with(prs, trunk, |refs| github::get_pr_statuses_for(remote, refs));
 }
 
-/// Generic version of `expand_ancestor_chains` that takes the fetcher as a
-/// closure so unit tests can stub out the network.
-///
-/// A `tried` set prevents re-fetching branches that have no PR — without it
-/// we'd loop forever on broken chains (an absent base is indistinguishable
-/// from an unfetched one in a HashMap miss).
 fn expand_ancestor_chains_with<F>(
     prs: &mut HashMap<String, github::PrInfo>,
     trunk: &str,
@@ -127,6 +116,9 @@ fn expand_ancestor_chains_with<F>(
 ) where
     F: FnMut(&[&str]) -> HashMap<String, github::PrInfo>,
 {
+    // `tried` distinguishes "missing because we haven't fetched yet" from
+    // "missing because no PR exists upstream"; without it we'd loop forever
+    // re-fetching the same broken-chain base.
     let mut tried: HashSet<String> = HashSet::new();
     loop {
         let missing: Vec<String> = prs
@@ -145,16 +137,12 @@ fn expand_ancestor_chains_with<F>(
         let refs: Vec<&str> = missing.iter().map(String::as_str).collect();
         let new_prs = fetch(&refs);
         if new_prs.is_empty() {
-            // None of the missing bases have PRs — chain terminates here.
             break;
         }
         prs.extend(new_prs);
     }
 }
 
-/// Return the branches whose PRs base on something that's neither trunk nor
-/// another local PR — these are dropped by `build_adopt_graph` as unrooted.
-/// Output is sorted for deterministic warning order.
 fn orphan_local_prs<'a>(prs: &'a HashMap<String, github::PrInfo>, trunk: &str) -> Vec<&'a String> {
     let mut orphans: Vec<&String> = prs
         .iter()
@@ -165,13 +153,6 @@ fn orphan_local_prs<'a>(prs: &'a HashMap<String, github::PrInfo>, trunk: &str) -
     orphans
 }
 
-/// Default-mode fetcher: PRs for local branches only, no ancestor expansion.
-/// One GraphQL call regardless of how many PRs exist on the remote.
-///
-/// Returning only direct local PRs is intentional. If a local PR's base
-/// isn't local-with-PR and isn't trunk, `build_adopt_graph` drops it as
-/// unrooted and the caller warns the user. Hidden ancestor walking would
-/// silently re-expand the per-PR cost we're trying to eliminate.
 fn fetch_local_prs(remote: &str) -> Result<HashMap<String, github::PrInfo>> {
     let local = git::branch_list().unwrap_or_default();
     if local.is_empty() {
@@ -183,9 +164,6 @@ fn fetch_local_prs(remote: &str) -> Result<HashMap<String, github::PrInfo>> {
     Ok(prs)
 }
 
-/// Fetcher for `ez adopt feat/a feat/b`: PRs for named branches plus their
-/// ancestor chain. Users name top-of-chain branches and expect ez to discover
-/// the intermediate branches automatically.
 fn fetch_prs_by_branches(
     remote: &str,
     trunk: &str,
@@ -198,9 +176,6 @@ fn fetch_prs_by_branches(
     Ok(prs)
 }
 
-/// Fetcher for `ez adopt --pr <N>`: start from one PR (head branch may not
-/// be local yet) and walk to trunk. Returns the seed PR's title so the
-/// caller can format a useful error if the chain doesn't root.
 fn fetch_prs_by_number(
     remote: &str,
     trunk: &str,
@@ -219,7 +194,6 @@ fn fetch_prs_by_number(
 
 pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
     let mut state = StackState::load().or_else(|_| {
-        // If ez isn't initialized, try to auto-detect trunk and init.
         let trunk = git::default_branch().unwrap_or_else(|_| "main".to_string());
         let state = StackState::new(trunk.clone());
         state.save()?;
@@ -227,7 +201,6 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
         Ok::<StackState, anyhow::Error>(state)
     })?;
 
-    // Check gh authentication.
     if !github::is_gh_authenticated() {
         bail!(EzError::GhError(
             "not authenticated — run `gh auth login` first".to_string()
@@ -253,7 +226,6 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
         let prs = fetch_prs_by_branches(&state.remote, &state.trunk, specific_branches)?;
         sp.finish_and_clear();
 
-        // Warn for branches the user named that have no open PR.
         for branch in specific_branches {
             if !prs.contains_key(branch.as_str()) {
                 ui::warn(&format!("Branch `{branch}` has no open PR — skipping"));
@@ -269,10 +241,10 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
         }
         graph
     } else {
-        // Default: scope strictly to local branches with open PRs. No ancestor
-        // expansion — if a local PR's base isn't local-with-PR and isn't trunk,
-        // build_adopt_graph drops it as unrooted. Users who want broader
-        // adoption can pass --branches or --pr.
+        // Default scopes strictly to local branches. Local PRs whose base
+        // isn't another local PR (or trunk) are warned and dropped — we
+        // deliberately don't auto-expand to the remote chain, since that
+        // would silently re-introduce per-PR network cost in large repos.
         let sp = ui::spinner("Fetching PRs for local branches...");
         let prs = fetch_local_prs(&state.remote)?;
         sp.finish_and_clear();
@@ -285,9 +257,6 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
             return Ok(());
         }
 
-        // Warn about local PRs whose base isn't trunk and isn't another local
-        // PR — they would have been adopted by the old global-scan behavior
-        // but are dropped here because their parent isn't tracked.
         for orphan in orphan_local_prs(&prs, &state.trunk) {
             let pr_info = &prs[orphan];
             ui::warn(&format!(
@@ -308,7 +277,6 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
         graph
     };
 
-    // Report what we found.
     ui::header(&format!("Found {} branch(es) to adopt", candidates.len()));
     for c in &candidates {
         let draft = if c.is_draft { " [draft]" } else { "" };
@@ -323,13 +291,11 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
         ));
     }
 
-    // Adopt each candidate.
     let mut adopted = 0;
     let mut skipped = 0;
 
     for candidate in &candidates {
         if state.is_managed(&candidate.branch) {
-            // Already tracked — just update PR number if missing.
             if let Ok(meta) = state.get_branch_mut(&candidate.branch) {
                 if meta.pr_number.is_none() {
                     meta.pr_number = Some(candidate.pr_number);
@@ -343,14 +309,12 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
             continue;
         }
 
-        // Ensure the local branch exists. Fetch from remote if needed.
         if !git::branch_exists(&candidate.branch) {
             ui::info(&format!("Fetching `{}` from remote...", candidate.branch));
             let pr_ref = git::fetch_pr_head(&state.remote, candidate.pr_number)?;
             git::create_branch_at(&candidate.branch, &pr_ref)?;
         }
 
-        // Record the exact parent commit this branch is based on.
         let parent = &candidate.base;
         let parent_head = match adoption_parent_head(&candidate.branch, parent) {
             Ok(parent_head) => parent_head,
@@ -373,10 +337,7 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
             continue;
         }
 
-        // Add to stack state.
         state.add_branch(&candidate.branch, parent, &parent_head, None, None);
-
-        // Set the PR number.
         if let Ok(meta) = state.get_branch_mut(&candidate.branch) {
             meta.pr_number = Some(candidate.pr_number);
         }
@@ -392,7 +353,6 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
 
     state.save()?;
 
-    // Summary.
     if adopted == 0 && skipped > 0 {
         ui::info(&format!("All {skipped} branch(es) were already tracked"));
     } else {
@@ -611,12 +571,10 @@ mod tests {
 
     #[test]
     fn expand_ancestor_chains_fetches_missing_parents_until_trunk() {
-        // Seed: only feat/c. Walk should fetch feat/b then feat/a in stages.
         let mut prs = HashMap::new();
         let (k, v) = make_pr("feat/c", "feat/b", 3);
         prs.insert(k, v);
 
-        // The "remote" knows about feat/a → main and feat/b → feat/a.
         let mut remote: HashMap<String, github::PrInfo> = HashMap::new();
         let (k, v) = make_pr("feat/a", "main", 1);
         remote.insert(k, v);
@@ -635,19 +593,14 @@ mod tests {
             out
         });
 
-        // All three PRs are now present, with bases that root in trunk.
         assert!(prs.contains_key("feat/a"));
         assert!(prs.contains_key("feat/b"));
         assert!(prs.contains_key("feat/c"));
-        // Two batches: first fetch feat/b, second fetch feat/a. (Iteration
-        // order within a batch isn't asserted because HashSet is unordered.)
-        assert_eq!(calls.len(), 2, "expected exactly two fetch batches");
+        assert_eq!(calls.len(), 2, "expected one batch per stack level");
     }
 
     #[test]
     fn expand_ancestor_chains_terminates_when_base_has_no_pr() {
-        // feat/c bases on feat/b which has no PR upstream. The walk must not
-        // loop forever — `tried` prevents re-fetching the same missing branch.
         let mut prs = HashMap::new();
         let (k, v) = make_pr("feat/c", "feat/b", 3);
         prs.insert(k, v);
@@ -658,7 +611,6 @@ mod tests {
             HashMap::new()
         });
 
-        // Exactly one batch: missing=[feat/b], fetch returns empty, loop exits.
         assert_eq!(call_count, 1);
         assert_eq!(prs.len(), 1);
         assert!(prs.contains_key("feat/c"));
@@ -676,20 +628,16 @@ mod tests {
             HashMap::new()
         });
 
-        // No fetches needed — the only base is already trunk.
         assert_eq!(call_count, 0);
     }
 
     #[test]
     fn orphan_local_prs_flags_branches_whose_base_is_neither_trunk_nor_local() {
         let mut prs = HashMap::new();
-        // Rooted: feat/a → main.
         let (k, v) = make_pr("feat/a", "main", 1);
         prs.insert(k, v);
-        // Rooted via local: feat/b → feat/a (and feat/a is local).
         let (k, v) = make_pr("feat/b", "feat/a", 2);
         prs.insert(k, v);
-        // Orphan: feat/c bases on feat/missing which is not in the map.
         let (k, v) = make_pr("feat/c", "feat/missing", 3);
         prs.insert(k, v);
 

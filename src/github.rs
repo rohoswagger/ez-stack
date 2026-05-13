@@ -194,20 +194,15 @@ pub fn get_pr_statuses_for(
     parse_pr_statuses_response(&value, branches)
 }
 
-/// Fetch a single PR by number in one GraphQL request, returning the head
-/// branch alongside its `PrInfo`.
-///
-/// Used by `ez adopt --pr <N>` to bootstrap the adoption walk from one PR
-/// without scanning the whole remote PR list. Returns `None` on any failure
-/// (network, parse, auth, owner/repo resolution, or PR-not-found) — callers
-/// surface the missing-PR case as a user-facing error.
+/// Look up one PR by number. Returns `None` on any failure — callers surface
+/// the missing-PR case as a user-facing error.
 pub fn get_pr_by_number(remote: &str, number: u64) -> Option<(String, PrInfo)> {
     let (owner, name) = resolve_owner_repo(remote).ok()?;
 
-    let query = "query($owner:String!,$name:String!,$num:Int!){repository(owner:$owner,name:$name){pullRequest(number:$num){number url state title baseRefName headRefName isDraft mergedAt}}}".to_string();
+    let query = "query($owner:String!,$name:String!,$num:Int!){repository(owner:$owner,name:$name){pullRequest(number:$num){number url state title baseRefName headRefName isDraft mergedAt}}}";
     let owner_arg = format!("owner={owner}");
     let name_arg = format!("name={name}");
-    // `-F` (capital F) sends a typed value — Int for numeric inputs.
+    // -F (capital) sends a typed value; required so $num arrives as Int.
     let num_arg = format!("num={number}");
     let query_arg = format!("query={query}");
     let json_str = run_gh(&[
