@@ -397,16 +397,15 @@ fn run_sync_inner(force: bool) -> Result<()> {
             continue;
         }
 
-        // Guard: skip branches checked out in another worktree.
-        if let Ok(Some(_wt_path)) = git::branch_checked_out_elsewhere(branch_name, &original_root) {
-            ui::warn(&format!("Skipped `{branch_name}` (in worktree)"));
-            continue;
-        }
-
         let before_sha = git::rev_parse(branch_name).unwrap_or_default();
 
         let sp = ui::spinner(&format!("Restacking `{branch_name}` onto `{parent}`..."));
-        let outcome = git::rebase_onto(&current_parent_tip, &stored_parent_head, branch_name)?;
+        let outcome = git::rebase_onto_for_branch(
+            &current_parent_tip,
+            &stored_parent_head,
+            branch_name,
+            &original_root,
+        )?;
         sp.finish_and_clear();
 
         match outcome {
@@ -426,7 +425,7 @@ fn run_sync_inner(force: bool) -> Result<()> {
                         ui::info(&format!(
                             "Dropping {redundant_count} redundant commit(s) from `{branch_name}` (already in `{parent}`)",
                         ));
-                        match git::rebase(&parent, branch_name) {
+                        match git::rebase_for_branch(&parent, branch_name, &original_root) {
                             Ok(true) => {
                                 ui::info(&format!(
                                     "Dropped redundant commits from `{branch_name}`"

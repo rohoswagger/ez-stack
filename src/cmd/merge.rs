@@ -111,13 +111,13 @@ fn merge_branch(
             continue;
         }
 
-        if let Ok(Some(_wt_path)) = git::branch_checked_out_elsewhere(branch_name, &current_root) {
-            ui::warn(&format!("Skipped `{branch_name}` (in worktree)"));
-            continue;
-        }
-
         let sp = ui::spinner(&format!("Restacking `{branch_name}` onto `{parent}`..."));
-        let outcome = git::rebase_onto(&current_parent_tip, &stored_parent_head, branch_name)?;
+        let outcome = git::rebase_onto_for_branch(
+            &current_parent_tip,
+            &stored_parent_head,
+            branch_name,
+            &current_root,
+        )?;
         sp.finish_and_clear();
 
         match outcome {

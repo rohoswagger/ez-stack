@@ -95,11 +95,6 @@ pub fn run(onto: Option<&str>) -> Result<()> {
     let current_root = git::repo_root()?;
 
     for child_name in &children {
-        if let Ok(Some(_wt_path)) = git::branch_checked_out_elsewhere(child_name, &current_root) {
-            ui::warn(&format!("Skipped `{child_name}` (in worktree)"));
-            continue;
-        }
-
         let child = state.get_branch(child_name)?;
         let child_parent_head = child.parent_head.clone();
 
@@ -108,7 +103,8 @@ pub fn run(onto: Option<&str>) -> Result<()> {
         }
 
         let sp = ui::spinner(&format!("Restacking `{child_name}` onto `{current}`..."));
-        let outcome = git::rebase_onto(&new_tip, &child_parent_head, child_name)?;
+        let outcome =
+            git::rebase_onto_for_branch(&new_tip, &child_parent_head, child_name, &current_root)?;
         sp.finish_and_clear();
 
         match outcome {

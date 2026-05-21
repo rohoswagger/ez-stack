@@ -71,17 +71,11 @@ pub fn run(
     let mut restacked_count = 0;
 
     for child in &children {
-        // Guard FIRST — before extracting old_base (avoids unused-variable warning when skipping).
-        if let Ok(Some(_wt_path)) = git::branch_checked_out_elsewhere(child, &current_root) {
-            ui::info(&format!("Skipped `{child}` (in worktree)"));
-            continue;
-        }
-
         let meta = state.get_branch(child)?;
         let old_base = meta.parent_head.clone();
 
         ui::info(&format!("Restacking `{child}`..."));
-        match git::rebase_onto(&new_head, &old_base, child)? {
+        match git::rebase_onto_for_branch(&new_head, &old_base, child, &current_root)? {
             git::RebaseOutcome::RebasingComplete => {}
             git::RebaseOutcome::Conflict(conflict) => {
                 // Save progress so the user can fix conflicts and continue with `ez restack`.

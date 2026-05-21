@@ -322,19 +322,62 @@ fn fetch_args(remote: &str) -> [&str; 3] {
     ["fetch", "--progress", remote]
 }
 
-pub fn rebase_onto(new_base: &str, old_base: &str, branch: &str) -> Result<RebaseOutcome> {
-    let (success, _, stderr) =
-        run_git_with_status(&["rebase", "--onto", new_base, old_base, branch])?;
+fn rebase_onto_impl(
+    scope: Option<&str>,
+    new_base: &str,
+    old_base: &str,
+    branch: Option<&str>,
+) -> Result<RebaseOutcome> {
+    let mut args: Vec<&str> = Vec::new();
+    if let Some(dir) = scope {
+        args.extend(["-C", dir]);
+    }
+    args.extend(["rebase", "--onto", new_base, old_base]);
+    if let Some(branch_name) = branch {
+        args.push(branch_name);
+    }
+
+    let (success, _, stderr) = run_git_with_status(&args)?;
+
+    let mut abort_args: Vec<&str> = Vec::new();
+    if let Some(dir) = scope {
+        abort_args.extend(["-C", dir]);
+    }
+    abort_args.extend(["rebase", "--abort"]);
+
     if success {
         Ok(RebaseOutcome::RebasingComplete)
     } else if stderr.contains("CONFLICT") || stderr.contains("conflict") {
         // Abort the rebase so we leave the repo in a clean state
-        let _ = run_git(&["rebase", "--abort"]);
+        let _ = run_git(&abort_args);
         Ok(RebaseOutcome::Conflict(parse_rebase_conflict(&stderr)))
     } else {
         // Some other rebase failure — try to abort and report
-        let _ = run_git(&["rebase", "--abort"]);
+        let _ = run_git(&abort_args);
         bail!(EzError::GitError(stderr));
+    }
+}
+
+pub fn rebase_onto(new_base: &str, old_base: &str, branch: &str) -> Result<RebaseOutcome> {
+    rebase_onto_impl(None, new_base, old_base, Some(branch))
+}
+
+/// Rebase the branch checked out in `dir` onto `new_base`, dropping commits up to `old_base`.
+pub fn rebase_onto_at(dir: &str, new_base: &str, old_base: &str) -> Result<RebaseOutcome> {
+    rebase_onto_impl(Some(dir), new_base, old_base, None)
+}
+
+/// Rebase `branch` onto `new_base`, running the rebase in its worktree when checked out elsewhere.
+pub fn rebase_onto_for_branch(
+    new_base: &str,
+    old_base: &str,
+    branch: &str,
+    current_root: &str,
+) -> Result<RebaseOutcome> {
+    if let Some(wt_path) = branch_checked_out_elsewhere(branch, current_root)? {
+        rebase_onto_at(&wt_path, new_base, old_base)
+    } else {
+        rebase_onto(new_base, old_base, branch)
     }
 }
 
@@ -376,19 +419,54 @@ fn parse_conflicting_files(stderr: &str) -> Vec<String> {
     files.into_iter().collect()
 }
 
-/// Plain `git rebase <upstream> <branch>` — uses git's built-in patch-id detection
-/// to auto-skip commits already applied upstream. Returns true on success.
-pub fn rebase(upstream: &str, branch: &str) -> Result<bool> {
-    let (success, _, stderr) = run_git_with_status(&["rebase", upstream, branch])?;
+fn rebase_impl(scope: Option<&str>, upstream: &str, branch: Option<&str>) -> Result<bool> {
+    let mut args: Vec<&str> = Vec::new();
+    if let Some(dir) = scope {
+        args.extend(["-C", dir]);
+    }
+    args.push("rebase");
+    args.push(upstream);
+    if let Some(branch_name) = branch {
+        args.push(branch_name);
+    }
+
+    let (success, _, stderr) = run_git_with_status(&args)?;
+
+    let mut abort_args: Vec<&str> = Vec::new();
+    if let Some(dir) = scope {
+        abort_args.extend(["-C", dir]);
+    }
+    abort_args.extend(["rebase", "--abort"]);
+
     if success {
         Ok(true)
     } else {
-        let _ = run_git(&["rebase", "--abort"]);
+        let _ = run_git(&abort_args);
         if stderr.contains("CONFLICT") || stderr.contains("conflict") {
             Ok(false)
         } else {
             bail!(EzError::GitError(stderr));
         }
+    }
+}
+
+/// Plain `git rebase <upstream> <branch>` — uses git's built-in patch-id detection
+/// to auto-skip commits already applied upstream. Returns true on success.
+pub fn rebase(upstream: &str, branch: &str) -> Result<bool> {
+    rebase_impl(None, upstream, Some(branch))
+}
+
+/// Rebase the branch checked out in `dir` onto `upstream`.
+pub fn rebase_at(dir: &str, upstream: &str) -> Result<bool> {
+    rebase_impl(Some(dir), upstream, None)
+}
+
+/// Rebase `branch` onto `upstream`, running the rebase in its worktree when checked out elsewhere.
+pub fn rebase_for_branch(upstream: &str, branch: &str, current_root: &str) -> Result<bool> {
+    if let Some(wt_path) = branch_checked_out_elsewhere(branch, current_root)? {
+        rebase_at(&wt_path, upstream)
+    } else {
+        rebase(upstream, branch)
     }
 }
 
@@ -873,6 +951,31 @@ CONFLICT (modify/delete): src/old.ts deleted in HEAD and modified in abc123.\n";
         assert_eq!(
             staged_files_matching_scope(&[]).expect("empty scope should succeed"),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn rebase_onto_at_uses_worktree_directory() {
+        let _guard = take_env_lock();
+        let log_dir = crate::test_support::temp_dir("git-rebase-at");
+        let log_path = log_dir.join("calls.log");
+        let fake_dir = install_fake_bin(
+            "git-rebase-at-bin",
+            "git",
+            &format!(
+                r#"#!/bin/sh
+echo "$@" >> "{}"
+exit 0
+"#,
+                log_path.display()
+            ),
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        rebase_onto_at("/repo/.worktrees/feat-a", "main", "old-base").expect("rebase at");
+        assert_eq!(
+            std::fs::read_to_string(log_path).expect("log"),
+            "-C /repo/.worktrees/feat-a rebase --onto main old-base\n"
         );
     }
 

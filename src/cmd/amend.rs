@@ -66,16 +66,15 @@ pub fn run(message: Option<&str>, all: bool) -> Result<()> {
     let current_root = git::repo_root()?;
 
     for child_name in &children {
-        // Guard FIRST — before extracting old_parent_head.
-        if let Ok(Some(_wt_path)) = git::branch_checked_out_elsewhere(child_name, &current_root) {
-            ui::info(&format!("Skipped `{child_name}` (in worktree)"));
-            continue;
-        }
-
         let old_parent_head = state.get_branch(child_name)?.parent_head.clone();
 
         let sp = ui::spinner(&format!("Restacking `{child_name}`..."));
-        let outcome = git::rebase_onto(&current_head, &old_parent_head, child_name)?;
+        let outcome = git::rebase_onto_for_branch(
+            &current_head,
+            &old_parent_head,
+            child_name,
+            &current_root,
+        )?;
         sp.finish_and_clear();
 
         match outcome {

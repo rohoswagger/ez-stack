@@ -29,7 +29,6 @@ pub fn run() -> Result<()> {
 
     let order = state.topo_order();
     let mut restacked = 0;
-    let mut skipped = 0;
 
     for branch_name in &order {
         let meta = state.get_branch(branch_name)?;
@@ -42,18 +41,16 @@ pub fn run() -> Result<()> {
             continue;
         }
 
-        // Guard: skip branches checked out in another worktree.
-        if let Ok(Some(_wt_path)) = git::branch_checked_out_elsewhere(branch_name, &current_root) {
-            ui::warn(&format!("Skipped `{branch_name}` (in worktree)"));
-            skipped += 1;
-            continue;
-        }
-
-        // Branch is stale — rebase onto the new parent tip.
+        // Branch is stale — rebase onto the new parent tip (in its worktree if needed).
         let before_sha = git::rev_parse(branch_name).unwrap_or_default();
 
         let sp = ui::spinner(&format!("Restacking `{branch_name}` onto `{parent}`..."));
-        let outcome = git::rebase_onto(&current_parent_tip, &stored_parent_head, branch_name)?;
+        let outcome = git::rebase_onto_for_branch(
+            &current_parent_tip,
+            &stored_parent_head,
+            branch_name,
+            &current_root,
+        )?;
         sp.finish_and_clear();
 
         match outcome {
@@ -73,7 +70,7 @@ pub fn run() -> Result<()> {
                         ui::info(&format!(
                             "Dropping {redundant_count} redundant commit(s) from `{branch_name}` (already in `{parent}`)",
                         ));
-                        match git::rebase(&parent, branch_name) {
+                        match git::rebase_for_branch(&parent, branch_name, &current_root) {
                             Ok(true) => {
                                 ui::info(&format!(
                                     "Dropped redundant commits from `{branch_name}`"
@@ -121,7 +118,7 @@ pub fn run() -> Result<()> {
 
     state.save()?;
 
-    if restacked == 0 && skipped == 0 {
+    if restacked == 0 {
         ui::info("All branches are up to date — nothing to restack");
     }
 
