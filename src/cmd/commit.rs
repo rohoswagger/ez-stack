@@ -1,9 +1,8 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use crate::cmd::mutation_guard;
 use crate::cmd::mutation_guard::StageMode;
-use crate::cmd::rebase_conflict;
-use crate::error::EzError;
+use crate::cmd::restack;
 use crate::git;
 use crate::stack::StackState;
 use crate::ui;
@@ -63,43 +62,21 @@ pub fn run(
         "out_of_scope_files": outcome.scope.out_of_scope_files,
     }));
 
-    // Auto-restack children so they stay on top of the new HEAD.
-    let new_head = after;
-    let children = state.children_of(&current);
-
+    // Auto-restack the whole subtree so every descendant stays on top of the new
+    // HEAD — not just direct children (which would leave grandchildren detached).
     let current_root = git::repo_root()?;
-    let mut restacked_count = 0;
+    let restacked_count =
+        restack::cascade_restack(&mut state, &current, &current_root, &current, "commit")?;
 
-    for child in &children {
-        let meta = state.get_branch(child)?;
-        let old_base = meta.parent_head.clone();
-
-        ui::info(&format!("Restacking `{child}`..."));
-        match git::rebase_onto_for_branch(&new_head, &old_base, child, &current_root)? {
-            git::RebaseOutcome::RebasingComplete => {}
-            git::RebaseOutcome::Conflict(conflict) => {
-                // Save progress so the user can fix conflicts and continue with `ez restack`.
-                state.save()?;
-                git::checkout(&current)?;
-                rebase_conflict::report("commit", child, &current, &conflict, "ez restack");
-                bail!(EzError::RebaseConflict(child.clone()));
-            }
-        }
-
-        let meta = state.get_branch_mut(child)?;
-        meta.parent_head = new_head.clone();
-        restacked_count += 1;
-    }
-
-    // After restacking we may be on a child branch; return to the original.
-    if !children.is_empty() {
+    // Restacking may have left us on a descendant branch; return to the original.
+    if restacked_count > 0 {
         git::checkout(&current)?;
     }
 
     state.save()?;
 
     if restacked_count > 0 {
-        ui::info(&format!("Restacked {restacked_count} child branch(es)"));
+        ui::info(&format!("Restacked {restacked_count} branch(es)"));
     }
 
     Ok(())

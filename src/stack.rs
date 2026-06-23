@@ -137,6 +137,20 @@ impl StackState {
         children
     }
 
+    /// All transitive descendants of `branch` in topological order (each parent
+    /// before its children). Excludes `branch` itself.
+    ///
+    /// Auto-restack must walk the whole subtree, not just direct children: moving
+    /// a branch's tip restacks its children, which moves *their* tips, which leaves
+    /// grandchildren stale. Topological order means a parent is always restacked
+    /// before its children, so a single pass converges the entire subtree.
+    pub fn descendants_topo(&self, branch: &str) -> Vec<String> {
+        self.topo_order()
+            .into_iter()
+            .filter(|b| b != branch && self.path_to_trunk(b).iter().any(|p| p == branch))
+            .collect()
+    }
+
     /// Reparent direct children to a new parent without changing `parent_head`.
     ///
     /// `parent_head` tracks the commit the child is currently based on. Reparenting
@@ -399,6 +413,33 @@ mod tests {
             state.get_branch("feat/b").expect("branch").parent_head,
             original_parent_head
         );
+    }
+
+    #[test]
+    fn descendants_topo_returns_whole_subtree_parents_before_children() {
+        // main -> feat/a -> feat/b -> feat/c, plus feat/d hanging off feat/a.
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/a", "main", "aaa", None, None);
+        state.add_branch("feat/b", "feat/a", "bbb", None, None);
+        state.add_branch("feat/c", "feat/b", "ccc", None, None);
+        state.add_branch("feat/d", "feat/a", "ddd", None, None);
+
+        let descendants = state.descendants_topo("feat/a");
+
+        // The grandchild (feat/c) MUST be included — this is the bug the
+        // direct-children-only cascade missed.
+        assert!(descendants.contains(&"feat/c".to_string()));
+        assert!(descendants.contains(&"feat/b".to_string()));
+        assert!(descendants.contains(&"feat/d".to_string()));
+        assert!(!descendants.contains(&"feat/a".to_string()));
+
+        // A parent must always appear before its child so a single restack pass
+        // converges the whole subtree.
+        let pos = |name: &str| descendants.iter().position(|b| b == name).unwrap();
+        assert!(pos("feat/b") < pos("feat/c"), "parent must precede child");
+
+        // A leaf has no descendants.
+        assert!(state.descendants_topo("feat/c").is_empty());
     }
 
     #[test]

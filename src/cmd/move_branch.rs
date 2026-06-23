@@ -88,48 +88,25 @@ pub fn run(onto: Option<&str>) -> Result<()> {
         }
     }
 
-    // Restack children — they need to be rebased onto the new tip of current branch.
-    let new_tip = git::rev_parse(&current)?;
-    let children = state.children_of(&current);
-    let mut restacked = 0;
+    // Restack the whole subtree onto the moved branch — descendants beyond direct
+    // children also need to follow, or they're left detached from the stack.
     let current_root = git::repo_root()?;
+    let restacked = crate::cmd::restack::cascade_restack(
+        &mut state,
+        &current,
+        &current_root,
+        &current,
+        "move",
+    )?;
 
-    for child_name in &children {
-        let child = state.get_branch(child_name)?;
-        let child_parent_head = child.parent_head.clone();
-
-        if child_parent_head == new_tip {
-            continue;
-        }
-
-        let sp = ui::spinner(&format!("Restacking `{child_name}` onto `{current}`..."));
-        let outcome =
-            git::rebase_onto_for_branch(&new_tip, &child_parent_head, child_name, &current_root)?;
-        sp.finish_and_clear();
-
-        match outcome {
-            git::RebaseOutcome::RebasingComplete => {
-                let child = state.get_branch_mut(child_name)?;
-                child.parent_head = new_tip.clone();
-                restacked += 1;
-                ui::info(&format!("Restacked `{child_name}` onto `{current}`"));
-            }
-            git::RebaseOutcome::Conflict(conflict) => {
-                state.save()?;
-                rebase_conflict::report("move", child_name, &current, &conflict, "ez restack");
-                bail!(EzError::RebaseConflict(child_name.clone()));
-            }
-        }
-    }
-
-    // Checkout the current branch again (rebase may have left us on the last restacked child).
+    // Checkout the current branch again (rebase may have left us on a descendant).
     git::checkout(&current)?;
 
     state.save()?;
 
     ui::success(&format!("Moved `{current}` onto `{onto}`"));
     if restacked > 0 {
-        ui::info(&format!("Restacked {restacked} child branch(es)"));
+        ui::info(&format!("Restacked {restacked} branch(es)"));
     }
 
     ui::receipt(&serde_json::json!({

@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 
-use crate::cmd::rebase_conflict;
+use crate::cmd::restack;
 use crate::error::EzError;
 use crate::git;
 use crate::stack::StackState;
@@ -59,41 +59,14 @@ pub fn run(message: Option<&str>, all: bool) -> Result<()> {
         "deletions": del,
     }));
 
-    // Auto-restack children of the current branch.
-    let current_head = after;
-    let children = state.children_of(&current);
-
+    // Auto-restack the whole subtree below the amended branch — not just direct
+    // children, which would leave grandchildren detached from the stack.
     let current_root = git::repo_root()?;
-
-    for child_name in &children {
-        let old_parent_head = state.get_branch(child_name)?.parent_head.clone();
-
-        let sp = ui::spinner(&format!("Restacking `{child_name}`..."));
-        let outcome = git::rebase_onto_for_branch(
-            &current_head,
-            &old_parent_head,
-            child_name,
-            &current_root,
-        )?;
-        sp.finish_and_clear();
-
-        match outcome {
-            git::RebaseOutcome::RebasingComplete => {
-                let child = state.get_branch_mut(child_name)?;
-                child.parent_head = current_head.clone();
-                ui::info(&format!("Restacked `{child_name}`"));
-            }
-            git::RebaseOutcome::Conflict(conflict) => {
-                git::checkout(&current)?;
-                state.save()?;
-                rebase_conflict::report("amend", child_name, &current, &conflict, "ez restack");
-                bail!(EzError::RebaseConflict(child_name.clone()));
-            }
-        }
-    }
+    let restacked =
+        restack::cascade_restack(&mut state, &current, &current_root, &current, "amend")?;
 
     // Return to the original branch after restacking (only if we may have moved).
-    if !children.is_empty() {
+    if restacked > 0 {
         git::checkout(&current)?;
     }
 
