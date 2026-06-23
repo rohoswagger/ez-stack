@@ -152,6 +152,12 @@ pub fn commit(message: &str) -> Result<()> {
     Ok(())
 }
 
+/// Run `git commit -m <message>` inside `dir`.
+pub fn commit_at(dir: &str, message: &str) -> Result<()> {
+    run_git(&["-C", dir, "commit", "-m", message])?;
+    Ok(())
+}
+
 pub fn commit_amend(message: Option<&str>) -> Result<()> {
     match message {
         Some(msg) => run_git(&["commit", "--amend", "-m", msg])?,
@@ -227,6 +233,18 @@ pub fn add_all_including_untracked() -> Result<()> {
     Ok(())
 }
 
+/// Stage all tracked modified/deleted files in `dir`.
+pub fn add_all_at(dir: &str) -> Result<()> {
+    run_git(&["-C", dir, "add", "-u"])?;
+    Ok(())
+}
+
+/// Stage all changes (including untracked) in `dir`.
+pub fn add_all_including_untracked_at(dir: &str) -> Result<()> {
+    run_git(&["-C", dir, "add", "-A"])?;
+    Ok(())
+}
+
 /// Return counts of (staged, modified, untracked) files in the working tree.
 pub fn working_tree_status() -> (usize, usize, usize) {
     let output = run_git(&["status", "--porcelain"]).unwrap_or_default();
@@ -275,6 +293,12 @@ pub fn add_paths(paths: &[String]) -> Result<()> {
 pub fn has_staged_changes() -> Result<bool> {
     let (success, _, _) = run_git_with_status(&["diff", "--cached", "--quiet"])?;
     Ok(!success) // exit code 1 means there ARE diffs
+}
+
+/// Returns true if `dir` has staged changes.
+pub fn has_staged_changes_at(dir: &str) -> Result<bool> {
+    let (success, _, _) = run_git_with_status(&["-C", dir, "diff", "--cached", "--quiet"])?;
+    Ok(!success)
 }
 
 pub fn staged_files() -> Result<Vec<String>> {
@@ -629,8 +653,46 @@ pub fn stash_push() -> Result<bool> {
     Ok(true)
 }
 
+/// Stash everything (staged + unstaged + untracked) with a custom label.
+/// Returns `Ok(true)` when a stash was created, `Ok(false)` when there was
+/// nothing to stash.
+pub fn stash_push_with_untracked(message: &str) -> Result<bool> {
+    if !has_uncommitted_changes()? {
+        return Ok(false);
+    }
+    run_git(&["stash", "push", "--include-untracked", "-m", message])?;
+    Ok(true)
+}
+
 pub fn stash_pop() -> Result<()> {
     run_git(&["stash", "pop"])?;
+    Ok(())
+}
+
+/// `git stash pop --index` — restores staged-vs-unstaged distinction.
+pub fn stash_pop_index() -> Result<()> {
+    run_git(&["stash", "pop", "--index"])?;
+    Ok(())
+}
+
+/// `git -C <dir> rev-parse <refspec>` — resolve a ref inside a specific worktree.
+pub fn rev_parse_at(dir: &str, refspec: &str) -> Result<String> {
+    run_git(&["-C", dir, "rev-parse", refspec])
+}
+
+/// Pop the latest stash inside `dir`, preserving the index state via `--index`.
+/// Falls back to a plain pop if `--index` fails (e.g. when the staged tree no
+/// longer cleanly applies). Returns Err only when neither attempt succeeds.
+pub fn stash_pop_index_at(dir: &str) -> Result<()> {
+    let (success, _, _) = run_git_with_status(&["-C", dir, "stash", "pop", "--index"]).unwrap_or((
+        false,
+        String::new(),
+        String::new(),
+    ));
+    if success {
+        return Ok(());
+    }
+    run_git(&["-C", dir, "stash", "pop"])?;
     Ok(())
 }
 
