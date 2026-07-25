@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::cmd::rebase_conflict;
+use crate::cmd::restack;
 use crate::git;
 use crate::github;
 use crate::stack::StackState;
@@ -377,96 +377,13 @@ fn run_sync_inner(force: bool) -> Result<()> {
         cleaned.push(branch_name.clone());
     }
 
-    // Restack remaining branches.
+    // Restack remaining branches. Each branch is attempted independently: one branch that
+    // conflicts or refuses to rebase is reported and skipped, and the rest of the stack still
+    // gets synced. Failures are surfaced at the very end, after state is saved and the original
+    // branch restored, so a stuck branch never leaves the repo mid-rebase.
     let order = state.topo_order();
-    let mut restacked = 0;
-
-    for branch_name in &order {
-        let meta = state.get_branch(branch_name)?;
-        let parent = meta.parent.clone();
-        let stored_parent_head = meta.parent_head.clone();
-
-        // Skip branches that no longer exist (shouldn't happen after cleanup above, but be safe).
-        if !git::branch_exists(branch_name) {
-            continue;
-        }
-
-        let current_parent_tip = git::rev_parse(&parent)?;
-
-        if current_parent_tip == stored_parent_head {
-            continue;
-        }
-
-        let before_sha = git::rev_parse(branch_name).unwrap_or_default();
-
-        let sp = ui::spinner(&format!("Restacking `{branch_name}` onto `{parent}`..."));
-        let outcome = git::rebase_onto_for_branch(
-            &current_parent_tip,
-            &stored_parent_head,
-            branch_name,
-            &original_root,
-        )?;
-        sp.finish_and_clear();
-
-        match outcome {
-            git::RebaseOutcome::RebasingComplete => {
-                let meta = state.get_branch_mut(branch_name)?;
-                meta.parent_head = current_parent_tip;
-                restacked += 1;
-                ui::info(&format!("Restacked `{branch_name}` onto `{parent}`"));
-
-                // Post-restack: detect and auto-drop redundant commits.
-                let mut redundant_count: u64 = 0;
-                if let Ok(cherry) = git::cherry(&parent, branch_name) {
-                    let redundant: Vec<&str> =
-                        cherry.lines().filter(|l| l.starts_with("- ")).collect();
-                    if !redundant.is_empty() {
-                        redundant_count = redundant.len() as u64;
-                        ui::info(&format!(
-                            "Dropping {redundant_count} redundant commit(s) from `{branch_name}` (already in `{parent}`)",
-                        ));
-                        match git::rebase_for_branch(&parent, branch_name, &original_root) {
-                            Ok(true) => {
-                                ui::info(&format!(
-                                    "Dropped redundant commits from `{branch_name}`"
-                                ));
-                            }
-                            Ok(false) => {
-                                ui::warn(&format!(
-                                    "Could not auto-drop redundant commits from `{branch_name}` (conflict)"
-                                ));
-                                ui::hint(&format!(
-                                    "Run `git rebase {parent}` on `{branch_name}` manually and skip redundant commits"
-                                ));
-                            }
-                            Err(e) => {
-                                ui::warn(&format!(
-                                    "Could not clean up redundant commits from `{branch_name}`: {e}"
-                                ));
-                            }
-                        }
-                    }
-                }
-
-                let after_sha = git::rev_parse(branch_name).unwrap_or_default();
-                ui::receipt(&serde_json::json!({
-                    "cmd": "sync",
-                    "branch": branch_name,
-                    "action": "restacked",
-                    "parent": parent,
-                    "before": &before_sha[..before_sha.len().min(7)],
-                    "after": &after_sha[..after_sha.len().min(7)],
-                    "redundant_commits": redundant_count,
-                }));
-            }
-            git::RebaseOutcome::Conflict(conflict) => {
-                // Save progress so the user can fix and continue.
-                state.save()?;
-                rebase_conflict::report("sync", branch_name, &parent, &conflict, "ez restack");
-                anyhow::bail!(crate::error::EzError::RebaseConflict(branch_name.clone()));
-            }
-        }
-    }
+    let report = restack::restack_branches(&mut state, &order, &original_root, "sync");
+    let restacked = report.restacked;
 
     state.save()?;
 
@@ -491,7 +408,14 @@ fn run_sync_inner(force: bool) -> Result<()> {
         }
     }
 
-    if cleaned.is_empty() && restacked == 0 {
+    if !report.is_clean() {
+        ui::info(&format!(
+            "Synced ({} cleaned, {} restacked, {} skipped)",
+            cleaned.len(),
+            restacked,
+            report.failures.len()
+        ));
+    } else if cleaned.is_empty() && restacked == 0 {
         ui::info("Everything is up to date");
     } else {
         ui::success(&format!(
@@ -506,6 +430,10 @@ fn run_sync_inner(force: bool) -> Result<()> {
 
     if let Some(path) = shell_cd_path {
         println!("{path}");
+    }
+
+    if !report.is_clean() {
+        anyhow::bail!(restack::incomplete_error("sync", &report));
     }
 
     Ok(())
