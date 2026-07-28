@@ -405,6 +405,58 @@ pub fn rebase_onto_for_branch(
     }
 }
 
+fn rebase_in_progress_impl(scope: Option<&str>) -> bool {
+    for state_dir in ["rebase-merge", "rebase-apply"] {
+        let mut args: Vec<&str> = Vec::new();
+        if let Some(dir) = scope {
+            args.extend(["-C", dir]);
+        }
+        args.extend(["rev-parse", "--git-path", state_dir]);
+
+        let Ok(out) = run_git(&args) else { continue };
+        let raw = out.trim();
+        if raw.is_empty() {
+            continue;
+        }
+
+        // `--git-path` returns a path relative to the worktree it was resolved in.
+        let path = std::path::Path::new(raw);
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::path::Path::new(scope.unwrap_or(".")).join(path)
+        };
+        if resolved.exists() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Abort a rebase left in progress for `branch`, in its worktree when it is checked out
+/// elsewhere. Returns true if one was found and aborted.
+///
+/// `rebase_onto_impl` already aborts on the failures it recognizes; this is the belt-and-braces
+/// cleanup for the cases it can't (abort itself failing, a rebase started outside ez) so that a
+/// single stuck branch cannot make every later rebase in the same run fail too.
+pub fn abort_rebase_for_branch(branch: &str, current_root: &str) -> Result<bool> {
+    let worktree = branch_checked_out_elsewhere(branch, current_root)?;
+    let scope = worktree.as_deref();
+
+    if !rebase_in_progress_impl(scope) {
+        return Ok(false);
+    }
+
+    let mut args: Vec<&str> = Vec::new();
+    if let Some(dir) = scope {
+        args.extend(["-C", dir]);
+    }
+    args.extend(["rebase", "--abort"]);
+    let _ = run_git(&args);
+
+    Ok(!rebase_in_progress_impl(scope))
+}
+
 fn parse_rebase_conflict(stderr: &str) -> RebaseConflict {
     RebaseConflict {
         conflicting_files: parse_conflicting_files(stderr),

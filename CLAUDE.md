@@ -30,7 +30,7 @@ Every feature should be inherently more useful than the git commands it replaces
    - 0 = success
    - 1 = unexpected error
    - 2 = GitHub API / `gh` CLI error
-   - 3 = rebase conflict (manual resolution required)
+   - 3 = restack blocked — rebase conflict, or one or more branches skipped during a sync/restack (manual resolution required)
    - 4 = stale remote ref
    - 5 = usage error (on trunk, branch not tracked, etc.)
    - 6 = unstaged changes
@@ -159,6 +159,7 @@ These features exist specifically to make ez useable by AI agents:
 | 0.2.25 | `ez adopt` scopes to local branches by default — one GraphQL call for local-branch PRs instead of paginating every PR in the repo (122s → 1.4s adopting 12 PRs in a 10k-PR repo). `--branches <names>` and `--pr <N>` walk the ancestor chain on demand, fetching only the parents that show up in the chain (bounded by stack depth, not repo size). Adds `github::get_pr_by_number` for single-PR GraphQL lookup. Local PRs whose base isn't local-with-PR or trunk are warned about and skipped — users get a `Run \`ez adopt --pr <N>\`` hint to walk the full chain via remote PR ancestors when needed. |
 | 0.2.27 | Restack branches in their worktree instead of skipping: `ez sync`, `ez restack`, and all auto-restack paths run `git -C <worktree>` when a branch is checked out elsewhere (including external worktrees like Superconductor). |
 | 0.2.28 | `ez create -m` commits on the new branch without advancing the parent (stashes uncommitted state and transfers it into the new worktree; rejects `--no-worktree`). Fix stale-`parent_head` auto-restack bug: `ez commit`/`ez amend`/`ez move` now cascade the restack across the **full descendant subtree** (`StackState::descendants_topo` + shared `restack::cascade_restack`) instead of only direct children, which left grandchildren detached from the stack until a manual `ez restack`. |
+| 0.2.29 | Restacks fail per-branch instead of per-run: `ez sync`/`ez restack`/auto-restack attempt every branch independently, abort any half-finished rebase, report the skipped branches at the end, and exit 3 (`RestackIncomplete`) only after the rest of the stack is synced and state is saved. Treat stack metadata as a cache of git, not the source of truth — a `parent_head` that is no longer in the branch's history falls back to `git merge-base`, and a recorded parent that no longer exists is re-derived from the commit graph (`track::infer_parent`) instead of failing the branch. Shared restack engine in `cmd/restack.rs` (`restack_branches`) replaces the duplicated loops in sync/restack. |
 
 ---
 

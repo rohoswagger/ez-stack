@@ -24,7 +24,7 @@ fn exit_code_for(e: &anyhow::Error) -> i32 {
     if let Some(ez) = e.downcast_ref::<EzError>() {
         match ez {
             EzError::GhError(_) => 2,
-            EzError::RebaseConflict(_) => 3,
+            EzError::RebaseConflict(_) | EzError::RestackIncomplete { .. } => 3,
             EzError::StaleRemoteRef(_) => 4,
             EzError::OnTrunk
             | EzError::BranchNotInStack(_)

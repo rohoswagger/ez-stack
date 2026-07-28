@@ -114,7 +114,7 @@ pub fn run(branch: Option<String>, parent: Option<String>) -> Result<()> {
 /// that's the candidate closest to `branch` in commit graph terms. Ties go to
 /// the existing best (trunk-first iteration), so trunk wins only when no
 /// tracked branch is a strict descendant.
-fn infer_parent(branch: &str, state: &StackState) -> Result<String> {
+pub fn infer_parent(branch: &str, state: &StackState) -> Result<String> {
     let trunk_mb = git::merge_base(&state.trunk, branch).map_err(|_| {
         EzError::UserMessage(format!(
             "could not find a merge-base between `{branch}` and trunk `{}`\n  → Pass `--parent <name>` explicitly",
@@ -141,8 +141,6 @@ fn infer_parent(branch: &str, state: &StackState) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-
-    use super::*;
 
     /// Pure version of the parent-selection rule, decoupled from git I/O so we
     /// can test the tie-breaking and descendant-preference logic directly.

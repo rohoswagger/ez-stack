@@ -40,6 +40,11 @@ pub enum EzError {
     RebaseConflict(String),
 
     #[error(
+        "{count} branch(es) could not be restacked ({branches}) — the rest of the stack was updated\n  → Resolve the branches above, then run `ez restack` to finish"
+    )]
+    RestackIncomplete { count: usize, branches: String },
+
+    #[error(
         "no changes selected for commit\n  → Preferred: `ez commit -m \"msg\" -- <paths>` for focused files\n  → Bulk tracked update: `ez commit -am \"msg\"`\n  → Bulk tracked + untracked update: `ez commit -Am \"msg\"`\n  → Partial hunks: `git add -p` then `ez commit -m \"msg\"`"
     )]
     NothingToCommit,
