@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
-use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::dev;
 use crate::error::EzError;
@@ -25,24 +26,24 @@ pub fn run(branch: Option<&str>, force: bool, yes: bool) -> Result<()> {
         bail!(EzError::BranchNotInStack(target.clone()));
     }
 
-    // Build branch → worktree path map to detect if the target has a worktree.
-    let worktree_map: HashMap<String, String> = git::worktree_list()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
-        .collect();
+    let worktrees = git::worktree_list()?;
+    let main_worktree = worktrees
+        .first()
+        .map(|worktree| worktree.path.as_str())
+        .ok_or_else(|| anyhow::anyhow!("could not determine main worktree root"))?;
+    let linked_worktree = worktrees.iter().find(|worktree| {
+        worktree.branch.as_deref() == Some(target.as_str()) && worktree.path != main_worktree
+    });
 
-    let has_worktree = worktree_map.contains_key(&target);
-
-    if has_worktree {
-        return delete_with_worktree(&mut state, &target, &current, force, yes, &worktree_map);
+    if let Some(worktree) = linked_worktree {
+        return delete_with_worktree(&mut state, &target, force, yes, &worktree.path);
     }
 
     // No worktree — original branch-only delete path.
 
     // Worktree guard: if the target branch is checked out in another worktree, bail.
     let current_root = git::repo_root()?;
-    if let Ok(Some(wt_path)) = git::branch_checked_out_elsewhere(&target, &current_root) {
+    if let Some(wt_path) = git::branch_checked_out_elsewhere(&target, &current_root)? {
         bail!(EzError::UserMessage(format!(
             "branch `{target}` is checked out in worktree `{wt_path}`\n  → Run `ez delete {target}` to remove it"
         )));
@@ -58,7 +59,27 @@ pub fn run(branch: Option<&str>, force: bool, yes: bool) -> Result<()> {
         ui::info(&format!("Reparented `{child_name}` onto `{parent}`"));
     }
 
-    // Update PR bases on GitHub (best-effort).
+    // If currently on the target branch, checkout parent first.
+    let switched_from_target = current == target;
+    if switched_from_target {
+        git::checkout(&parent)?;
+    }
+
+    // Delete local branch.
+    if git::branch_exists(&target) {
+        if let Err(error) = git::delete_branch(&target, force) {
+            if switched_from_target && let Err(rollback_error) = git::checkout(&target) {
+                bail!(
+                    "Could not delete local branch `{target}`: {error}\n\
+                     Checkout rollback also failed: {rollback_error}\n  \
+                     → The branch still exists; inspect the active worktree before retrying"
+                );
+            }
+            return Err(error);
+        }
+    }
+
+    // Update PR bases on GitHub only after the local deletion committed.
     if pr_number.is_some() {
         let new_base = parent.clone();
         for child_name in &children {
@@ -68,26 +89,6 @@ pub fn run(branch: Option<&str>, force: bool, yes: bool) -> Result<()> {
             {
                 ui::warn(&format!("Failed to update PR base for `{child_name}`: {e}"));
             }
-        }
-    }
-
-    // If currently on the target branch, checkout parent first.
-    if current == target {
-        git::checkout(&parent)?;
-    }
-
-    // Delete local branch.
-    if git::branch_exists(&target)
-        && let Err(e) = git::delete_branch(&target, force)
-    {
-        if force {
-            ui::warn(&format!("Failed to delete local branch `{target}`: {e}"));
-        } else {
-            ui::warn(&format!(
-                "Branch `{target}` has unmerged changes — use --force to delete anyway"
-            ));
-            state.save()?;
-            return Err(e);
         }
     }
 
@@ -118,12 +119,10 @@ pub fn run(branch: Option<&str>, force: bool, yes: bool) -> Result<()> {
 fn delete_with_worktree(
     state: &mut StackState,
     target: &str,
-    current: &str,
     force: bool,
     yes: bool,
-    worktree_map: &HashMap<String, String>,
+    wt_path: &str,
 ) -> Result<()> {
-    let wt_path = worktree_map[target].clone();
     let repo_root = git::main_worktree_root()?;
     let port = dev::dev_port(target);
 
@@ -132,7 +131,7 @@ fn delete_with_worktree(
         .and_then(|p| p.to_str().map(String::from))
         .unwrap_or_default();
 
-    let inside_worktree = inside_worktree_path(&current_dir, &wt_path);
+    let inside_worktree = inside_worktree_path(&current_dir, wt_path);
 
     if inside_worktree && !yes {
         ui::warn(&inside_worktree_delete_warning(target));
@@ -152,13 +151,116 @@ fn delete_with_worktree(
         .filter_map(|c| state.get_branch(c).ok().map(|m| (c.clone(), m.pr_number)))
         .collect();
 
+    let wt_dir = Path::new(wt_path);
+    if !wt_dir.exists() {
+        bail!(
+            "refuse to remove `{wt_path}` because the registered worktree path is missing\n  \
+             → Run `git worktree prune`, then retry"
+        );
+    }
+    if !wt_dir.join(".git").is_file() {
+        bail!(
+            "refuse to remove `{wt_path}` because it is no longer a valid Git worktree\n  \
+             → Move or remove the directory manually after preserving any user files"
+        );
+    }
+
+    let listener_pids = match dev::listener_processes_in_worktree(port, wt_path) {
+        Ok(pids) => pids,
+        Err(error) => {
+            ui::warn(&format!(
+                "Could not verify process ownership on dev port {port}: {error}"
+            ));
+            Vec::new()
+        }
+    };
+
     // --- Phase 2: Mutate filesystem ---
 
     if inside_worktree {
         std::env::set_current_dir(&repo_root)?;
     }
 
-    let killed_pids = match dev::terminate_listener_processes(port) {
+    let claim = format!("ez-delete:{}:{target}", std::process::id());
+    git::worktree_lock(wt_path, &claim).map_err(|error| {
+        anyhow::anyhow!("Could not claim `{target}` worktree at `{wt_path}` for deletion: {error}")
+    })?;
+    if let Err(error) = verify_delete_claim(wt_path, target, &claim) {
+        release_delete_claim(wt_path, target, &claim);
+        return Err(error);
+    }
+    if let Err(error) = git::worktree_prune() {
+        release_delete_claim(wt_path, target, &claim);
+        return Err(error);
+    }
+    if let Err(error) = verify_delete_claim(wt_path, target, &claim) {
+        release_delete_claim(wt_path, target, &claim);
+        return Err(error);
+    }
+    let quarantine = quarantine_path(wt_dir)?;
+    let quarantine_str = quarantine.to_string_lossy().to_string();
+    if let Err(error) = quarantine_claimed_worktree(wt_path, &quarantine_str, target, &claim) {
+        release_delete_claim(wt_path, target, &claim);
+        return Err(error);
+    }
+    if let Err(error) = git::worktree_unlock(&quarantine_str) {
+        let rollback = restore_quarantined_worktree(&quarantine_str, wt_path, target, &claim).err();
+        if let Some(rollback_error) = rollback {
+            bail!(
+                "Could not unlock quarantined `{target}` worktree at `{quarantine_str}`: {error}\n\
+                 Worktree-path rollback also failed: {rollback_error}\n  \
+                 → Preserve `{quarantine_str}` and inspect `git worktree list` before retrying"
+            );
+        }
+        bail!(
+            "Could not unlock quarantined `{target}` worktree at `{quarantine_str}`: {error}\n  \
+             → Restored worktree at `{wt_path}`"
+        );
+    }
+
+    let removal = if force {
+        git::worktree_remove_force(&quarantine_str)
+    } else {
+        git::worktree_remove(&quarantine_str)
+    };
+    if let Err(error) = removal {
+        let rollback = restore_quarantined_worktree(&quarantine_str, wt_path, target, &claim).err();
+        if let Some(rollback_error) = rollback {
+            bail!(
+                "Could not remove worktree at `{wt_path}`: {error}\n\
+                 Worktree-path rollback also failed: {rollback_error}\n  \
+                 → Preserve `{quarantine_str}` and inspect `git worktree list` before retrying"
+            );
+        }
+        bail!(
+            "Could not remove worktree at `{wt_path}`: {error}\n\
+             Use `ez delete {target} --force` to discard uncommitted changes"
+        );
+    }
+    ui::info(&format!("Removed worktree at `{wt_path}`"));
+
+    if let Err(error) = git::delete_branch(target, true) {
+        let rollback = if git::branch_exists(target) && !wt_dir.exists() {
+            git::worktree_add(wt_path, target).err()
+        } else {
+            None
+        };
+        if let Some(rollback_error) = rollback {
+            bail!(
+                "Could not delete local branch `{target}` after removing its worktree: {error}\n\
+                 Worktree rollback also failed: {rollback_error}\n  \
+                 → The branch still exists; recreate its worktree before retrying"
+            );
+        }
+        bail!(
+            "Could not delete local branch `{target}` after removing its worktree: {error}\n  \
+             → Restored the worktree at `{wt_path}`; resolve the ref error and retry"
+        );
+    }
+
+    // Stop only processes whose cwd belonged to this exact worktree, and only
+    // after both the worktree and local branch were removed successfully.
+    let killed_pids = match dev::terminate_processes(&listener_pids) {
         Ok(pids) => {
             if !pids.is_empty() {
                 ui::info(&format!(
@@ -178,27 +280,6 @@ fn delete_with_worktree(
         }
     };
 
-    let _ = git::worktree_prune();
-
-    let wt_dir = std::path::Path::new(&wt_path);
-    if wt_dir.exists() && wt_dir.join(".git").exists() {
-        let result = if force {
-            git::worktree_remove_force(&wt_path)
-        } else {
-            git::worktree_remove(&wt_path)
-        };
-        if let Err(e) = result {
-            bail!(
-                "Could not remove worktree at `{wt_path}`: {e}\n\
-                 Use `ez delete {target} --force` to discard uncommitted changes"
-            );
-        }
-        ui::info(&format!("Removed worktree at `{wt_path}`"));
-    } else if wt_dir.exists() {
-        let _ = std::fs::remove_dir_all(&wt_path);
-        ui::info(&format!("Cleaned up stale directory at `{wt_path}`"));
-    }
-
     // --- Phase 3: Mutate stack state ---
 
     // Reparent children.
@@ -217,14 +298,6 @@ fn delete_with_worktree(
             }
         }
     }
-
-    // If current branch (in the main worktree) is the target, checkout parent.
-    if current == target {
-        let _ = git::checkout(&parent);
-    }
-
-    // Delete local branch.
-    let _ = git::delete_branch(target, true);
 
     // Try to delete remote branch (ignore errors).
     let _ = git::delete_remote_branch(&state.remote, target);
@@ -255,6 +328,123 @@ fn delete_with_worktree(
     }
 
     Ok(())
+}
+
+fn quarantine_path(worktree: &Path) -> Result<PathBuf> {
+    let parent = worktree
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("worktree path has no parent: {}", worktree.display()))?;
+    let name = worktree
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("worktree");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = parent.join(format!(".ez-delete-{}-{nonce}-{name}", std::process::id()));
+    if path.exists() {
+        bail!(
+            "refuse to quarantine `{}` because `{}` already exists",
+            worktree.display(),
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+fn quarantine_claimed_worktree(
+    original: &str,
+    quarantine: &str,
+    expected_branch: &str,
+    claim: &str,
+) -> Result<()> {
+    std::fs::rename(original, quarantine).map_err(|error| {
+        anyhow::anyhow!(
+            "Could not quarantine `{expected_branch}` worktree from `{original}` to `{quarantine}`: {error}"
+        )
+    })?;
+    if let Err(error) = git::worktree_repair(quarantine) {
+        let _ = std::fs::rename(quarantine, original);
+        let _ = git::worktree_repair(original);
+        bail!(
+            "Could not repair quarantined `{expected_branch}` worktree at `{quarantine}`: {error}"
+        );
+    }
+    if let Err(error) = verify_delete_claim(quarantine, expected_branch, claim) {
+        let rollback =
+            restore_quarantined_worktree(quarantine, original, expected_branch, claim).err();
+        if let Some(rollback_error) = rollback {
+            bail!("{error}\nWorktree-path rollback also failed: {rollback_error}");
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn restore_quarantined_worktree(
+    quarantine: &str,
+    original: &str,
+    expected_branch: &str,
+    claim: &str,
+) -> Result<()> {
+    if !Path::new(quarantine).exists() {
+        bail!("quarantined worktree path `{quarantine}` no longer exists");
+    }
+    if Path::new(original).exists() {
+        bail!("original worktree path `{original}` is now occupied");
+    }
+
+    let registered = git::worktree_list()?
+        .into_iter()
+        .find(|worktree| worktree.path == quarantine);
+    let Some(registered) = registered else {
+        bail!("quarantined worktree `{quarantine}` is no longer registered");
+    };
+    if registered.branch.as_deref() != Some(expected_branch) {
+        bail!(
+            "quarantined worktree ownership changed: expected `{expected_branch}`, found `{}`",
+            registered.branch.as_deref().unwrap_or("<detached HEAD>")
+        );
+    }
+    if registered.locked_reason.as_deref() != Some(claim) {
+        git::worktree_lock(quarantine, claim)?;
+    }
+    verify_delete_claim(quarantine, expected_branch, claim)?;
+
+    std::fs::rename(quarantine, original).map_err(|error| {
+        anyhow::anyhow!("Could not restore worktree path `{original}`: {error}")
+    })?;
+    git::worktree_repair(original)?;
+    verify_delete_claim(original, expected_branch, claim)?;
+    git::worktree_unlock(original)?;
+    Ok(())
+}
+
+fn verify_delete_claim(path: &str, expected_branch: &str, claim: &str) -> Result<()> {
+    let worktrees = git::worktree_list()?;
+    let Some(worktree) = worktrees.iter().find(|worktree| worktree.path == path) else {
+        bail!(
+            "worktree ownership changed at `{path}`: expected `{expected_branch}`, but the path is no longer registered"
+        );
+    };
+    if worktree.branch.as_deref() != Some(expected_branch)
+        || worktree.locked_reason.as_deref() != Some(claim)
+    {
+        let actual_branch = worktree.branch.as_deref().unwrap_or("<detached HEAD>");
+        let actual_lock = worktree.locked_reason.as_deref().unwrap_or("<unlocked>");
+        bail!(
+            "worktree ownership changed at `{path}`: expected `{expected_branch}` with deletion claim `{claim}`, found `{actual_branch}` with lock `{actual_lock}`\n  \
+             → No replacement worktree was removed; inspect `git worktree list` and retry"
+        );
+    }
+    Ok(())
+}
+
+fn release_delete_claim(path: &str, expected_branch: &str, claim: &str) {
+    if verify_delete_claim(path, expected_branch, claim).is_ok() {
+        let _ = git::worktree_unlock(path);
+    }
 }
 
 fn inside_worktree_path(current_dir: &str, worktree_path: &str) -> bool {

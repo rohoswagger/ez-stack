@@ -186,6 +186,13 @@ conflict. Commit or stash the affected worktree, then retry the ez command.
 cd $(ez delete my-task --yes)   # removes worktree + branch, stops the branch dev server, cd's to repo root
 ```
 
+Deletion preserves active work on failure. ez claims the exact branch/worktree
+pair, atomically quarantines its path, and stops only processes whose cwd and
+start identity match the captured worktree process, after the worktree and
+local branch are removed. Removal failure restores the original path; branch
+deletion failure recreates the worktree. Dirty, locked, replaced, or stale
+worktrees retain their processes, files, refs, and metadata.
+
 ## Multi-Agent Rules
 
 - **One worktree per agent.** Never share a worktree.
