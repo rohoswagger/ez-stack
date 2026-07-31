@@ -124,6 +124,7 @@ Use `--hook <name>` for project-specific hooks, or `--hook` alone to list availa
 | `ez adopt <branch>...` | Adopt an explicit bottom-to-top branch chain without requiring PRs or GitHub auth. Remote-only branches are fetched and materialized into worktrees by default. |
 | `ez list` | Dashboard for all local branches: PRs, CI, age, ports, and working tree state. `--json` for machine output. |
 | `ez delete [name]` | Delete branch + worktree. Auto-detects worktrees and best-effort stops listeners on the branch dev port. `--yes` for agents. |
+| `ez fold [branch] --yes` | Locally fold one PR-less stack layer into its parent without rewriting commits. Removes the folded local worktree/branch, reparents children, and preserves remotes. |
 | `ez push` | Push + create/update PR. `-am "msg"` to stage+commit+push in one step. `--no-pr` skips PR updates, `--pr` overrides `no_pr` config. |
 
 ### Committing
@@ -220,6 +221,23 @@ default. Remote-only branches are materialized locally. If an existing local
 branch is behind or diverged from its remote, adoption stops before changing
 branches or worktrees. Explicit branch-only adoption does not need GitHub CLI
 auth because it works from git refs instead of PR metadata.
+
+### Fold a local stack layer down
+
+```bash
+ez fold feat/child --yes
+```
+
+`ez fold` is the local/offline first step toward stack collapse workflows. It
+folds exactly one PR-less layer into its direct parent by advancing the parent
+branch to the folded branch tip, then removes the folded local branch and linked
+worktree. Commit IDs are preserved; this is not a squash or range fold. Direct
+children are reparented to the surviving parent, remote branches are left
+untouched, and shell integration cd's to the parent worktree if the current
+worktree was removed. The first release intentionally accepts only non-bottom,
+PR-less layers whose parent and descendants form a clean, fully restacked
+linear history. If any affected worktree is dirty or a descendant is stale,
+`ez fold` aborts before changing refs, worktrees, or metadata.
 
 ### Setup
 
