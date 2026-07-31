@@ -7,21 +7,11 @@ use crate::github;
 use crate::stack::StackState;
 use crate::ui;
 
-fn cleanup_candidate_branches(
-    trunk: &str,
-    managed_branches: &[String],
-    local_branches: &[String],
-) -> Vec<String> {
+fn cleanup_candidate_branches(trunk: &str, managed_branches: &[String]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut branches = Vec::new();
 
     for branch in managed_branches {
-        if branch != trunk && seen.insert(branch.clone()) {
-            branches.push(branch.clone());
-        }
-    }
-
-    for branch in local_branches {
         if branch != trunk && seen.insert(branch.clone()) {
             branches.push(branch.clone());
         }
@@ -340,9 +330,7 @@ fn run_sync_inner(force: bool) -> Result<()> {
         }
         order
     };
-    let local_branches = git::branch_list().unwrap_or_default();
-    let cleanup_candidates =
-        cleanup_candidate_branches(&state.trunk, &managed_branches, &local_branches);
+    let cleanup_candidates = cleanup_candidate_branches(&state.trunk, &managed_branches);
     let mut cleaned = Vec::new();
     let has_any_prs = !cleanup_candidates.is_empty();
     let pr_statuses = if has_any_prs {
@@ -653,22 +641,16 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_candidate_branches_includes_local_unmanaged_branches() {
-        let managed = vec!["feat/a".to_string()];
-        let local = vec![
+    fn cleanup_candidate_branches_excludes_local_unmanaged_branches() {
+        let managed = vec![
             "main".to_string(),
             "feat/a".to_string(),
-            "feat/b".to_string(),
-            "feat/c".to_string(),
+            "feat/a".to_string(),
         ];
 
         assert_eq!(
-            cleanup_candidate_branches("main", &managed, &local),
-            vec![
-                "feat/a".to_string(),
-                "feat/b".to_string(),
-                "feat/c".to_string()
-            ]
+            cleanup_candidate_branches("main", &managed),
+            vec!["feat/a".to_string()]
         );
     }
 
