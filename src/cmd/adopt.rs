@@ -17,6 +17,17 @@ struct AdoptCandidate {
     is_draft: bool,
 }
 
+#[derive(Debug, Clone)]
+struct WorktreeProvisioning {
+    created: usize,
+    paths: Vec<String>,
+    created_paths: Vec<String>,
+}
+
+fn is_active_pr(pr: &github::PrInfo) -> bool {
+    pr.state == "OPEN" && !pr.merged
+}
+
 /// Build the adoption graph from open PRs.
 /// Returns candidates keyed by branch name, only including branches whose
 /// base chain leads back to trunk.
@@ -24,7 +35,7 @@ fn build_adopt_graph(trunk: &str, prs: &HashMap<String, github::PrInfo>) -> Vec<
     // Filter to open PRs only.
     let open_prs: HashMap<&str, &github::PrInfo> = prs
         .iter()
-        .filter(|(_, pr)| pr.state == "OPEN" && !pr.merged)
+        .filter(|(_, pr)| is_active_pr(pr))
         .map(|(branch, pr)| (branch.as_str(), pr))
         .collect();
 
@@ -101,6 +112,31 @@ fn build_adopt_graph(trunk: &str, prs: &HashMap<String, github::PrInfo>) -> Vec<
     sorted
 }
 
+fn build_native_adopt_candidates(
+    trunk: &str,
+    ordered_prs: &[(String, github::PrInfo)],
+) -> Vec<AdoptCandidate> {
+    let mut candidates = Vec::new();
+    let mut parent = trunk.to_string();
+
+    for (branch, pr) in ordered_prs {
+        if !is_active_pr(pr) {
+            continue;
+        }
+
+        candidates.push(AdoptCandidate {
+            branch: branch.clone(),
+            base: parent.clone(),
+            pr_number: pr.number,
+            title: pr.title.clone(),
+            is_draft: pr.is_draft,
+        });
+        parent = branch.clone();
+    }
+
+    candidates
+}
+
 fn adoption_parent_head(branch: &str, parent: &str) -> Result<String> {
     git::merge_base(branch, parent)
 }
@@ -160,7 +196,7 @@ fn fetch_local_prs(remote: &str) -> Result<HashMap<String, github::PrInfo>> {
     }
     let refs: Vec<&str> = local.iter().map(String::as_str).collect();
     let mut prs = github::get_pr_statuses_for(remote, &refs);
-    prs.retain(|_, pr| pr.state == "OPEN" && !pr.merged);
+    prs.retain(|_, pr| is_active_pr(pr));
     Ok(prs)
 }
 
@@ -172,7 +208,7 @@ fn fetch_prs_by_branches(
     let refs: Vec<&str> = branches.iter().map(String::as_str).collect();
     let mut prs = github::get_pr_statuses_for(remote, &refs);
     expand_ancestor_chains(&mut prs, remote, trunk);
-    prs.retain(|_, pr| pr.state == "OPEN" && !pr.merged);
+    prs.retain(|_, pr| is_active_pr(pr));
     Ok(prs)
 }
 
@@ -188,11 +224,303 @@ fn fetch_prs_by_number(
     let mut prs = HashMap::new();
     prs.insert(head, pr);
     expand_ancestor_chains(&mut prs, remote, trunk);
-    prs.retain(|_, p| p.state == "OPEN" && !p.merged);
+    prs.retain(|_, p| is_active_pr(p));
     Ok((title, prs))
 }
 
-pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
+fn fetch_candidates_by_pr_number(
+    remote: &str,
+    trunk: &str,
+    number: u64,
+) -> Result<(String, Option<u64>, Vec<AdoptCandidate>)> {
+    if let Some(native_stack) = github::native_stack_for_pr(number)? {
+        let mut ordered_prs = Vec::new();
+        let mut requested_title = None;
+
+        for pr_number in &native_stack.pull_requests {
+            let (head, pr) = github::get_pr_by_number(remote, *pr_number).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "PR #{pr_number} from native stack #{} not found — make sure it exists and is accessible",
+                    native_stack.number
+                )
+            })?;
+            if *pr_number == number {
+                requested_title = Some(pr.title.clone());
+            }
+            ordered_prs.push((head, pr));
+        }
+
+        let title =
+            requested_title.unwrap_or_else(|| format!("native stack #{}", native_stack.number));
+        return Ok((
+            title,
+            Some(native_stack.number),
+            build_native_adopt_candidates(trunk, &ordered_prs),
+        ));
+    }
+
+    let (title, prs) = fetch_prs_by_number(remote, trunk, number)?;
+    Ok((title, None, build_adopt_graph(trunk, &prs)))
+}
+
+fn validate_native_adopt_candidates(
+    state: &StackState,
+    candidates: &[AdoptCandidate],
+    native_stack_number: Option<u64>,
+) -> Result<()> {
+    let Some(native_stack_number) = native_stack_number else {
+        return Ok(());
+    };
+
+    for candidate in candidates {
+        let Some(meta) = state.branches.get(&candidate.branch) else {
+            continue;
+        };
+        let pr_conflicts = meta.pr_number.is_some_and(|pr| pr != candidate.pr_number);
+        if meta.parent == candidate.base && !pr_conflicts {
+            continue;
+        }
+
+        let local_pr = meta
+            .pr_number
+            .map(|number| format!("#{number}"))
+            .unwrap_or_else(|| "none".to_string());
+        bail!(EzError::UserMessage(format!(
+            "native stack #{native_stack_number} conflicts with local ez metadata for `{}`: local parent=`{}`, native parent=`{}`, local PR={}, native PR=#{}. Resolve the local stack metadata before re-adopting this native stack.",
+            candidate.branch, meta.parent, candidate.base, local_pr, candidate.pr_number
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_existing_branch_pr_refs(
+    candidates: &[AdoptCandidate],
+    candidate_refs: &HashMap<String, String>,
+) -> Result<()> {
+    for candidate in candidates {
+        if !git::branch_exists(&candidate.branch) {
+            continue;
+        }
+        let Some(pr_ref) = candidate_refs.get(&candidate.branch) else {
+            continue;
+        };
+        if git::is_ancestor(pr_ref, &candidate.branch) {
+            continue;
+        }
+
+        bail!(EzError::UserMessage(format!(
+            "local branch `{}` does not contain PR #{} head `{}`. Update or rename the local branch before adopting so ez does not attach the PR to stale or diverged code.",
+            candidate.branch, candidate.pr_number, pr_ref
+        )));
+    }
+
+    Ok(())
+}
+
+fn fetch_and_validate_candidate_refs(
+    remote: &str,
+    candidates: &[AdoptCandidate],
+) -> Result<HashMap<String, String>> {
+    let mut candidate_refs = HashMap::new();
+    for candidate in candidates {
+        candidate_refs.insert(
+            candidate.branch.clone(),
+            git::fetch_pr_head(remote, candidate.pr_number)?,
+        );
+    }
+    validate_existing_branch_pr_refs(candidates, &candidate_refs)?;
+    Ok(candidate_refs)
+}
+
+fn rollback_worktrees(paths: &[String]) {
+    for path in paths.iter().rev() {
+        let _ = git::worktree_remove(path);
+    }
+}
+
+fn rollback_created_branches(branches: &[String]) {
+    for branch in branches.iter().rev() {
+        let _ = git::delete_branch(branch, true);
+    }
+}
+
+fn provision_worktrees(
+    candidates: &[AdoptCandidate],
+    no_worktrees: bool,
+) -> Result<WorktreeProvisioning> {
+    if no_worktrees {
+        return Ok(WorktreeProvisioning {
+            created: 0,
+            paths: Vec::new(),
+            created_paths: Vec::new(),
+        });
+    }
+
+    let mut worktree_map: HashMap<String, String> = git::worktree_list()?
+        .into_iter()
+        .filter_map(|wt| wt.branch.map(|branch| (branch, wt.path)))
+        .collect();
+    let mut paths = Vec::new();
+    let mut created_paths = Vec::new();
+
+    for candidate in candidates {
+        if let Some(path) = worktree_map.get(&candidate.branch) {
+            paths.push(path.clone());
+            continue;
+        }
+
+        let path = match git::worktree_path(&candidate.branch) {
+            Ok(path) => path,
+            Err(err) => {
+                rollback_worktrees(&created_paths);
+                return Err(err);
+            }
+        };
+        if let Err(err) = git::worktree_add(&path, &candidate.branch) {
+            rollback_worktrees(&created_paths);
+            return Err(err);
+        }
+        worktree_map.insert(candidate.branch.clone(), path.clone());
+        paths.push(path);
+        created_paths.push(paths.last().expect("path just pushed").clone());
+    }
+
+    Ok(WorktreeProvisioning {
+        created: created_paths.len(),
+        paths,
+        created_paths,
+    })
+}
+
+fn adopt_candidates_transactionally(
+    state: &mut StackState,
+    candidates: &[AdoptCandidate],
+    no_worktrees: bool,
+    candidate_refs: &HashMap<String, String>,
+) -> Result<(usize, usize, WorktreeProvisioning)> {
+    let original_state = state.clone();
+    let mut created_branches = Vec::new();
+    let mut adopted = 0;
+    let mut skipped = 0;
+
+    for candidate in candidates {
+        if state.is_managed(&candidate.branch) {
+            if let Ok(meta) = state.get_branch_mut(&candidate.branch) {
+                if meta.pr_number.is_none() {
+                    meta.pr_number = Some(candidate.pr_number);
+                    ui::info(&format!(
+                        "Updated PR number for `{}` → #{}",
+                        candidate.branch, candidate.pr_number
+                    ));
+                }
+            }
+            skipped += 1;
+            continue;
+        }
+
+        let branch_existed = git::branch_exists(&candidate.branch);
+        if !branch_existed {
+            ui::info(&format!("Fetching `{}` from remote...", candidate.branch));
+            let Some(pr_ref) = candidate_refs.get(&candidate.branch) else {
+                rollback_created_branches(&created_branches);
+                *state = original_state;
+                return Err(anyhow::anyhow!(
+                    "internal error: missing fetched PR ref for `{}`",
+                    candidate.branch
+                ));
+            };
+            if let Err(err) = git::create_branch_at(&candidate.branch, pr_ref) {
+                rollback_created_branches(&created_branches);
+                *state = original_state;
+                return Err(err);
+            }
+            created_branches.push(candidate.branch.clone());
+        }
+
+        let parent = &candidate.base;
+        let parent_head = match adoption_parent_head(&candidate.branch, parent) {
+            Ok(parent_head) => parent_head,
+            Err(_) => {
+                ui::warn(&format!(
+                    "Could not resolve parent `{parent}` for `{}` — skipping",
+                    candidate.branch
+                ));
+                if !branch_existed {
+                    let _ = git::delete_branch(&candidate.branch, true);
+                    created_branches.retain(|branch| branch != &candidate.branch);
+                }
+                skipped += 1;
+                continue;
+            }
+        };
+
+        if parent_head.is_empty() {
+            ui::warn(&format!(
+                "Could not resolve parent `{parent}` for `{}` — skipping",
+                candidate.branch
+            ));
+            if !branch_existed {
+                let _ = git::delete_branch(&candidate.branch, true);
+                created_branches.retain(|branch| branch != &candidate.branch);
+            }
+            skipped += 1;
+            continue;
+        }
+
+        state.add_branch(&candidate.branch, parent, &parent_head, None, None);
+        if let Ok(meta) = state.get_branch_mut(&candidate.branch) {
+            meta.pr_number = Some(candidate.pr_number);
+        }
+
+        let draft = if candidate.is_draft { " [draft]" } else { "" };
+        ui::success(&format!(
+            "Adopted `{}` (#{}, base: `{}`){draft}",
+            candidate.branch, candidate.pr_number, candidate.base
+        ));
+
+        adopted += 1;
+    }
+
+    let provisioning = match provision_worktrees(candidates, no_worktrees) {
+        Ok(provisioning) => provisioning,
+        Err(err) => {
+            rollback_created_branches(&created_branches);
+            *state = original_state;
+            return Err(err);
+        }
+    };
+
+    if let Err(err) = state.save() {
+        rollback_worktrees(&provisioning.created_paths);
+        rollback_created_branches(&created_branches);
+        *state = original_state;
+        return Err(err);
+    }
+
+    Ok((adopted, skipped, provisioning))
+}
+
+fn adopt_receipt_value(
+    adopted: usize,
+    skipped: usize,
+    candidates: &[AdoptCandidate],
+    native_stack_number: Option<u64>,
+    provisioning: &WorktreeProvisioning,
+) -> serde_json::Value {
+    serde_json::json!({
+        "cmd": "adopt",
+        "adopted": adopted,
+        "skipped": skipped,
+        "branches": candidates.iter().map(|c| c.branch.clone()).collect::<Vec<_>>(),
+        "native_stack_number": native_stack_number,
+        "pr_numbers": candidates.iter().map(|c| c.pr_number).collect::<Vec<_>>(),
+        "worktrees_created": provisioning.created,
+        "worktree_paths": &provisioning.paths,
+    })
+}
+
+pub fn run(pr: Option<u64>, specific_branches: &[String], no_worktrees: bool) -> Result<()> {
     let mut state = StackState::load().or_else(|_| {
         let trunk = git::default_branch().unwrap_or_else(|_| "main".to_string());
         let state = StackState::new(trunk.clone());
@@ -207,12 +535,12 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
         ));
     }
 
-    let candidates = if let Some(pr_number) = pr {
+    let (candidates, native_stack_number) = if let Some(pr_number) = pr {
         let sp = ui::spinner(&format!("Fetching PR #{pr_number} and its chain..."));
-        let (title, prs) = fetch_prs_by_number(&state.remote, &state.trunk, pr_number)?;
+        let (title, native_stack_number, graph) =
+            fetch_candidates_by_pr_number(&state.remote, &state.trunk, pr_number)?;
         sp.finish_and_clear();
 
-        let graph = build_adopt_graph(&state.trunk, &prs);
         if graph.is_empty() {
             bail!(
                 "PR #{pr_number} (`{}`) does not lead back to trunk `{}`",
@@ -220,7 +548,7 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
                 state.trunk
             );
         }
-        graph
+        (graph, native_stack_number)
     } else if !specific_branches.is_empty() {
         let sp = ui::spinner("Fetching PRs for named branches...");
         let prs = fetch_prs_by_branches(&state.remote, &state.trunk, specific_branches)?;
@@ -239,7 +567,7 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
                 state.trunk
             );
         }
-        graph
+        (graph, None)
     } else {
         // Default scopes strictly to local branches. Local PRs whose base
         // isn't another local PR (or trunk) are warned and dropped — we
@@ -274,8 +602,10 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
             ui::info("No open PRs found for local branches that root on trunk");
             return Ok(());
         }
-        graph
+        (graph, None)
     };
+    validate_native_adopt_candidates(&state, &candidates, native_stack_number)?;
+    let candidate_refs = fetch_and_validate_candidate_refs(&state.remote, &candidates)?;
 
     ui::header(&format!("Found {} branch(es) to adopt", candidates.len()));
     for c in &candidates {
@@ -291,67 +621,8 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
         ));
     }
 
-    let mut adopted = 0;
-    let mut skipped = 0;
-
-    for candidate in &candidates {
-        if state.is_managed(&candidate.branch) {
-            if let Ok(meta) = state.get_branch_mut(&candidate.branch) {
-                if meta.pr_number.is_none() {
-                    meta.pr_number = Some(candidate.pr_number);
-                    ui::info(&format!(
-                        "Updated PR number for `{}` → #{}",
-                        candidate.branch, candidate.pr_number
-                    ));
-                }
-            }
-            skipped += 1;
-            continue;
-        }
-
-        if !git::branch_exists(&candidate.branch) {
-            ui::info(&format!("Fetching `{}` from remote...", candidate.branch));
-            let pr_ref = git::fetch_pr_head(&state.remote, candidate.pr_number)?;
-            git::create_branch_at(&candidate.branch, &pr_ref)?;
-        }
-
-        let parent = &candidate.base;
-        let parent_head = match adoption_parent_head(&candidate.branch, parent) {
-            Ok(parent_head) => parent_head,
-            Err(_) => {
-                ui::warn(&format!(
-                    "Could not resolve parent `{parent}` for `{}` — skipping",
-                    candidate.branch
-                ));
-                skipped += 1;
-                continue;
-            }
-        };
-
-        if parent_head.is_empty() {
-            ui::warn(&format!(
-                "Could not resolve parent `{parent}` for `{}` — skipping",
-                candidate.branch
-            ));
-            skipped += 1;
-            continue;
-        }
-
-        state.add_branch(&candidate.branch, parent, &parent_head, None, None);
-        if let Ok(meta) = state.get_branch_mut(&candidate.branch) {
-            meta.pr_number = Some(candidate.pr_number);
-        }
-
-        let draft = if candidate.is_draft { " [draft]" } else { "" };
-        ui::success(&format!(
-            "Adopted `{}` (#{}, base: `{}`){draft}",
-            candidate.branch, candidate.pr_number, candidate.base
-        ));
-
-        adopted += 1;
-    }
-
-    state.save()?;
+    let (adopted, skipped, provisioning) =
+        adopt_candidates_transactionally(&mut state, &candidates, no_worktrees, &candidate_refs)?;
 
     if adopted == 0 && skipped > 0 {
         ui::info(&format!("All {skipped} branch(es) were already tracked"));
@@ -361,14 +632,21 @@ pub fn run(pr: Option<u64>, specific_branches: &[String]) -> Result<()> {
         ));
     }
 
-    ui::hint("Run `ez log` to see the adopted stack, then `ez switch <branch>` to start working");
+    if no_worktrees {
+        ui::hint(
+            "Run `ez log` to see the adopted stack, then `ez switch <branch>` to start working",
+        );
+    } else {
+        ui::hint("Worktrees are ready; use `ez switch <branch>` to start working in one");
+    }
 
-    ui::receipt(&serde_json::json!({
-        "cmd": "adopt",
-        "adopted": adopted,
-        "skipped": skipped,
-        "branches": candidates.iter().map(|c| c.branch.clone()).collect::<Vec<_>>(),
-    }));
+    ui::receipt(&adopt_receipt_value(
+        adopted,
+        skipped,
+        &candidates,
+        native_stack_number,
+        &provisioning,
+    ));
 
     Ok(())
 }
@@ -553,6 +831,279 @@ mod tests {
     }
 
     #[test]
+    fn build_native_adopt_candidates_uses_native_order_over_reported_bases() {
+        let (_, mut base) = make_pr("feat/base", "stale-base", 10);
+        base.title = "Base".to_string();
+        let (_, mut child) = make_pr("feat/child", "main", 11);
+        child.title = "Child".to_string();
+
+        let candidates = build_native_adopt_candidates(
+            "main",
+            &[
+                ("feat/base".to_string(), base),
+                ("feat/child".to_string(), child),
+            ],
+        );
+
+        let branches: Vec<&str> = candidates.iter().map(|c| c.branch.as_str()).collect();
+        let bases: Vec<&str> = candidates.iter().map(|c| c.base.as_str()).collect();
+        assert_eq!(branches, vec!["feat/base", "feat/child"]);
+        assert_eq!(bases, vec!["main", "feat/base"]);
+    }
+
+    #[test]
+    fn build_native_adopt_candidates_excludes_inactive_entries_and_rechains_to_trunk() {
+        let (_, mut closed_base) = make_pr("feat/base", "main", 10);
+        closed_base.state = "CLOSED".to_string();
+        let (_, child) = make_pr("feat/child", "feat/base", 11);
+
+        let candidates = build_native_adopt_candidates(
+            "main",
+            &[
+                ("feat/base".to_string(), closed_base),
+                ("feat/child".to_string(), child),
+            ],
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].branch, "feat/child");
+        assert_eq!(candidates[0].base, "main");
+    }
+
+    fn candidate(branch: &str, base: &str, pr_number: u64) -> AdoptCandidate {
+        AdoptCandidate {
+            branch: branch.to_string(),
+            base: base.to_string(),
+            pr_number,
+            title: format!("PR for {branch}"),
+            is_draft: false,
+        }
+    }
+
+    #[test]
+    fn validate_native_adopt_candidates_allows_matching_metadata_and_missing_pr_number() {
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/base", "main", "base-head", None, None);
+        state.get_branch_mut("feat/base").expect("base").pr_number = Some(10);
+        state.add_branch("feat/child", "feat/base", "child-head", None, None);
+
+        validate_native_adopt_candidates(
+            &state,
+            &[
+                candidate("feat/base", "main", 10),
+                candidate("feat/child", "feat/base", 11),
+            ],
+            Some(77),
+        )
+        .expect("matching metadata should pass");
+    }
+
+    #[test]
+    fn validate_native_adopt_candidates_rejects_parent_divergence_before_mutation() {
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/child", "feat/old-parent", "child-head", None, None);
+        state.get_branch_mut("feat/child").expect("child").pr_number = Some(11);
+
+        let err = validate_native_adopt_candidates(
+            &state,
+            &[candidate("feat/child", "main", 11)],
+            Some(77),
+        )
+        .expect_err("parent divergence should abort");
+        let message = err.to_string();
+        assert!(message.contains("native stack #77"));
+        assert!(message.contains("feat/child"));
+        assert!(message.contains("local parent=`feat/old-parent`"));
+        assert!(message.contains("native parent=`main`"));
+        assert!(message.contains("local PR=#11"));
+        assert!(message.contains("native PR=#11"));
+    }
+
+    #[test]
+    fn validate_native_adopt_candidates_rejects_pr_number_divergence_before_mutation() {
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/child", "main", "child-head", None, None);
+        state.get_branch_mut("feat/child").expect("child").pr_number = Some(99);
+
+        let err = validate_native_adopt_candidates(
+            &state,
+            &[candidate("feat/child", "main", 11)],
+            Some(77),
+        )
+        .expect_err("pr divergence should abort");
+        let message = err.to_string();
+        assert!(message.contains("native stack #77"));
+        assert!(message.contains("feat/child"));
+        assert!(message.contains("local parent=`main`"));
+        assert!(message.contains("native parent=`main`"));
+        assert!(message.contains("local PR=#99"));
+        assert!(message.contains("native PR=#11"));
+    }
+
+    #[test]
+    fn fetch_candidates_by_pr_number_prefers_native_stack_order_and_graphql_prs() {
+        use crate::test_support::{
+            CwdGuard, PathGuard, init_git_repo, install_fake_bin, run_cmd, take_env_lock,
+        };
+
+        let _guard = take_env_lock();
+        let repo = init_git_repo("adopt-native-fetch");
+        let _cwd = CwdGuard::enter(&repo);
+        run_cmd(
+            &repo,
+            "git",
+            &["remote", "add", "origin", "https://github.com/org/repo.git"],
+        );
+
+        let fake_dir = install_fake_bin(
+            "gh-adopt-native-fetch",
+            "gh",
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$EZ_FAKE_GH_LOG"
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=20" ]; then
+  echo '[{"number":88,"pull_requests":[{"number":10},{"number":20}]}]'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  pr=""
+  for arg in "$@"; do
+    case "$arg" in
+      num=10) pr=10 ;;
+      num=20) pr=20 ;;
+    esac
+  done
+  if [ "$pr" = "10" ]; then
+    echo '{"data":{"repository":{"pullRequest":{"number":10,"url":"https://github.com/org/repo/pull/10","state":"OPEN","title":"Base","baseRefName":"stale-parent","headRefName":"feat/base","isDraft":false,"mergedAt":null}}}}'
+    exit 0
+  fi
+  if [ "$pr" = "20" ]; then
+    echo '{"data":{"repository":{"pullRequest":{"number":20,"url":"https://github.com/org/repo/pull/20","state":"OPEN","title":"Child","baseRefName":"main","headRefName":"feat/child","isDraft":true,"mergedAt":null}}}}'
+    exit 0
+  fi
+fi
+exit 2
+"#,
+        );
+        let log_path = fake_dir.join("args.log");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &log_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let (title, native_stack_number, candidates) =
+            fetch_candidates_by_pr_number("origin", "main", 20).expect("fetch native candidates");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+        }
+        assert_eq!(title, "Child");
+        assert_eq!(native_stack_number, Some(88));
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.branch.as_str())
+                .collect::<Vec<_>>(),
+            vec!["feat/base", "feat/child"]
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.base.as_str())
+                .collect::<Vec<_>>(),
+            vec!["main", "feat/base"]
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.pr_number)
+                .collect::<Vec<_>>(),
+            vec![10, 20]
+        );
+        assert!(candidates[1].is_draft);
+
+        let log = std::fs::read_to_string(log_path).expect("gh log");
+        assert!(log.contains("api repos/org/repo/stacks?pull_request=20"));
+        assert!(log.contains("api graphql"));
+        assert!(log.contains("num=10"));
+        assert!(log.contains("num=20"));
+    }
+
+    #[test]
+    fn adopt_receipt_includes_native_prs_and_worktree_paths() {
+        let candidates = vec![
+            AdoptCandidate {
+                branch: "feat/base".to_string(),
+                base: "main".to_string(),
+                pr_number: 10,
+                title: "Base".to_string(),
+                is_draft: false,
+            },
+            AdoptCandidate {
+                branch: "feat/child".to_string(),
+                base: "feat/base".to_string(),
+                pr_number: 11,
+                title: "Child".to_string(),
+                is_draft: true,
+            },
+        ];
+        let provisioning = WorktreeProvisioning {
+            created: 2,
+            paths: vec![
+                "/repo/.worktrees/feat-base".to_string(),
+                "/repo/.worktrees/feat-child".to_string(),
+            ],
+            created_paths: vec![
+                "/repo/.worktrees/feat-base".to_string(),
+                "/repo/.worktrees/feat-child".to_string(),
+            ],
+        };
+
+        let receipt = adopt_receipt_value(2, 0, &candidates, Some(77), &provisioning);
+
+        assert_eq!(receipt["cmd"], "adopt");
+        assert_eq!(receipt["adopted"], 2);
+        assert_eq!(receipt["skipped"], 0);
+        assert_eq!(receipt["native_stack_number"], 77);
+        assert_eq!(
+            receipt["branches"],
+            serde_json::json!(["feat/base", "feat/child"])
+        );
+        assert_eq!(receipt["pr_numbers"], serde_json::json!([10, 11]));
+        assert_eq!(receipt["worktrees_created"], 2);
+        assert_eq!(
+            receipt["worktree_paths"],
+            serde_json::json!(["/repo/.worktrees/feat-base", "/repo/.worktrees/feat-child"])
+        );
+    }
+
+    #[test]
+    fn adopt_receipt_uses_null_native_stack_number_for_legacy_adoption() {
+        let candidates = vec![AdoptCandidate {
+            branch: "feat/base".to_string(),
+            base: "main".to_string(),
+            pr_number: 10,
+            title: "Base".to_string(),
+            is_draft: false,
+        }];
+        let provisioning = WorktreeProvisioning {
+            created: 0,
+            paths: Vec::new(),
+            created_paths: Vec::new(),
+        };
+
+        let receipt = adopt_receipt_value(0, 1, &candidates, None, &provisioning);
+
+        assert!(receipt["native_stack_number"].is_null());
+        assert_eq!(receipt["pr_numbers"], serde_json::json!([10]));
+        assert_eq!(receipt["worktrees_created"], 0);
+        assert_eq!(receipt["worktree_paths"], serde_json::json!([]));
+    }
+
+    #[test]
     fn build_adopt_graph_partial_chain_missing_middle() {
         let mut prs = HashMap::new();
         // feat/a → main (exists)
@@ -690,5 +1241,216 @@ mod tests {
             adoption_parent_head("feat/child", "feat/base").expect("parent head"),
             original_base
         );
+    }
+
+    #[test]
+    fn provision_worktrees_creates_reuses_and_skips_candidate_worktrees() {
+        use crate::test_support::{CwdGuard, init_git_repo, take_env_lock};
+
+        let _guard = take_env_lock();
+        let repo = init_git_repo("adopt-worktrees");
+        let _cwd = CwdGuard::enter(&repo);
+        let main_head = git::rev_parse("main").expect("main sha");
+        git::create_branch_at("feat/base", &main_head).expect("create base branch");
+        git::create_branch_at("feat/child", &main_head).expect("create child branch");
+
+        let candidates = vec![
+            AdoptCandidate {
+                branch: "feat/base".to_string(),
+                base: "main".to_string(),
+                pr_number: 10,
+                title: "Base".to_string(),
+                is_draft: false,
+            },
+            AdoptCandidate {
+                branch: "feat/child".to_string(),
+                base: "feat/base".to_string(),
+                pr_number: 11,
+                title: "Child".to_string(),
+                is_draft: false,
+            },
+        ];
+
+        let skipped = provision_worktrees(&candidates, true).expect("skip worktrees");
+        assert_eq!(skipped.created, 0);
+        assert!(skipped.paths.is_empty());
+        assert_eq!(git::worktree_list().expect("worktree list").len(), 1);
+
+        let first = provision_worktrees(&candidates, false).expect("create worktrees");
+        assert_eq!(first.created, 2);
+        assert_eq!(first.paths.len(), 2);
+        assert!(first.paths.iter().all(|path| path.contains("/.worktrees/")));
+        assert!(
+            first
+                .paths
+                .iter()
+                .all(|path| std::path::Path::new(path).exists())
+        );
+
+        let second = provision_worktrees(&candidates, false).expect("reuse worktrees");
+        assert_eq!(second.created, 0);
+        assert_eq!(second.paths, first.paths);
+    }
+
+    #[test]
+    fn validate_existing_branch_pr_refs_allows_equal_and_local_ahead_but_rejects_stale_or_diverged()
+    {
+        use crate::test_support::{CwdGuard, init_git_repo, take_env_lock, write_file};
+
+        let _guard = take_env_lock();
+        let repo = init_git_repo("adopt-pr-ref-preflight");
+        let _cwd = CwdGuard::enter(&repo);
+        let main_head = git::rev_parse("main").expect("main sha");
+
+        git::create_branch_at("pr-head", &main_head).expect("create pr-head");
+        git::checkout("pr-head").expect("checkout pr-head");
+        write_file(&repo, "pr.txt", "pr\n");
+        git::add_all_including_untracked().expect("stage pr");
+        git::commit("pr head").expect("commit pr");
+        let pr_head = git::rev_parse("pr-head").expect("pr sha");
+
+        git::create_branch_at("feat/equal", &pr_head).expect("create equal");
+        git::create_branch_at("feat/ahead", &pr_head).expect("create ahead");
+        git::checkout("feat/ahead").expect("checkout ahead");
+        write_file(&repo, "ahead.txt", "ahead\n");
+        git::add_all_including_untracked().expect("stage ahead");
+        git::commit("ahead").expect("commit ahead");
+
+        git::checkout("main").expect("checkout main");
+        git::create_branch_at("feat/stale", &main_head).expect("create stale");
+        git::create_branch_at("feat/diverged", &main_head).expect("create diverged");
+        git::checkout("feat/diverged").expect("checkout diverged");
+        write_file(&repo, "diverged.txt", "diverged\n");
+        git::add_all_including_untracked().expect("stage diverged");
+        git::commit("diverged").expect("commit diverged");
+        git::checkout("main").expect("checkout main");
+
+        let mut refs = HashMap::new();
+        refs.insert("feat/equal".to_string(), pr_head.clone());
+        refs.insert("feat/ahead".to_string(), pr_head.clone());
+        refs.insert("feat/stale".to_string(), pr_head.clone());
+        refs.insert("feat/diverged".to_string(), pr_head.clone());
+
+        validate_existing_branch_pr_refs(
+            &[
+                candidate("feat/equal", "main", 10),
+                candidate("feat/ahead", "main", 11),
+            ],
+            &refs,
+        )
+        .expect("equal and local-ahead branches should pass");
+
+        let stale = validate_existing_branch_pr_refs(&[candidate("feat/stale", "main", 12)], &refs)
+            .expect_err("stale local branch should fail");
+        assert!(stale.to_string().contains("feat/stale"));
+        assert!(stale.to_string().contains("PR #12"));
+
+        let diverged =
+            validate_existing_branch_pr_refs(&[candidate("feat/diverged", "main", 13)], &refs)
+                .expect_err("diverged local branch should fail");
+        assert!(diverged.to_string().contains("feat/diverged"));
+        assert!(diverged.to_string().contains("PR #13"));
+    }
+
+    #[test]
+    fn adoption_transaction_rolls_back_worktrees_branches_and_preserves_state_on_provision_failure()
+    {
+        use crate::test_support::{CwdGuard, init_git_repo, take_env_lock, write_file};
+
+        let _guard = take_env_lock();
+        let repo = init_git_repo("adopt-transaction-rollback");
+        let _cwd = CwdGuard::enter(&repo);
+
+        let mut state = StackState::new("main".to_string());
+        state.repo = Some("sentinel/repo".to_string());
+        state.save().expect("save sentinel state");
+        let state_path = StackState::state_path().expect("state path");
+        let original_state = std::fs::read(&state_path).expect("read sentinel state");
+
+        let main_head = git::rev_parse("main").expect("main sha");
+        let candidates = vec![
+            candidate("feat/base", "main", 10),
+            candidate("feat/child", "feat/base", 11),
+        ];
+        let mut refs = HashMap::new();
+        refs.insert("feat/base".to_string(), main_head.clone());
+        refs.insert("feat/child".to_string(), main_head);
+
+        let child_collision =
+            std::path::PathBuf::from(git::worktree_path("feat/child").expect("child path"));
+        write_file(&child_collision, "collision.txt", "block worktree add\n");
+
+        let err = adopt_candidates_transactionally(&mut state, &candidates, false, &refs)
+            .expect_err("second worktree add should fail");
+        assert!(
+            err.to_string().contains("already exists")
+                || err.to_string().contains("exists")
+                || err.to_string().contains("not empty"),
+            "unexpected error: {err}"
+        );
+
+        assert_eq!(
+            std::fs::read(&state_path).expect("read state after failure"),
+            original_state,
+            "stack.json must remain byte-for-byte unchanged"
+        );
+        assert!(!git::branch_exists("feat/base"));
+        assert!(!git::branch_exists("feat/child"));
+
+        let worktrees = git::worktree_list().expect("worktree list");
+        assert!(
+            worktrees
+                .iter()
+                .all(|wt| wt.branch.as_deref() != Some("feat/base")
+                    && wt.branch.as_deref() != Some("feat/child")),
+            "candidate worktrees should be rolled back: {worktrees:?}"
+        );
+        assert!(
+            !std::path::Path::new(&git::worktree_path("feat/base").expect("base path")).exists(),
+            "first created worktree path should be removed"
+        );
+        assert!(
+            child_collision.exists(),
+            "pre-existing collision directory should not be deleted"
+        );
+    }
+
+    #[test]
+    fn adoption_transaction_rolls_back_earlier_branch_when_later_branch_setup_fails() {
+        use crate::test_support::{CwdGuard, init_git_repo, take_env_lock};
+
+        let _guard = take_env_lock();
+        let repo = init_git_repo("adopt-branch-rollback");
+        let _cwd = CwdGuard::enter(&repo);
+
+        let mut state = StackState::new("main".to_string());
+        state.repo = Some("sentinel/repo".to_string());
+        state.save().expect("save sentinel state");
+        let state_path = StackState::state_path().expect("state path");
+        let original_state = std::fs::read(&state_path).expect("read sentinel state");
+
+        let candidates = vec![
+            candidate("feat/base", "main", 10),
+            candidate("feat/child", "feat/base", 11),
+        ];
+        let mut refs = HashMap::new();
+        refs.insert(
+            "feat/base".to_string(),
+            git::rev_parse("main").expect("main sha"),
+        );
+
+        let err = adopt_candidates_transactionally(&mut state, &candidates, true, &refs)
+            .expect_err("missing second PR ref should abort");
+        assert!(
+            err.to_string()
+                .contains("missing fetched PR ref for `feat/child`")
+        );
+        assert_eq!(
+            std::fs::read(&state_path).expect("read state after failure"),
+            original_state,
+            "stack.json must remain byte-for-byte unchanged"
+        );
+        assert!(!git::branch_exists("feat/base"));
+        assert!(!git::branch_exists("feat/child"));
     }
 }

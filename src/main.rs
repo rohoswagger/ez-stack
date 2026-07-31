@@ -112,7 +112,11 @@ fn handle_clap_error(e: clap::Error, start: Instant) {
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Init { trunk, yes } => cmd::init::run(trunk, yes),
-        Commands::Adopt { pr, branches } => cmd::adopt::run(pr, &branches),
+        Commands::Adopt {
+            pr,
+            branches,
+            no_worktrees,
+        } => cmd::adopt::run(pr, &branches, no_worktrees),
         Commands::Create {
             name,
             message,
