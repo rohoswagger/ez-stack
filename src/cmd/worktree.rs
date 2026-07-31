@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Instant;
 
 use crate::error::EzError;
 use crate::git;
@@ -97,6 +100,244 @@ pub fn ensure(branches: &[String], dry_run: bool, json: bool) -> Result<()> {
     }
     ui::receipt(&serde_json::to_value(&result)?);
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ExecStatus {
+    Succeeded,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ExecEntry {
+    branch: String,
+    path: String,
+    status: ExecStatus,
+    exit_code: Option<i32>,
+    duration_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stdout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stderr: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ExecResult {
+    cmd: String,
+    command: Vec<String>,
+    keep_going: bool,
+    entries: Vec<ExecEntry>,
+    created_count: usize,
+    reused_count: usize,
+    attempted_count: usize,
+    succeeded_count: usize,
+    failed_count: usize,
+    skipped_count: usize,
+    stopped_early: bool,
+}
+
+pub fn exec(branches: &[String], command: &[String], keep_going: bool, json: bool) -> Result<()> {
+    if command.is_empty() {
+        bail!(EzError::UserMessage(
+            "a command is required\n  → Run `ez worktree exec -- <command> [args...]`".to_string()
+        ));
+    }
+
+    let fleet = ensure_with_adder(branches, false, add_owned_worktree)?;
+    if fleet.entries.is_empty() {
+        bail!(EzError::UserMessage(
+            "the stack has no managed branches to execute in\n  → Run `ez create <name>` first"
+                .to_string()
+        ));
+    }
+
+    let fleet_size = fleet.entries.len();
+    let mut entries = Vec::with_capacity(fleet_size);
+    for (index, fleet_entry) in fleet.entries.iter().enumerate() {
+        if !json {
+            ui::info(&format!(
+                "Running `{}` in `{}` at `{}`",
+                command.join(" "),
+                fleet_entry.branch,
+                fleet_entry.path
+            ));
+        }
+
+        let entry = execute_in_worktree(
+            &fleet_entry.branch,
+            &fleet_entry.path,
+            command,
+            json,
+            index + 1,
+            fleet_size,
+        );
+        let failed = entry.status == ExecStatus::Failed;
+        entries.push(entry);
+        if failed && !keep_going {
+            break;
+        }
+    }
+
+    for fleet_entry in fleet.entries.iter().skip(entries.len()) {
+        entries.push(ExecEntry {
+            branch: fleet_entry.branch.clone(),
+            path: fleet_entry.path.clone(),
+            status: ExecStatus::Skipped,
+            exit_code: None,
+            duration_ms: 0,
+            stdout: json.then(String::new),
+            stderr: json.then(String::new),
+        });
+    }
+
+    let succeeded_count = count_exec_status(&entries, ExecStatus::Succeeded);
+    let failed_count = count_exec_status(&entries, ExecStatus::Failed);
+    let skipped_count = count_exec_status(&entries, ExecStatus::Skipped);
+    let attempted_count = succeeded_count + failed_count;
+    let stopped_early = skipped_count > 0;
+    let result = ExecResult {
+        cmd: "worktree.exec".to_string(),
+        command: command.to_vec(),
+        keep_going,
+        entries,
+        created_count: fleet.created_count,
+        reused_count: fleet.reused_count,
+        attempted_count,
+        succeeded_count,
+        failed_count,
+        skipped_count,
+        stopped_early,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else if failed_count == 0 {
+        ui::success(&format!(
+            "Fleet command passed in {} worktree(s)",
+            result.succeeded_count
+        ));
+    } else {
+        ui::error(&format!(
+            "Fleet command failed in {} of {} attempted worktree(s)",
+            result.failed_count, result.attempted_count
+        ));
+    }
+    ui::receipt(&serde_json::json!({
+        "cmd": result.cmd,
+        "command": result.command,
+        "keep_going": result.keep_going,
+        "created_count": result.created_count,
+        "reused_count": result.reused_count,
+        "attempted_count": result.attempted_count,
+        "succeeded_count": result.succeeded_count,
+        "failed_count": result.failed_count,
+        "skipped_count": result.skipped_count,
+        "stopped_early": result.stopped_early,
+    }));
+
+    if failed_count > 0 {
+        let exit_code = result
+            .entries
+            .iter()
+            .find(|entry| entry.status == ExecStatus::Failed)
+            .and_then(|entry| entry.exit_code)
+            .filter(|code| (1..=255).contains(code))
+            .unwrap_or(1);
+        bail!(EzError::WorktreeExecFailed {
+            count: failed_count,
+            exit_code,
+        });
+    }
+    Ok(())
+}
+
+fn count_exec_status(entries: &[ExecEntry], status: ExecStatus) -> usize {
+    entries
+        .iter()
+        .filter(|entry| entry.status == status)
+        .count()
+}
+
+fn execute_in_worktree(
+    branch: &str,
+    path: &str,
+    command: &[String],
+    capture: bool,
+    stack_index: usize,
+    stack_size: usize,
+) -> ExecEntry {
+    let started = Instant::now();
+    let mut process = Command::new(&command[0]);
+    process
+        .args(&command[1..])
+        .current_dir(path)
+        .env("EZ_BRANCH", branch)
+        .env("EZ_WORKTREE", path)
+        .env("EZ_PORT", crate::dev::dev_port(branch).to_string())
+        .env("EZ_STACK_INDEX", stack_index.to_string())
+        .env("EZ_STACK_SIZE", stack_size.to_string());
+
+    let execution = if capture {
+        process.output().map(|output| {
+            (
+                output.status.success(),
+                output.status.code(),
+                Some(String::from_utf8_lossy(&output.stdout).into_owned()),
+                Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+            )
+        })
+    } else {
+        process
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .map(|status| (status.success(), status.code(), None, None))
+    };
+
+    let (success, exit_code, stdout, stderr) = match execution {
+        Ok(result) => result,
+        Err(error) => (
+            false,
+            command_spawn_exit_code(&error),
+            capture.then(String::new),
+            if capture {
+                Some(error.to_string())
+            } else {
+                ui::error(&format!(
+                    "Could not start `{}` in `{branch}`: {error}",
+                    command[0]
+                ));
+                None
+            },
+        ),
+    };
+
+    ExecEntry {
+        branch: branch.to_string(),
+        path: path.to_string(),
+        status: if success {
+            ExecStatus::Succeeded
+        } else {
+            ExecStatus::Failed
+        },
+        exit_code,
+        duration_ms: started.elapsed().as_millis(),
+        stdout,
+        stderr,
+    }
+}
+
+fn command_spawn_exit_code(error: &io::Error) -> Option<i32> {
+    if error.kind() == io::ErrorKind::NotFound {
+        Some(127)
+    } else if error.kind() == io::ErrorKind::PermissionDenied {
+        Some(126)
+    } else {
+        None
+    }
 }
 
 fn ensure_with_adder<F>(
@@ -218,7 +459,7 @@ fn select_managed_branches(state: &StackState, requested: &[String]) -> Result<V
     for branch in requested {
         if state.is_trunk(branch) {
             bail!(EzError::UserMessage(format!(
-                "`{branch}` is trunk, not a managed stack layer\n  → Omit trunk from `ez worktree ensure`"
+                "`{branch}` is trunk, not a managed stack layer\n  → Omit trunk from the worktree branch selection"
             )));
         }
         if !state.is_managed(branch) {
@@ -990,5 +1231,90 @@ mod tests {
         assert_eq!(value["created_count"], 1);
         assert_eq!(value["entries"][0]["status"], "created");
         assert_eq!(value["entries"][0]["location"], "canonical");
+    }
+
+    #[test]
+    fn exec_rejects_an_empty_command_before_loading_repository_state() {
+        let error = exec(&[], &[], false, true).expect_err("empty command");
+        assert!(error.to_string().contains("a command is required"));
+    }
+
+    #[test]
+    fn execute_in_worktree_captures_context_output_and_failure() {
+        let path = temp_dir("fleet-exec-context");
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf '%s|%s|%s|%s|%s' \"$EZ_BRANCH\" \"$EZ_WORKTREE\" \"$EZ_PORT\" \"$EZ_STACK_INDEX\" \"$EZ_STACK_SIZE\"; printf 'problem' >&2; exit 9".to_string(),
+        ];
+
+        let entry = execute_in_worktree(
+            "feat/context",
+            path.to_str().expect("path"),
+            &command,
+            true,
+            2,
+            4,
+        );
+
+        assert_eq!(entry.status, ExecStatus::Failed);
+        assert_eq!(entry.exit_code, Some(9));
+        assert_eq!(entry.stderr.as_deref(), Some("problem"));
+        let stdout = entry.stdout.expect("captured stdout");
+        let fields: Vec<&str> = stdout.split('|').collect();
+        assert_eq!(fields[0], "feat/context");
+        assert_eq!(fields[1], path.to_str().expect("path"));
+        assert_eq!(fields[2], crate::dev::dev_port("feat/context").to_string());
+        assert_eq!(fields[3], "2");
+        assert_eq!(fields[4], "4");
+    }
+
+    #[test]
+    fn execute_in_worktree_maps_spawn_errors_and_status_counts() {
+        let path = temp_dir("fleet-exec-spawn");
+        let missing = execute_in_worktree(
+            "feat/missing",
+            path.to_str().expect("path"),
+            &["ez-command-that-does-not-exist".to_string()],
+            true,
+            1,
+            1,
+        );
+        let succeeded = ExecEntry {
+            branch: "feat/ok".to_string(),
+            path: "/tmp/ok".to_string(),
+            status: ExecStatus::Succeeded,
+            exit_code: Some(0),
+            duration_ms: 1,
+            stdout: None,
+            stderr: None,
+        };
+        let skipped = ExecEntry {
+            status: ExecStatus::Skipped,
+            ..succeeded.clone()
+        };
+
+        assert_eq!(missing.status, ExecStatus::Failed);
+        assert_eq!(missing.exit_code, Some(127));
+        assert_eq!(
+            count_exec_status(&[missing, succeeded, skipped], ExecStatus::Failed),
+            1
+        );
+    }
+
+    #[test]
+    fn spawn_error_exit_codes_follow_shell_conventions() {
+        assert_eq!(
+            command_spawn_exit_code(&io::Error::from(io::ErrorKind::NotFound)),
+            Some(127)
+        );
+        assert_eq!(
+            command_spawn_exit_code(&io::Error::from(io::ErrorKind::PermissionDenied)),
+            Some(126)
+        );
+        assert_eq!(
+            command_spawn_exit_code(&io::Error::from(io::ErrorKind::Other)),
+            None
+        );
     }
 }

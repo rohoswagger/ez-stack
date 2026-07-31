@@ -118,9 +118,18 @@ cargo test test_stack_serialization
 
 # Integration tests (requires git and gh)
 cargo test --test integration
+
+# Stable-toolchain coverage (requires cargo-llvm-cov)
+cargo llvm-cov --all-features --workspace --no-fail-fast --summary-only
 ```
 
 Integration tests create temporary git repos and exercise full command flows. They do not touch GitHub — any `gh` calls are stubbed.
+
+CI enforces monotonically increasing line, function, and region coverage floors.
+The current ratchet is 79% lines, 83% functions, and 79% regions, with 100% as
+the target. Do not lower a floor to make a change pass; add behavior-focused
+tests or simplify unreachable production code, then raise the floor whenever
+the measured whole-workspace result crosses the next integer.
 
 ## Questions?
 

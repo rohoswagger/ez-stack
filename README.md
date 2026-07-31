@@ -123,6 +123,7 @@ Use `--hook <name>` for project-specific hooks, or `--hook` alone to list availa
 | `ez adopt --pr <number>` | Materialize a PR chain or native GitHub stack locally, with one worktree per active layer. `--no-worktrees` for metadata only. |
 | `ez adopt <branch>...` | Adopt an explicit bottom-to-top branch chain without requiring PRs or GitHub auth. Remote-only branches are fetched and materialized into worktrees by default. |
 | `ez worktree ensure [branch...]` | Materialize missing worktrees for the whole managed stack, or selected layers. Reuses existing checkouts wherever they live. |
+| `ez worktree exec [branch...] -- <command>` | Materialize selected layers and run one command in every worktree, parent-first. `--keep-going` and `--json` support test matrices and agents. |
 | `ez list` | Dashboard for all local branches: PRs, CI, age, ports, and working tree state. `--json` for machine output. |
 | `ez delete [name]` | Delete branch + worktree. Auto-detects worktrees and best-effort stops listeners on the branch dev port. `--yes` for agents. |
 | `ez fold [branch] --yes` | Locally fold one PR-less stack layer into its parent without rewriting commits. Removes the folded local worktree/branch, reparents children, and preserves remotes. |
@@ -240,6 +241,34 @@ selected branch and destination, including path collisions caused by sanitized
 branch names. If a later creation fails, worktrees created earlier in the same
 invocation are rolled back. The command is local/offline and does not change
 stack metadata, branches, remotes, or GitHub state.
+
+### Execute across the workspace fleet
+
+```bash
+ez worktree exec -- cargo test
+ez worktree exec feat/api feat/ui -- npm test
+ez worktree exec --keep-going --json -- sh -lc 'make check'
+```
+
+`ez worktree exec` treats the stack as a runnable workspace fleet. It first
+applies the same transactional materialization and reuse rules as
+`ez worktree ensure`, then executes the argv directly in each selected
+worktree in deterministic parent-first order. It stops on the first failure by
+default; `--keep-going` attempts every layer. The process exits with the first
+failing child exit code.
+
+Human mode streams child output. JSON mode captures stdout, stderr, exit code,
+duration, and status per branch without polluting stdout, including explicit
+`skipped` entries after a fail-fast stop. Every child receives:
+
+- `EZ_BRANCH`
+- `EZ_WORKTREE`
+- `EZ_PORT` (the branch's deterministic development port)
+- `EZ_STACK_INDEX` (one-based)
+- `EZ_STACK_SIZE`
+
+Commands are not interpreted by a shell. Pass `sh -lc '<command>'` explicitly
+when pipelines, redirects, globs, or other shell syntax are required.
 
 ### Fold a local stack layer down
 
