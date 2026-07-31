@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use crate::error::EzError;
 
+const GITHUB_API_VERSION_HEADER: &str = "X-GitHub-Api-Version: 2026-03-10";
+
 fn run_gh(args: &[&str]) -> Result<String> {
     let output = Command::new("gh")
         .args(args)
@@ -71,7 +73,16 @@ pub enum NativeStackOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeStackInfo {
     pub number: u64,
+    pub base_ref: Option<String>,
+    pub open: Option<bool>,
     pub pull_requests: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeStackLookup {
+    Found(NativeStackInfo),
+    NotLinked,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -416,8 +427,19 @@ fn merge_pr_with_poll_interval(
     let route = format!("repos/{repo}/pulls/{pr_number}/merge-async");
     let method_json = serde_json::to_string(method)?;
     let payload = format!(r#"{{"merge_method":{method_json},"merge_action":"default"}}"#);
-    let response = match run_gh_with_stdin(&["api", "-X", "PUT", &route, "--input", "-"], &payload)
-    {
+    let response = match run_gh_with_stdin(
+        &[
+            "api",
+            "-X",
+            "PUT",
+            &route,
+            "--input",
+            "-",
+            "-H",
+            GITHUB_API_VERSION_HEADER,
+        ],
+        &payload,
+    ) {
         Ok(response) => response,
         Err(err) if is_not_found_gh_error(&err) => {
             return merge_pr_legacy(&repo, pr_number, method);
@@ -466,7 +488,7 @@ fn handle_merge_async_response(
                     std::thread::sleep(poll_interval);
                 }
                 let route = format!("repos/{repo}/pulls/{pr_number}/merge-async/{uuid}");
-                let poll_response = run_gh(&["api", &route])?;
+                let poll_response = run_gh(&["api", &route, "-H", GITHUB_API_VERSION_HEADER])?;
                 value = serde_json::from_str(&poll_response)
                     .with_context(|| "failed to parse GitHub async merge poll response")?;
             }
@@ -534,7 +556,7 @@ fn reconcile_native_stack(
     let repo = repo_name()?;
     let bottom = pr_numbers[0];
     let route = format!("repos/{repo}/stacks?pull_request={bottom}");
-    let existing = match run_gh(&["api", &route]) {
+    let existing = match run_gh(&["api", &route, "-H", GITHUB_API_VERSION_HEADER]) {
         Ok(json) => json,
         Err(err) if is_not_found_gh_error(&err) => return Ok(NativeStackOutcome::Unavailable),
         Err(err) => return Err(err),
@@ -553,6 +575,8 @@ fn reconcile_native_stack(
                 &format!("repos/{repo}/stacks"),
                 "--input",
                 "-",
+                "-H",
+                GITHUB_API_VERSION_HEADER,
             ],
             &payload,
         )?;
@@ -577,6 +601,8 @@ fn reconcile_native_stack(
                 &format!("repos/{repo}/stacks/{number}/add"),
                 "--input",
                 "-",
+                "-H",
+                GITHUB_API_VERSION_HEADER,
             ],
             &payload,
         )?;
@@ -595,22 +621,31 @@ fn reconcile_native_stack(
 }
 
 pub fn native_stack_for_pr(pr_number: u64) -> Result<Option<NativeStackInfo>> {
+    match lookup_native_stack_for_pr(pr_number)? {
+        NativeStackLookup::Found(info) => Ok(Some(info)),
+        NativeStackLookup::NotLinked | NativeStackLookup::Unavailable => Ok(None),
+    }
+}
+
+pub fn lookup_native_stack_for_pr(pr_number: u64) -> Result<NativeStackLookup> {
     let repo = repo_name()?;
     let route = format!("repos/{repo}/stacks?pull_request={pr_number}");
-    let response = match run_gh(&["api", &route]) {
+    let response = match run_gh(&["api", &route, "-H", GITHUB_API_VERSION_HEADER]) {
         Ok(json) => json,
-        Err(err) if is_not_found_gh_error(&err) => return Ok(None),
+        Err(err) if is_not_found_gh_error(&err) => return Ok(NativeStackLookup::Unavailable),
         Err(err) => return Err(err),
     };
 
     let stacks: Vec<serde_json::Value> = serde_json::from_str(&response)
         .with_context(|| "failed to parse GitHub native stack lookup response")?;
     let Some(stack) = stacks.first() else {
-        return Ok(None);
+        return Ok(NativeStackLookup::NotLinked);
     };
 
-    Ok(Some(NativeStackInfo {
+    Ok(NativeStackLookup::Found(NativeStackInfo {
         number: parse_native_stack_info_number(stack)?,
+        base_ref: parse_native_stack_base_ref(stack),
+        open: stack["open"].as_bool(),
         pull_requests: parse_native_stack_pr_numbers(stack)?,
     }))
 }
@@ -624,6 +659,10 @@ fn parse_native_stack_info_number(stack: &serde_json::Value) -> Result<u64> {
     stack["number"]
         .as_u64()
         .context("GitHub native stack response missing stack number")
+}
+
+fn parse_native_stack_base_ref(stack: &serde_json::Value) -> Option<String> {
+    stack["base"]["ref"].as_str().map(ToString::to_string)
 }
 
 fn parse_native_stack_number(response: &str) -> Result<u64> {
@@ -837,7 +876,7 @@ case "$cmd" in
     esac
     ;;
   api)
-    if [ "$1" = "-X" ] && [ "$2" = "PUT" ] && [ "$3" = 'repos/org/repo/pulls/77/merge-async' ] && [ "$4" = "--input" ] && [ "$5" = "-" ]; then
+    if [ "$1" = "-X" ] && [ "$2" = "PUT" ] && [ "$3" = 'repos/org/repo/pulls/77/merge-async' ] && [ "$4" = "--input" ] && [ "$5" = "-" ] && [ "$6" = "-H" ] && [ "$7" = "X-GitHub-Api-Version: 2026-03-10" ]; then
       cat >/dev/null
       echo '{"status":"merged"}'
     elif [ "$1" = "graphql" ]; then
@@ -1070,7 +1109,7 @@ if [ "$1" = "repo" ]; then
   echo "org/repo"
   exit 0
 fi
-if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "PUT" ] && [ "$4" = "repos/org/repo/pulls/77/merge-async" ] && [ "$5" = "--input" ] && [ "$6" = "-" ]; then
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "PUT" ] && [ "$4" = "repos/org/repo/pulls/77/merge-async" ] && [ "$5" = "--input" ] && [ "$6" = "-" ] && [ "$7" = "-H" ] && [ "$8" = "X-GitHub-Api-Version: 2026-03-10" ]; then
   printf '%s\n' "$*" > "$EZ_FAKE_GH_LOG"
   cat > "$EZ_FAKE_GH_PAYLOAD"
   echo '{"status":"merged"}'
@@ -1097,7 +1136,7 @@ exit 2
         assert_eq!(outcome, MergePrOutcome::Merged);
         assert_eq!(
             std::fs::read_to_string(log_path).expect("args"),
-            "api -X PUT repos/org/repo/pulls/77/merge-async --input -\n"
+            "api -X PUT repos/org/repo/pulls/77/merge-async --input - -H X-GitHub-Api-Version: 2026-03-10\n"
         );
         assert_eq!(
             std::fs::read_to_string(payload_path).expect("payload"),
@@ -1121,7 +1160,7 @@ if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "PUT" ]; then
   echo '{"status":"pending","details":{"uuid":"abc-123"}}'
   exit 0
 fi
-if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/pulls/77/merge-async/abc-123" ]; then
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/pulls/77/merge-async/abc-123" ] && [ "$3" = "-H" ] && [ "$4" = "X-GitHub-Api-Version: 2026-03-10" ]; then
   echo poll >> "$EZ_FAKE_GH_LOG"
   echo '{"status":"merged"}'
   exit 0
@@ -1293,8 +1332,8 @@ if [ "$1" = "repo" ]; then
   echo "org/repo"
   exit 0
 fi
-if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=20" ]; then
-  echo '[{"number":88,"pull_requests":[{"number":10},{"number":20},{"number":30}]},{"number":99,"pull_requests":[{"number":20}]}]'
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=20" ] && [ "$3" = "-H" ] && [ "$4" = "X-GitHub-Api-Version: 2026-03-10" ]; then
+  echo '[{"number":88,"base":{"ref":"main"},"open":true,"pull_requests":[{"number":10},{"number":20},{"number":30}]},{"number":99,"pull_requests":[{"number":20}]}]'
   exit 0
 fi
 exit 2
@@ -1310,6 +1349,8 @@ exit 2
             stack,
             NativeStackInfo {
                 number: 88,
+                base_ref: Some("main".to_string()),
+                open: Some(true),
                 pull_requests: vec![10, 20, 30],
             }
         );
@@ -1326,7 +1367,7 @@ if [ "$1" = "repo" ]; then
   echo "org/repo"
   exit 0
 fi
-if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=20" ]; then
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=20" ] && [ "$3" = "-H" ] && [ "$4" = "X-GitHub-Api-Version: 2026-03-10" ]; then
   echo '[]'
   exit 0
 fi
@@ -1372,11 +1413,11 @@ if [ "$1" = "repo" ]; then
   echo "org/repo"
   exit 0
 fi
-if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ] && [ "$3" = "-H" ] && [ "$4" = "X-GitHub-Api-Version: 2026-03-10" ]; then
   echo '[]'
   exit 0
 fi
-if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "POST" ] && [ "$4" = "repos/org/repo/stacks" ] && [ "$5" = "--input" ] && [ "$6" = "-" ]; then
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "POST" ] && [ "$4" = "repos/org/repo/stacks" ] && [ "$5" = "--input" ] && [ "$6" = "-" ] && [ "$7" = "-H" ] && [ "$8" = "X-GitHub-Api-Version: 2026-03-10" ]; then
   cat > "$EZ_FAKE_GH_PAYLOAD"
   echo '{"number":88}'
   exit 0
@@ -1413,11 +1454,11 @@ if [ "$1" = "repo" ]; then
   echo "org/repo"
   exit 0
 fi
-if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ] && [ "$3" = "-H" ] && [ "$4" = "X-GitHub-Api-Version: 2026-03-10" ]; then
   echo '[{"number":88,"pull_requests":[{"number":10},{"number":20}]}]'
   exit 0
 fi
-if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "POST" ] && [ "$4" = "repos/org/repo/stacks/88/add" ] && [ "$5" = "--input" ] && [ "$6" = "-" ]; then
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "POST" ] && [ "$4" = "repos/org/repo/stacks/88/add" ] && [ "$5" = "--input" ] && [ "$6" = "-" ] && [ "$7" = "-H" ] && [ "$8" = "X-GitHub-Api-Version: 2026-03-10" ]; then
   cat > "$EZ_FAKE_GH_PAYLOAD"
   echo '{"number":88}'
   exit 0
@@ -1460,7 +1501,7 @@ if [ "$1" = "repo" ]; then
   echo "org/repo"
   exit 0
 fi
-if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ] && [ "$3" = "-H" ] && [ "$4" = "X-GitHub-Api-Version: 2026-03-10" ]; then
   echo '[{"number":88,"pull_requests":[{"number":10},{"number":20}]}]'
   exit 0
 fi
@@ -1497,7 +1538,7 @@ if [ "$1" = "repo" ]; then
   echo "org/repo"
   exit 0
 fi
-if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ] && [ "$3" = "-H" ] && [ "$4" = "X-GitHub-Api-Version: 2026-03-10" ]; then
   echo '[{"number":88,"pull_requests":[{"number":10},{"number":20},{"number":30}]}]'
   exit 0
 fi
@@ -1560,7 +1601,7 @@ if [ "$1" = "repo" ]; then
   echo "org/repo"
   exit 0
 fi
-if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ] && [ "$3" = "-H" ] && [ "$4" = "X-GitHub-Api-Version: 2026-03-10" ]; then
   echo '[{"number":88,"pull_requests":[{"number":10},{"number":99}]}]'
   exit 0
 fi

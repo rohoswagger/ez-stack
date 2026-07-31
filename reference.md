@@ -39,8 +39,39 @@ Preferred workflow:
 | Parent branch name | `ez parent` |
 | Current branch info | `ez status` |
 | Current branch info (JSON) | `ez status --json` |
+| Inspect current branch native stack alignment | `ez status --native-stack` |
+| Inspect current branch native stack alignment (JSON) | `ez status --json --native-stack` |
 | Stack tree with PR status | `ez log` |
 | Stack tree as JSON | `ez log --json` |
+| Inspect stack tree native stack alignment | `ez log --native-stack` |
+| Inspect stack tree native stack alignment (JSON) | `ez log --json --native-stack` |
+
+`--native-stack` is opt-in. Without it, `status`/`log` human output and JSON
+schema are unchanged. With it, ez compares the authoritative local
+worktree/PR topology to GitHub REST native stack metadata using
+`X-GitHub-Api-Version: 2026-03-10`. The inspection is read-only: it never
+mutates stack metadata, refs, remotes, worktrees, or cached GitHub state. For
+`log`, ez makes one stack API request per contiguous local PR segment.
+
+Native stack states:
+
+| State | Meaning |
+|-------|---------|
+| `in_sync` | Local ordered PR segment matches the GitHub native stack. |
+| `diverged` | GitHub returned a stack, but its ordered PRs do not match local topology. |
+| `not_linked` | Local PR segment is not currently linked as a GitHub native stack. |
+| `unavailable` | GitHub returned public-preview 404 for the stack endpoint. |
+| `unrepresentable` | Local graph is branching or invalid for a linear native stack. |
+| `not_applicable` | The current branch/entry has no applicable local PR segment. |
+| `error` | GitHub inspection failed for another reason. |
+
+JSON adds a `native_stack` object only when `--native-stack` is supplied. It
+contains `provider`, `preview`, `state`, `local.branches`, and ordered
+`local.pull_requests`. When GitHub returns a stack, `github` contains `number`,
+`base_ref`, `open`, 1-based `position`, `size`, and ordered `pull_requests`.
+The local graph remains authoritative; GitHub native stacks are only the
+collaboration and merge layer, so divergence is reported rather than flattened
+or cached.
 
 ## Navigation
 

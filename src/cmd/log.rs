@@ -1,16 +1,23 @@
 use anyhow::Result;
+use std::collections::HashMap;
 
+use crate::cmd::native_stack::{self, NativeStackInspection};
 use crate::git;
 use crate::github;
 use crate::stack::StackState;
 use crate::ui;
 
-pub fn run(json: bool) -> Result<()> {
+pub fn run(json: bool, native_stack: bool) -> Result<()> {
     let state = StackState::load()?;
 
     if json {
         let order = state.topo_order();
         let repo = github::repo_name().ok().unwrap_or_default();
+        let native_stack_inspections = if native_stack {
+            native_stack::inspect_all(&state)
+        } else {
+            HashMap::new()
+        };
 
         let entries: Vec<serde_json::Value> = order
             .iter()
@@ -46,7 +53,7 @@ pub fn run(json: bool) -> Result<()> {
                     ),
                 };
 
-                serde_json::json!({
+                let mut entry = serde_json::json!({
                     "branch": branch,
                     "parent": meta.parent,
                     "depth": depth,
@@ -55,7 +62,11 @@ pub fn run(json: bool) -> Result<()> {
                     "pr_state": pr_state,
                     "is_draft": is_draft,
                     "children": children,
-                })
+                });
+                if let Some(inspection) = native_stack_inspections.get(branch) {
+                    insert_native_stack_json(&mut entry, inspection);
+                }
+                entry
             })
             .collect();
 
@@ -73,6 +84,16 @@ pub fn run(json: bool) -> Result<()> {
         .filter(|wt| wt.path.contains("/.worktrees/"))
         .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
         .collect();
+    let native_stack_inspections = if native_stack {
+        native_stack::inspect_all(&state)
+    } else {
+        HashMap::new()
+    };
+    let render_context = RenderContext {
+        current: &current,
+        worktree_map: &worktree_map,
+        native_stack_inspections: &native_stack_inspections,
+    };
 
     ui::header("Stack");
 
@@ -85,10 +106,16 @@ pub fn run(json: bool) -> Result<()> {
     let count = children.len();
     for (i, child) in children.iter().enumerate() {
         let is_last = i == count - 1;
-        render_tree(&state, child, 1, is_last, &[], &current, &worktree_map)?;
+        render_tree(&state, child, 1, is_last, &[], &render_context)?;
     }
 
     Ok(())
+}
+
+struct RenderContext<'a> {
+    current: &'a str,
+    worktree_map: &'a HashMap<String, String>,
+    native_stack_inspections: &'a HashMap<String, NativeStackInspection>,
 }
 
 fn render_tree(
@@ -97,17 +124,16 @@ fn render_tree(
     depth: usize,
     is_last: bool,
     ancestors_last: &[bool],
-    current: &str,
-    worktree_map: &std::collections::HashMap<String, String>,
+    context: &RenderContext<'_>,
 ) -> Result<()> {
-    let is_current = branch == current;
+    let is_current = branch == context.current;
     let meta = state.get_branch(branch)?;
 
     // Build the display text for this branch
     let name_display = ui::branch_display(branch, is_current);
 
     // Worktree indicator — shown when branch is checked out in another worktree.
-    let worktree_text = if let Some(wt_path) = worktree_map.get(branch) {
+    let worktree_text = if let Some(wt_path) = context.worktree_map.get(branch) {
         let label = std::path::Path::new(wt_path)
             .file_name()
             .and_then(|n| n.to_str())
@@ -162,9 +188,15 @@ fn render_tree(
     } else {
         String::new()
     };
+    let native_stack_text = context
+        .native_stack_inspections
+        .get(branch)
+        .map(|inspection| native_stack_log_suffix(&native_stack::summary(inspection)))
+        .unwrap_or_default();
 
-    let line_text =
-        format!("{name_display}{worktree_text}{pr_text}{ci_text}{commit_text}{current_marker}");
+    let line_text = format!(
+        "{name_display}{worktree_text}{pr_text}{ci_text}{commit_text}{native_stack_text}{current_marker}"
+    );
     let line = ui::tree_line(depth, is_last, ancestors_last, &line_text);
     eprintln!("{line}");
 
@@ -181,16 +213,24 @@ fn render_tree(
             depth + 1,
             child_is_last,
             &child_ancestors,
-            current,
-            worktree_map,
+            context,
         )?;
     }
 
     Ok(())
 }
 
+fn insert_native_stack_json(value: &mut serde_json::Value, inspection: &NativeStackInspection) {
+    value["native_stack"] = serde_json::json!(inspection);
+}
+
+fn native_stack_log_suffix(summary: &str) -> String {
+    format!(" {}", ui::dim(&format!("[native: {summary}]")))
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::stack::{BranchMeta, StackState};
     use std::collections::HashMap;
 
@@ -282,5 +322,13 @@ mod tests {
             Some("/repo/.worktrees/feat-x")
         );
         assert_eq!(map.len(), 1, "only the .worktrees/ branch should be in map");
+    }
+
+    #[test]
+    fn native_stack_log_suffix_is_compact() {
+        let suffix = native_stack_log_suffix("in sync with GitHub stack #88");
+
+        assert!(suffix.contains("[native: in sync with GitHub stack #88]"));
+        assert!(suffix.starts_with(' '));
     }
 }

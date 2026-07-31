@@ -1,12 +1,14 @@
 use anyhow::Result;
+use serde::Serialize;
 
+use crate::cmd::native_stack;
 use crate::error::EzError;
 use crate::git;
 use crate::github;
 use crate::stack::StackState;
 use crate::ui;
 
-pub fn run(json: bool) -> Result<()> {
+pub fn run(json: bool, native_stack: bool) -> Result<()> {
     let state = StackState::load()?;
     let current = git::current_branch()?;
     let active_edit_root = git::active_edit_root()?;
@@ -19,29 +21,31 @@ pub fn run(json: bool) -> Result<()> {
         let children = state.children_of(&current);
 
         if is_trunk {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "branch": current,
-                    "parent": serde_json::Value::Null,
-                    "pr_number": serde_json::Value::Null,
-                    "pr_url": serde_json::Value::Null,
-                    "pr_state": serde_json::Value::Null,
-                    "is_draft": false,
-                    "depth": 0_usize,
-                    "commits": 0_usize,
-                    "children": children,
-                    "needs_restack": false,
-                    "scope": serde_json::Value::Null,
-                    "scope_mode": serde_json::Value::Null,
-                    "scope_defined": false,
-                    "staged_files": staged,
-                    "modified_files": modified,
-                    "untracked_files": untracked,
-                    "active_edit_root": active_edit_root,
-                    "in_linked_worktree": in_linked_worktree,
-                })
-            );
+            let mut value = serde_json::json!({
+                "branch": current,
+                "parent": serde_json::Value::Null,
+                "pr_number": serde_json::Value::Null,
+                "pr_url": serde_json::Value::Null,
+                "pr_state": serde_json::Value::Null,
+                "is_draft": false,
+                "depth": 0_usize,
+                "commits": 0_usize,
+                "children": children,
+                "needs_restack": false,
+                "scope": serde_json::Value::Null,
+                "scope_mode": serde_json::Value::Null,
+                "scope_defined": false,
+                "staged_files": staged,
+                "modified_files": modified,
+                "untracked_files": untracked,
+                "active_edit_root": active_edit_root,
+                "in_linked_worktree": in_linked_worktree,
+            });
+            if native_stack {
+                let inspection = native_stack::inspect_branch(&state, &current);
+                insert_native_stack_json(&mut value, &inspection)?;
+            }
+            println!("{value}");
             return Ok(());
         }
 
@@ -103,29 +107,31 @@ pub fn run(json: bool) -> Result<()> {
             serde_json::Value::Null
         };
 
-        println!(
-            "{}",
-            serde_json::json!({
-                "branch": current,
-                "parent": meta.parent,
-                "pr_number": pr_number_val,
-                "pr_url": pr_url_val,
-                "pr_state": pr_state_val,
-                "is_draft": is_draft_val,
-                "depth": depth,
-                "commits": commit_count,
-                "children": children,
-                "needs_restack": needs_restack,
-                "scope": scope_val,
-                "scope_mode": scope_mode_val,
-                "scope_defined": scope_defined,
-                "staged_files": staged,
-                "modified_files": modified,
-                "untracked_files": untracked,
-                "active_edit_root": active_edit_root,
-                "in_linked_worktree": in_linked_worktree,
-            })
-        );
+        let mut value = serde_json::json!({
+            "branch": current,
+            "parent": meta.parent,
+            "pr_number": pr_number_val,
+            "pr_url": pr_url_val,
+            "pr_state": pr_state_val,
+            "is_draft": is_draft_val,
+            "depth": depth,
+            "commits": commit_count,
+            "children": children,
+            "needs_restack": needs_restack,
+            "scope": scope_val,
+            "scope_mode": scope_mode_val,
+            "scope_defined": scope_defined,
+            "staged_files": staged,
+            "modified_files": modified,
+            "untracked_files": untracked,
+            "active_edit_root": active_edit_root,
+            "in_linked_worktree": in_linked_worktree,
+        });
+        if native_stack {
+            let inspection = native_stack::inspect_branch(&state, &current);
+            insert_native_stack_json(&mut value, &inspection)?;
+        }
+        println!("{value}");
         return Ok(());
     }
 
@@ -159,6 +165,12 @@ pub fn run(json: bool) -> Result<()> {
                 parts.push(format!("{untracked} untracked"));
             }
             ui::info(&format!("Working tree: {}", parts.join(", ")));
+        }
+        if native_stack {
+            let inspection = native_stack::inspect_branch(&state, &current);
+            ui::info(&native_stack_status_line(&native_stack::summary(
+                &inspection,
+            )));
         }
         return Ok(());
     }
@@ -270,6 +282,13 @@ pub fn run(json: bool) -> Result<()> {
         ui::hint("Run `ez restack` to update.");
     }
 
+    if native_stack {
+        let inspection = native_stack::inspect_branch(&state, &current);
+        ui::info(&native_stack_status_line(&native_stack::summary(
+            &inspection,
+        )));
+    }
+
     // Working tree status
     if staged > 0 || modified > 0 || untracked > 0 {
         let mut parts = Vec::new();
@@ -290,8 +309,22 @@ pub fn run(json: bool) -> Result<()> {
     Ok(())
 }
 
+fn insert_native_stack_json<T: Serialize>(
+    value: &mut serde_json::Value,
+    inspection: &T,
+) -> Result<()> {
+    value["native_stack"] = serde_json::to_value(inspection)?;
+    Ok(())
+}
+
+fn native_stack_status_line(summary: &str) -> String {
+    format!("Native stack: {summary}")
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_status_json_schema_keys() {
         let val = serde_json::json!({
@@ -314,5 +347,30 @@ mod tests {
         assert!(val["children"].is_array());
         assert_eq!(val["needs_restack"], false);
         assert_eq!(val["scope_defined"], true);
+    }
+
+    #[test]
+    fn native_stack_json_insertion_is_opt_in_helper() {
+        let mut val = serde_json::json!({"branch": "feat/x"});
+
+        insert_native_stack_json(
+            &mut val,
+            &serde_json::json!({
+                "provider": "github",
+                "state": "in_sync",
+            }),
+        )
+        .expect("insert native stack");
+
+        assert_eq!(val["native_stack"]["provider"], "github");
+        assert_eq!(val["native_stack"]["state"], "in_sync");
+    }
+
+    #[test]
+    fn native_stack_status_line_is_stable() {
+        assert_eq!(
+            native_stack_status_line("in sync with GitHub stack #88"),
+            "Native stack: in sync with GitHub stack #88"
+        );
     }
 }

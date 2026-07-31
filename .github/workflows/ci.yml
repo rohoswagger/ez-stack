@@ -68,5 +68,5 @@ jobs:
           --workspace
           --no-fail-fast
           --fail-under-lines 83
-          --fail-under-functions 85
+          --fail-under-functions 86
           --fail-under-regions 83

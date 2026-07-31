@@ -105,7 +105,34 @@ ez submit                          # atomically pushes + creates PRs for entire 
 ez diff --stat       # what files changed vs parent
 ez diff --name-only  # just file names
 ez status            # stack info + working tree state
+ez status --json --native-stack  # compare local stack to GitHub native stack
+ez log --json --native-stack     # inspect every local PR segment
 ```
+
+Default `ez status`, `ez status --json`, `ez log`, and `ez log --json` output is
+unchanged. Use `--native-stack` only when an agent needs read-only GitHub native
+stack alignment. The flag uses the GitHub REST public-preview stack API with
+`X-GitHub-Api-Version: 2026-03-10`; preview 404s are reported as `unavailable`,
+not as local stack failure. It never mutates or caches GitHub state, and
+`ez log --native-stack` makes one stack API request per contiguous local PR
+segment.
+
+When consuming JSON, read `native_stack.state` and keep the local worktree graph
+authoritative:
+
+| State | Agent response |
+|-------|----------------|
+| `in_sync` | Continue; local ordered PRs match GitHub. |
+| `diverged` | Do not flatten or rewrite topology to match GitHub; report the mismatch before merge/link work. |
+| `not_linked` | Treat as an ordinary PR chain unless linking is the task. |
+| `unavailable` | Continue local-safe work; the public-preview endpoint returned 404. |
+| `unrepresentable` | Preserve the local graph; native stacks cannot represent this shape. |
+| `not_applicable` | Ignore native stack state for this branch/entry. |
+| `error` | Stop remote-native-stack decisions and surface the GitHub inspection error. |
+
+`native_stack` JSON includes `provider`, `preview`, local `branches` plus ordered
+`pull_requests`, and, when found, GitHub `number`, `base_ref`, `open`, 1-based
+`position`, `size`, and ordered `pull_requests`.
 
 ### Ship it
 ```bash
