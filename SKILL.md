@@ -140,6 +140,8 @@ ez sync --autostash   # pulls trunk, cleans merged PRs, restacks your branches
 ez adopt              # adopt all open PRs rooted on trunk
 ez adopt --pr 42      # adopt its native stack/PR chain + provision each worktree
 ez adopt --pr 42 --no-worktrees  # reconstruct metadata only
+ez worktree ensure    # provision missing worktrees for every managed layer
+ez worktree ensure --dry-run --json  # inspect the deterministic fleet plan
 ez adopt feat/base    # adopt a local or remote branch without requiring a PR
 ez adopt feat/base feat/child  # adopt an explicit bottom-to-top branch chain
 ```
@@ -152,6 +154,13 @@ fetched and materialized locally. Adoption aborts before mutation when existing
 local metadata conflicts with a native stack or when a local branch is behind or
 diverged from its remote. Use it to continue working on someone else's stack
 from a fresh clone.
+
+Use `ez worktree ensure [branch...]` when stack metadata already exists but one
+or more layers do not have worktrees. It reuses canonical, external, and main
+worktrees without touching dirty state, creates only missing canonical
+worktrees, preflights all paths before mutation, and rolls back worktrees
+created earlier in the invocation if a later add fails. It is local/offline and
+does not mutate branches, remotes, GitHub, or stack metadata.
 
 ### Finish
 ```bash
@@ -194,4 +203,4 @@ Check `redundant_commits > 0` after sync/restack — means commits were auto-dro
 
 ## Advanced Commands
 
-See [reference.md](reference.md) for the full command reference: `ez adopt`, `ez commit`, `ez amend`, `ez diff`, `ez status`, `ez restack`, `ez log`, `ez move`, `ez fold`, `ez merge`, `ez switch`, `ez pr-edit`, `ez draft`/`ez ready`, `ez pr-link`, `ez config`, `ez update`, `ez setup`, `ez skill install`.
+See [reference.md](reference.md) for the full command reference: `ez adopt`, `ez worktree ensure`, `ez commit`, `ez amend`, `ez diff`, `ez status`, `ez restack`, `ez log`, `ez move`, `ez fold`, `ez merge`, `ez switch`, `ez pr-edit`, `ez draft`/`ez ready`, `ez pr-link`, `ez config`, `ez update`, `ez setup`, `ez skill install`.

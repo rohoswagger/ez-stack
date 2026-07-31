@@ -128,7 +128,11 @@ pub fn rev_parse(refspec: &str) -> Result<String> {
 }
 
 pub fn branch_exists(name: &str) -> bool {
-    run_git(&["rev-parse", "--verify", name]).is_ok()
+    let reference = format!("refs/heads/{name}");
+    Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", reference.as_str()])
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 pub fn create_branch(name: &str) -> Result<()> {
@@ -263,7 +267,24 @@ pub fn add_all_including_untracked_at(dir: &str) -> Result<()> {
 
 /// Return counts of (staged, modified, untracked) files in the working tree.
 pub fn working_tree_status() -> (usize, usize, usize) {
-    let output = run_git(&["status", "--porcelain"]).unwrap_or_default();
+    working_tree_status_for_args(&["status", "--porcelain"]).unwrap_or_default()
+}
+
+fn working_tree_status_for_args(args: &[&str]) -> Result<(usize, usize, usize)> {
+    let output = Command::new("git")
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(EzError::GitError(stderr));
+    }
+    Ok(parse_working_tree_status(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+fn parse_working_tree_status(output: &str) -> (usize, usize, usize) {
     let mut staged = 0;
     let mut modified = 0;
     let mut untracked = 0;
@@ -827,12 +848,15 @@ pub struct WorktreeInfo {
     pub path: String,
     /// The branch checked out in this worktree, or None if detached HEAD.
     pub branch: Option<String>,
+    /// Git's lock reason when this worktree is locked.
+    pub locked_reason: Option<String>,
 }
 
 fn parse_worktree_list(output: &str) -> Vec<WorktreeInfo> {
     let mut worktrees = Vec::new();
     let mut current_path: Option<String> = None;
     let mut current_branch: Option<String> = None;
+    let mut current_locked_reason: Option<String> = None;
 
     for line in output.lines() {
         if line.is_empty() {
@@ -840,17 +864,23 @@ fn parse_worktree_list(output: &str) -> Vec<WorktreeInfo> {
                 worktrees.push(WorktreeInfo {
                     path,
                     branch: current_branch.take(),
+                    locked_reason: current_locked_reason.take(),
                 });
             }
         } else if let Some(path) = line.strip_prefix("worktree ") {
             current_path = Some(path.to_string());
             current_branch = None;
+            current_locked_reason = None;
         } else if let Some(branch_ref) = line.strip_prefix("branch ") {
             current_branch = branch_ref
                 .strip_prefix("refs/heads/")
                 .map(|s| s.to_string());
+        } else if line == "locked" {
+            current_locked_reason = Some(String::new());
+        } else if let Some(reason) = line.strip_prefix("locked ") {
+            current_locked_reason = Some(reason.to_string());
         }
-        // Ignore HEAD sha, `detached`, `bare` lines — not needed.
+        // Ignore HEAD sha, `detached`, and `bare` lines.
     }
 
     // Handle last block — some git versions omit trailing blank line.
@@ -858,6 +888,7 @@ fn parse_worktree_list(output: &str) -> Vec<WorktreeInfo> {
         worktrees.push(WorktreeInfo {
             path,
             branch: current_branch,
+            locked_reason: current_locked_reason,
         });
     }
 
@@ -868,6 +899,30 @@ fn parse_worktree_list(output: &str) -> Vec<WorktreeInfo> {
 pub fn worktree_list() -> Result<Vec<WorktreeInfo>> {
     let output = run_git(&["worktree", "list", "--porcelain"])?;
     Ok(parse_worktree_list(&output))
+}
+
+pub fn worktree_add_locked_no_checkout(path: &str, branch: &str, reason: &str) -> Result<()> {
+    run_git(&[
+        "worktree",
+        "add",
+        "--no-checkout",
+        "--lock",
+        "--reason",
+        reason,
+        path,
+        branch,
+    ])?;
+    Ok(())
+}
+
+pub fn worktree_checkout(path: &str, branch: &str) -> Result<()> {
+    run_git(&["-C", path, "checkout", "--force", branch])?;
+    Ok(())
+}
+
+pub fn worktree_unlock(path: &str) -> Result<()> {
+    run_git(&["worktree", "unlock", path])?;
+    Ok(())
 }
 
 /// If `branch` is checked out in a worktree OTHER than `current_root`, returns that
@@ -1022,28 +1077,11 @@ pub fn worktree_path(name: &str) -> Result<String> {
 
 /// Run `git -C <dir> status --porcelain` and return counts of (staged, modified, untracked).
 pub fn working_tree_status_at(dir: &str) -> (usize, usize, usize) {
-    let output = run_git(&["-C", dir, "status", "--porcelain"]).unwrap_or_default();
-    let mut staged = 0;
-    let mut modified = 0;
-    let mut untracked = 0;
-    for line in output.lines() {
-        if line.len() < 2 {
-            continue;
-        }
-        let index = line.as_bytes()[0];
-        let worktree = line.as_bytes()[1];
-        if line.starts_with("??") {
-            untracked += 1;
-        } else {
-            if index != b' ' && index != b'?' {
-                staged += 1;
-            }
-            if worktree != b' ' && worktree != b'?' {
-                modified += 1;
-            }
-        }
-    }
-    (staged, modified, untracked)
+    working_tree_status_at_checked(dir).unwrap_or_default()
+}
+
+pub fn working_tree_status_at_checked(dir: &str) -> Result<(usize, usize, usize)> {
+    working_tree_status_for_args(&["-C", dir, "status", "--porcelain"])
 }
 
 #[cfg(test)]
@@ -1064,13 +1102,18 @@ mod tests {
 
     #[test]
     fn test_parse_worktree_list_normal() {
-        let input = "worktree /repo/main\nHEAD abc123\nbranch refs/heads/main\n\nworktree /repo/feat-wt\nHEAD def456\nbranch refs/heads/feat/x\n\n";
+        let input = "worktree /repo/main\nHEAD abc123\nbranch refs/heads/main\n\nworktree /repo/feat-wt\nHEAD def456\nbranch refs/heads/feat/x\nlocked ez-worktree-ensure:1:1\n\n";
         let result = parse_worktree_list(input);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].path, "/repo/main");
         assert_eq!(result[0].branch.as_deref(), Some("main"));
+        assert_eq!(result[0].locked_reason, None);
         assert_eq!(result[1].path, "/repo/feat-wt");
         assert_eq!(result[1].branch.as_deref(), Some("feat/x"));
+        assert_eq!(
+            result[1].locked_reason.as_deref(),
+            Some("ez-worktree-ensure:1:1")
+        );
     }
 
     #[test]
@@ -1324,6 +1367,8 @@ exit 0
         assert_eq!(current_branch().expect("branch"), "main");
         assert_eq!(default_branch().expect("default"), "main");
         assert!(branch_exists("main"));
+        run_cmd(&repo, "git", &["tag", "tag-only", "main"]);
+        assert!(!branch_exists("tag-only"));
         assert_eq!(branch_list().expect("branches"), vec!["main".to_string()]);
     }
 
@@ -1337,9 +1382,7 @@ exit 0
         write_file(&repo, "new.txt", "new\n");
 
         assert_eq!(modified_files(), vec!["tracked.txt".to_string()]);
-        let (staged, modified, untracked) = working_tree_status();
-        assert_eq!(untracked, 1);
-        assert_eq!(staged + modified, 1);
+        assert_eq!(working_tree_status(), (0, 1, 1));
 
         add_paths(&["tracked.txt".to_string()]).expect("stage tracked");
         assert!(has_staged_changes().expect("staged"));

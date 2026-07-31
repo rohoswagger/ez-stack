@@ -292,14 +292,17 @@ mod tests {
             git::WorktreeInfo {
                 path: "/repo".to_string(),
                 branch: Some("main".to_string()),
+                locked_reason: None,
             },
             git::WorktreeInfo {
                 path: "/repo/.worktrees/feat-x".to_string(),
                 branch: Some("feat/x".to_string()),
+                locked_reason: None,
             },
             git::WorktreeInfo {
                 path: "/repo/detached".to_string(),
                 branch: None,
+                locked_reason: None,
             },
         ]);
 
