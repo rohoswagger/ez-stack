@@ -182,6 +182,14 @@ fn stack_state(repo: &CleanupRepo) -> Value {
     .expect("stack JSON")
 }
 
+fn save_stack_state(repo: &CleanupRepo, state: &Value) {
+    std::fs::write(
+        repo.path.join(".git/ez/stack.json"),
+        serde_json::to_vec_pretty(state).expect("serialize stack state"),
+    )
+    .expect("write stack state");
+}
+
 fn add_branch(repo: &CleanupRepo, name: &str, parent: &str, file: &str, pr_number: u64) {
     run(&repo.path, "git", &["checkout", parent]);
     let parent_head = git_output(&repo.path, &["rev-parse", "HEAD"]);
@@ -197,11 +205,7 @@ fn add_branch(repo: &CleanupRepo, name: &str, parent: &str, file: &str, pr_numbe
         "parent_head": parent_head,
         "pr_number": pr_number,
     });
-    std::fs::write(
-        repo.path.join(".git/ez/stack.json"),
-        serde_json::to_vec_pretty(&state).expect("serialize state"),
-    )
-    .expect("write stack state");
+    save_stack_state(repo, &state);
 }
 
 fn add_worktree(repo: &CleanupRepo, branch: &str) -> PathBuf {
@@ -229,12 +233,54 @@ fn branch_exists(repo: &CleanupRepo, branch: &str) -> bool {
     .success()
 }
 
+fn current_branch(dir: &Path) -> String {
+    git_output(dir, &["branch", "--show-current"])
+}
+
+fn status_porcelain(dir: &Path) -> String {
+    git_output(dir, &["status", "--porcelain"])
+}
+
+fn remote_main_change(repo: &CleanupRepo, file: &str, contents: &str, message: &str) -> String {
+    let clone = temp_dir("sync-cleanup-remote-writer");
+    run(
+        &clone,
+        "git",
+        &[
+            "clone",
+            "--branch",
+            "main",
+            repo.remote.to_str().expect("remote path"),
+            ".",
+        ],
+    );
+    run(&clone, "git", &["config", "user.name", "Remote User"]);
+    run(
+        &clone,
+        "git",
+        &["config", "user.email", "remote@example.com"],
+    );
+    commit_file(&clone, file, contents, message);
+    let head = git_output(&clone, &["rev-parse", "HEAD"]);
+    run(&clone, "git", &["push", "origin", "main"]);
+    std::fs::remove_dir_all(clone).expect("remove remote writer");
+    head
+}
+
 fn merged_base_graphql() -> &'static str {
     r#"{"data":{"repository":{"b0":{"nodes":[{"number":101,"url":"https://github.com/org/repo/pull/101","state":"MERGED","title":"base","baseRefName":"main","isDraft":false,"mergedAt":"2026-07-30T00:00:00Z"}]}}}}"#
 }
 
 fn merged_base_open_child_graphql() -> &'static str {
     r#"{"data":{"repository":{"b0":{"nodes":[{"number":101,"url":"https://github.com/org/repo/pull/101","state":"MERGED","title":"base","baseRefName":"main","isDraft":false,"mergedAt":"2026-07-30T00:00:00Z"}]},"b1":{"nodes":[{"number":102,"url":"https://github.com/org/repo/pull/102","state":"OPEN","title":"child","baseRefName":"feat/base","isDraft":false,"mergedAt":null}]}}}}"#
+}
+
+fn closed_base_open_child_graphql() -> &'static str {
+    r#"{"data":{"repository":{"b0":{"nodes":[{"number":101,"url":"https://github.com/org/repo/pull/101","state":"CLOSED","title":"base","baseRefName":"main","isDraft":false,"mergedAt":null}]},"b1":{"nodes":[{"number":102,"url":"https://github.com/org/repo/pull/102","state":"OPEN","title":"child","baseRefName":"feat/base","isDraft":false,"mergedAt":null}]}}}}"#
+}
+
+fn open_base_graphql() -> &'static str {
+    r#"{"data":{"repository":{"b0":{"nodes":[{"number":101,"url":"https://github.com/org/repo/pull/101","state":"OPEN","title":"base","baseRefName":"main","isDraft":false,"mergedAt":null}]}}}}"#
 }
 
 #[test]
@@ -362,4 +408,215 @@ fn sync_from_cleaned_linked_worktree_prints_main_worktree_navigation_target() {
         printed, expected,
         "sync should print shell navigation target"
     );
+}
+
+#[test]
+fn sync_reparents_child_and_repairs_pr_base_when_managed_parent_branch_was_deleted_externally() {
+    let repo = init_repo("sync-cleanup-deleted-parent", "main", serde_json::json!({}));
+    add_branch(&repo, "feat/base", "main", "base.txt", 101);
+    add_branch(&repo, "feat/child", "feat/base", "child.txt", 102);
+    run(&repo.path, "git", &["branch", "-D", "feat/base"]);
+
+    let output = run_ez(
+        &repo,
+        &repo.path,
+        &["sync"],
+        merged_base_open_child_graphql(),
+    );
+
+    assert!(
+        output.status.success(),
+        "sync failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = stack_state(&repo);
+    assert!(state["branches"].get("feat/base").is_none());
+    assert_eq!(state["branches"]["feat/child"]["parent"], "main");
+    assert!(branch_exists(&repo, "feat/child"));
+    let log = std::fs::read_to_string(&repo.gh_log).expect("gh log");
+    assert!(
+        log.contains("pr edit 102 --base main"),
+        "child PR base should be repaired after external parent deletion:\n{log}"
+    );
+}
+
+#[test]
+fn sync_reparents_child_to_trunk_when_deleted_parent_record_points_to_missing_parent() {
+    let repo = init_repo(
+        "sync-cleanup-deleted-parent-missing-parent",
+        "main",
+        serde_json::json!({}),
+    );
+    add_branch(&repo, "feat/base", "main", "base.txt", 101);
+    add_branch(&repo, "feat/child", "feat/base", "child.txt", 102);
+    let mut state = stack_state(&repo);
+    state["branches"]["feat/base"]["parent"] = Value::from("feat/missing-parent");
+    save_stack_state(&repo, &state);
+    run(&repo.path, "git", &["branch", "-D", "feat/base"]);
+
+    let output = run_ez(
+        &repo,
+        &repo.path,
+        &["sync"],
+        merged_base_open_child_graphql(),
+    );
+
+    assert!(
+        output.status.success(),
+        "sync failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = stack_state(&repo);
+    assert!(state["branches"].get("feat/base").is_none());
+    assert_eq!(state["branches"]["feat/child"]["parent"], "main");
+    let log = std::fs::read_to_string(&repo.gh_log).expect("gh log");
+    assert!(
+        log.contains("pr edit 102 --base main"),
+        "child PR base should be repaired to trunk when deleted parent had no surviving parent:\n{log}"
+    );
+}
+
+#[test]
+fn sync_autostash_restores_tracked_and_untracked_changes_after_restack_conflict() {
+    let repo = init_repo(
+        "sync-cleanup-autostash-conflict",
+        "main",
+        serde_json::json!({}),
+    );
+    commit_file(&repo.path, "user.txt", "clean\n", "add user file");
+    run(&repo.path, "git", &["push", "origin", "main"]);
+    add_branch(&repo, "feat/base", "main", "tracked.txt", 101);
+    run(&repo.path, "git", &["checkout", "main"]);
+    let old_parent_head = stack_state(&repo)["branches"]["feat/base"]["parent_head"]
+        .as_str()
+        .expect("parent head")
+        .to_string();
+    let remote_main = remote_main_change(
+        &repo,
+        "tracked.txt",
+        "upstream version\n",
+        "conflicting upstream change",
+    );
+    write_file(&repo.path, "user.txt", "dirty tracked user change\n");
+    write_file(&repo.path, "untracked-note.txt", "dirty untracked note\n");
+
+    let output = run_ez(
+        &repo,
+        &repo.path,
+        &["sync", "--autostash"],
+        open_base_graphql(),
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "restack conflict should use documented exit code:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Stashed uncommitted changes"), "{stderr}");
+    assert!(stderr.contains("Restored stashed changes"), "{stderr}");
+    assert!(
+        stderr.contains(r#""action":"restack_incomplete""#),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path.join("user.txt")).expect("read tracked dirty file"),
+        "dirty tracked user change\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path.join("untracked-note.txt"))
+            .expect("read untracked dirty file"),
+        "dirty untracked note\n"
+    );
+    assert_eq!(current_branch(&repo.path), "main");
+    assert_eq!(git_output(&repo.path, &["rev-parse", "main"]), remote_main);
+    assert!(
+        branch_exists(&repo, "feat/base"),
+        "branch remains retryable"
+    );
+    assert_eq!(
+        stack_state(&repo)["branches"]["feat/base"]["parent_head"]
+            .as_str()
+            .expect("parent head after failed sync"),
+        old_parent_head,
+        "failed restack must leave stale parent_head for retry"
+    );
+    let status = status_porcelain(&repo.path);
+    assert!(
+        status.lines().any(|line| line.ends_with(" user.txt")),
+        "{status}"
+    );
+    assert!(status.contains("?? untracked-note.txt"), "{status}");
+}
+
+#[test]
+fn sync_cleans_closed_unmerged_pr_with_pr_closed_reason_and_reparents_child() {
+    let repo = init_repo("sync-cleanup-closed-pr", "main", serde_json::json!({}));
+    add_branch(&repo, "feat/base", "main", "base.txt", 101);
+    add_branch(&repo, "feat/child", "feat/base", "child.txt", 102);
+
+    let output = run_ez(
+        &repo,
+        &repo.path,
+        &["sync"],
+        closed_base_open_child_graphql(),
+    );
+
+    assert!(
+        output.status.success(),
+        "sync failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(r#""action":"cleaned""#), "{stderr}");
+    assert!(stderr.contains(r#""reason":"pr_closed""#), "{stderr}");
+    assert!(!branch_exists(&repo, "feat/base"));
+    assert_eq!(
+        stack_state(&repo)["branches"]["feat/child"]["parent"],
+        "main"
+    );
+    let log = std::fs::read_to_string(&repo.gh_log).expect("gh log");
+    assert!(
+        log.contains("pr edit 102 --base main"),
+        "child PR base should be repaired after closed-PR cleanup:\n{log}"
+    );
+}
+
+#[test]
+fn sync_skips_cleanup_for_leased_worktree_and_preserves_retryable_state() {
+    let repo = init_repo(
+        "sync-cleanup-leased-worktree",
+        "main",
+        serde_json::json!({}),
+    );
+    add_branch(&repo, "feat/base", "main", "base.txt", 101);
+    let worktree = add_worktree(&repo, "feat/base");
+    run(
+        &repo.path,
+        env!("CARGO_BIN_EXE_ez"),
+        &["worktree", "claim", "feat/base", "--owner", "agent-a"],
+    );
+
+    let output = run_ez(&repo, &repo.path, &["sync"], merged_base_graphql());
+
+    assert!(
+        output.status.success(),
+        "sync should skip leased worktree cleanup without failing local sync:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(branch_exists(&repo, "feat/base"), "branch must remain");
+    assert!(worktree.exists(), "leased worktree must remain");
+    assert!(
+        stack_state(&repo)["branches"].get("feat/base").is_some(),
+        "stack state must keep branch tracked"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(r#""action":"cleanup_skipped""#), "{stderr}");
+    assert!(stderr.contains(r#""reason":"worktree_locked""#), "{stderr}");
 }
