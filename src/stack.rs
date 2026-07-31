@@ -33,9 +33,13 @@ pub struct StackState {
     pub trunk: String,
     pub remote: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_remote: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork_repo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,8 +54,10 @@ impl StackState {
         Self {
             trunk,
             remote: "origin".to_string(),
+            upstream_remote: None,
             default_from: None,
             repo: None,
+            fork_repo: None,
             draft: None,
             no_pr: None,
             rerere: None,
@@ -177,6 +183,41 @@ impl StackState {
         self.branches.contains_key(branch)
     }
 
+    pub fn fetch_remote(&self) -> &str {
+        self.upstream_remote.as_deref().unwrap_or(&self.remote)
+    }
+
+    pub fn is_fork_workflow(&self) -> bool {
+        self.is_fork_workflow_with(None, None, None)
+    }
+
+    pub fn is_fork_workflow_with(
+        &self,
+        remote_override: Option<&str>,
+        repo_override: Option<&str>,
+        fork_repo_override: Option<&str>,
+    ) -> bool {
+        let effective_remote = remote_override.unwrap_or(&self.remote);
+        let effective_repo = repo_override.or(self.repo.as_deref());
+        let effective_fork_repo = fork_repo_override.or(self.fork_repo.as_deref());
+
+        if self
+            .upstream_remote
+            .as_deref()
+            .is_some_and(|upstream| upstream != effective_remote)
+        {
+            return true;
+        }
+
+        match (effective_repo, effective_fork_repo) {
+            (Some(repo), Some(fork_repo)) if !repo.eq_ignore_ascii_case(fork_repo) => true,
+            (Some(repo), _) => {
+                crate::github::remote_repo_differs(effective_remote, repo).unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+
     /// Returns branches in topological order (parents before children).
     pub fn topo_order(&self) -> Vec<String> {
         let mut result = Vec::new();
@@ -299,7 +340,7 @@ impl BranchMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::take_env_lock;
+    use crate::test_support::{CwdGuard, init_git_repo, take_env_lock};
 
     fn sample_state() -> StackState {
         let mut state = StackState::new("main".to_string());
@@ -321,6 +362,64 @@ mod tests {
         state.add_branch("feat/b", "feat/a", "bbb", None, None);
         state.add_branch("feat/c", "feat/b", "ccc", None, None);
         state
+    }
+
+    #[test]
+    fn fetch_remote_defaults_to_push_remote() {
+        let state = StackState::new("main".to_string());
+        assert_eq!(state.fetch_remote(), "origin");
+    }
+
+    #[test]
+    fn fetch_remote_uses_upstream_remote_when_configured() {
+        let mut state = StackState::new("main".to_string());
+        state.remote = "fork".to_string();
+        state.upstream_remote = Some("upstream".to_string());
+
+        assert_eq!(state.fetch_remote(), "upstream");
+    }
+
+    #[test]
+    fn fork_workflow_detects_split_remote_or_split_repo() {
+        let mut state = StackState::new("main".to_string());
+        assert!(!state.is_fork_workflow());
+
+        state.remote = "fork".to_string();
+        state.upstream_remote = Some("upstream".to_string());
+        assert!(state.is_fork_workflow());
+
+        state.upstream_remote = None;
+        state.repo = Some("upstream-owner/project".to_string());
+        state.fork_repo = Some("fork-owner/project".to_string());
+        assert!(state.is_fork_workflow());
+
+        state.fork_repo = Some("upstream-owner/project".to_string());
+        assert!(!state.is_fork_workflow());
+    }
+
+    #[test]
+    fn fork_workflow_detects_push_remote_repo_different_from_upstream_repo() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("stack-fork-remote-detection");
+        let _cwd = CwdGuard::enter(&repo);
+        let status = std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "fork",
+                "https://github.com/fork-owner/project.git",
+            ])
+            .status()
+            .expect("add fork remote");
+        assert!(status.success());
+
+        let mut state = StackState::new("main".to_string());
+        state.remote = "fork".to_string();
+        state.repo = Some("upstream-owner/project".to_string());
+        assert!(state.is_fork_workflow());
+
+        state.repo = Some("FORK-OWNER/PROJECT".to_string());
+        assert!(!state.is_fork_workflow());
     }
 
     #[test]

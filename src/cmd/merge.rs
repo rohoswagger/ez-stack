@@ -98,7 +98,12 @@ fn native_merge_receipt_value(outcome: &NativeMergeOutcome, method: &str) -> ser
     })
 }
 
-fn merge_targets(state: &StackState, current: &str, stack: bool) -> Result<Vec<MergeTarget>> {
+fn merge_targets(
+    state: &StackState,
+    current: &str,
+    stack: bool,
+    repo: Option<&str>,
+) -> Result<Vec<MergeTarget>> {
     let branches = if stack {
         state.linear_stack(current)?
     } else {
@@ -115,7 +120,7 @@ fn merge_targets(state: &StackState, current: &str, stack: bool) -> Result<Vec<M
                     "Branch `{branch}` has no associated PR — run `ez submit` first"
                 ))),
             };
-            let title = github::get_pr_status(&branch)?
+            let title = github::get_pr_status(&pr_number.to_string(), repo)?
                 .map(|pr| pr.title)
                 .unwrap_or_else(|| "(unknown)".to_string());
             Ok(MergeTarget {
@@ -127,7 +132,7 @@ fn merge_targets(state: &StackState, current: &str, stack: bool) -> Result<Vec<M
         .collect()
 }
 
-fn exact_native_stack_match(targets: &[MergeTarget]) -> Result<bool> {
+fn exact_native_stack_match(targets: &[MergeTarget], repo: Option<&str>) -> Result<bool> {
     if targets.len() < 2 {
         return Ok(false);
     }
@@ -136,7 +141,7 @@ fn exact_native_stack_match(targets: &[MergeTarget]) -> Result<bool> {
         .map(|target| target.pr_number)
         .collect::<Vec<_>>();
     let top_pr = *pr_numbers.last().expect("non-empty pr numbers");
-    Ok(github::native_stack_for_pr(top_pr)?
+    Ok(github::native_stack_for_pr(top_pr, repo)?
         .is_some_and(|native| native.pull_requests == pr_numbers))
 }
 
@@ -183,10 +188,11 @@ fn cleanup_merged_branch(
 
 fn fetch_restack_and_push_remaining(
     state: &mut StackState,
-    remote: &str,
+    fetch_remote: &str,
+    push_remote: &str,
 ) -> Result<(usize, Vec<String>)> {
     let sp = ui::spinner("Fetching latest changes...");
-    git::fetch(remote)?;
+    git::fetch(fetch_remote)?;
     sp.finish_and_clear();
 
     let order = state.topo_order();
@@ -200,7 +206,7 @@ fn fetch_restack_and_push_remaining(
         let stored_parent_head = meta.parent_head.clone();
 
         let current_parent_tip = if state.is_trunk(&parent) {
-            git::rev_parse(&format!("{remote}/{parent}"))?
+            git::rev_parse(&format!("{fetch_remote}/{parent}"))?
         } else {
             git::rev_parse(&parent)?
         };
@@ -237,8 +243,8 @@ fn fetch_restack_and_push_remaining(
     if !restacked_for_push.is_empty() {
         for branch_name in &restacked_for_push {
             let sp = ui::spinner(&format!("Pushing restacked `{branch_name}` after merge..."));
-            git::fetch_branch(remote, branch_name)?;
-            git::push(remote, branch_name, true)?;
+            git::fetch_branch(push_remote, branch_name)?;
+            git::push(push_remote, branch_name, true)?;
             sp.finish_and_clear();
             ui::info(&format!("Pushed `{branch_name}`"));
         }
@@ -283,6 +289,7 @@ fn merge_native_stack(
     worktree_map: &HashMap<String, String>,
     current_dir: &str,
     main_root: &str,
+    repo: Option<&str>,
 ) -> Result<NativeMergeOutcome> {
     let trunk = state.trunk.clone();
     let top = targets
@@ -301,7 +308,7 @@ fn merge_native_stack(
         "Merging native stack via PR #{}...",
         top.pr_number
     ));
-    let status = github::merge_pr(top.pr_number, method)?;
+    let status = github::merge_pr(top.pr_number, method, repo)?;
     sp.finish_and_clear();
 
     if status == github::MergePrOutcome::Enqueued {
@@ -327,7 +334,7 @@ fn merge_native_stack(
     for child_name in &reparented {
         ui::info(&format!("Reparented `{child_name}` onto `{trunk}`"));
         if let Some(child_pr) = state.get_branch(child_name)?.pr_number
-            && let Err(e) = github::update_pr_base(child_pr, &trunk)
+            && let Err(e) = github::update_pr_base(child_pr, &trunk, repo)
         {
             ui::warn(&format!("Failed to update PR base for `{child_name}`: {e}"));
         }
@@ -340,8 +347,9 @@ fn merge_native_stack(
 
     move_to_main_root_for_targets(targets, worktree_map, current_dir, main_root)?;
 
-    let remote = state.remote.clone();
-    let (restacked, pushed) = fetch_restack_and_push_remaining(state, &remote)?;
+    let fetch_remote = state.fetch_remote().to_string();
+    let push_remote = state.remote.clone();
+    let (restacked, pushed) = fetch_restack_and_push_remaining(state, &fetch_remote, &push_remote)?;
     if restacked > 0 {
         ui::info(&format!("Restacked {restacked} branch(es)"));
     }
@@ -369,6 +377,7 @@ fn merge_native_stack(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn merge_branch(
     state: &mut StackState,
     branch: &str,
@@ -377,12 +386,14 @@ fn merge_branch(
     linked_worktree: Option<&str>,
     current_dir: &str,
     main_root: &str,
+    repo: Option<&str>,
 ) -> Result<MergeOutcome> {
     let trunk = state.trunk.clone();
-    let remote = state.remote.clone();
+    let fetch_remote = state.fetch_remote().to_string();
+    let push_remote = state.remote.clone();
 
     let sp = ui::spinner(&format!("Merging PR #{pr_number}..."));
-    let status = github::merge_pr(pr_number, method)?;
+    let status = github::merge_pr(pr_number, method, repo)?;
     sp.finish_and_clear();
 
     if status == github::MergePrOutcome::Enqueued {
@@ -406,7 +417,7 @@ fn merge_branch(
         ui::info(&format!("Reparented `{child_name}` onto `{trunk}`"));
 
         if let Some(child_pr) = state.get_branch(child_name)?.pr_number
-            && let Err(e) = github::update_pr_base(child_pr, &trunk)
+            && let Err(e) = github::update_pr_base(child_pr, &trunk, repo)
         {
             ui::warn(&format!("Failed to update PR base for `{child_name}`: {e}"));
         }
@@ -428,7 +439,8 @@ fn merge_branch(
         main_root,
     )?;
 
-    let (restacked, restacked_for_push) = fetch_restack_and_push_remaining(state, &remote)?;
+    let (restacked, restacked_for_push) =
+        fetch_restack_and_push_remaining(state, &fetch_remote, &push_remote)?;
 
     cleanup_merged_branch(state, branch, linked_worktree, &trunk)?;
 
@@ -458,7 +470,9 @@ pub fn run(method: &str, yes: bool, stack: bool) -> Result<()> {
         bail!(EzError::BranchNotInStack(current.clone()));
     }
 
-    let targets = merge_targets(&state, &current, stack)?;
+    let repo = state.repo.clone();
+    let repo = repo.as_deref();
+    let targets = merge_targets(&state, &current, stack, repo)?;
     if targets.is_empty() {
         ui::info("No PRs to merge.");
         return Ok(());
@@ -498,7 +512,7 @@ pub fn run(method: &str, yes: bool, stack: bool) -> Result<()> {
         .and_then(|p| p.to_str().map(String::from))
         .unwrap_or_default();
 
-    if stack && exact_native_stack_match(&targets)? {
+    if stack && !state.is_fork_workflow() && exact_native_stack_match(&targets, repo)? {
         let outcome = merge_native_stack(
             &mut state,
             &targets,
@@ -506,6 +520,7 @@ pub fn run(method: &str, yes: bool, stack: bool) -> Result<()> {
             &worktree_map,
             &current_dir,
             &main_root,
+            repo,
         )?;
         let enqueued = outcome.status == github::MergePrOutcome::Enqueued;
         let merged_count = outcome.branches.len();
@@ -536,6 +551,7 @@ pub fn run(method: &str, yes: bool, stack: bool) -> Result<()> {
             worktree_map.get(&target.branch).map(String::as_str),
             &current_dir,
             &main_root,
+            repo,
         )?;
         total_restacked += outcome.restacked;
         total_pushed += outcome.pushed.len();

@@ -12,7 +12,9 @@ pub fn run(json: bool, native_stack: bool) -> Result<()> {
 
     if json {
         let order = state.topo_order();
-        let repo = github::repo_name().ok().unwrap_or_default();
+        let repo = github::repo_name(state.repo.as_deref())
+            .ok()
+            .unwrap_or_default();
         let native_stack_inspections = if native_stack {
             native_stack::inspect_all(&state)
         } else {
@@ -33,11 +35,12 @@ pub fn run(json: bool, native_stack: bool) -> Result<()> {
                         } else {
                             serde_json::Value::String(format!("https://github.com/{repo}/pull/{n}"))
                         };
-                        let (state_str, draft) = github::get_pr_status(branch)
-                            .ok()
-                            .flatten()
-                            .map(|pr| (pr.state, pr.is_draft))
-                            .unwrap_or_else(|| ("OPEN".to_string(), false));
+                        let (state_str, draft) =
+                            github::get_pr_status(&n.to_string(), state.repo.as_deref())
+                                .ok()
+                                .flatten()
+                                .map(|pr| (pr.state, pr.is_draft))
+                                .unwrap_or_else(|| ("OPEN".to_string(), false));
                         (
                             serde_json::Value::Number(n.into()),
                             url,
@@ -91,6 +94,7 @@ pub fn run(json: bool, native_stack: bool) -> Result<()> {
     };
     let render_context = RenderContext {
         current: &current,
+        repo: state.repo.as_deref(),
         worktree_map: &worktree_map,
         native_stack_inspections: &native_stack_inspections,
     };
@@ -114,6 +118,7 @@ pub fn run(json: bool, native_stack: bool) -> Result<()> {
 
 struct RenderContext<'a> {
     current: &'a str,
+    repo: Option<&'a str>,
     worktree_map: &'a HashMap<String, String>,
     native_stack_inspections: &'a HashMap<String, NativeStackInspection>,
 }
@@ -145,7 +150,7 @@ fn render_tree(
 
     // Get PR badge if available
     let pr_text = if let Some(pr_number) = meta.pr_number {
-        if let Ok(Some(pr)) = github::get_pr_status(branch) {
+        if let Ok(Some(pr)) = github::get_pr_status(&pr_number.to_string(), context.repo) {
             let badge = ui::pr_badge(pr.number, &pr.state, pr.is_draft);
             let state_label = if pr.is_draft {
                 "draft".to_string()
@@ -162,7 +167,7 @@ fn render_tree(
 
     // Get CI status (best-effort, empty string if unavailable).
     let ci_text = if meta.pr_number.is_some() {
-        let ci = github::get_ci_status(branch);
+        let ci = github::get_ci_status(branch, context.repo);
         if ci.is_empty() {
             String::new()
         } else {
@@ -258,16 +263,9 @@ mod tests {
                 scope_mode: None,
             },
         );
-        StackState {
-            trunk: "main".to_string(),
-            remote: "origin".to_string(),
-            default_from: None,
-            repo: None,
-            draft: None,
-            no_pr: None,
-            rerere: None,
-            branches,
-        }
+        let mut state = StackState::new("main".to_string());
+        state.branches = branches;
+        state
     }
 
     #[test]

@@ -314,8 +314,10 @@ mod tests {
         StackState {
             trunk: "main".to_string(),
             remote: "origin".to_string(),
+            upstream_remote: None,
             default_from: None,
             repo: None,
+            fork_repo: None,
             draft: None,
             no_pr: None,
             rerere: None,

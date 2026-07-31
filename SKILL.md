@@ -100,6 +100,36 @@ ez submit                          # atomically pushes + creates PRs for entire 
 
 `ez submit` pushes all stack branches first with one atomic `--force-with-lease` push. For 2+ PRs it also asks GitHub to register the PR chain as a native stack when the public-preview API is available; if unavailable, the ordinary base-chained PRs still succeed.
 
+### Fork/upstream repositories
+
+For fork contribution workflows, keep Git transport and GitHub PR targeting
+explicit:
+
+```bash
+ez config set remote fork
+ez config set upstream_remote upstream
+ez config set repo upstream-owner/project
+ez config set fork_repo my-user/project
+```
+
+- `remote`: where ez pushes branch refs.
+- `upstream_remote`: where ez fetches trunk and PR refs; defaults to `remote`.
+- `repo`: upstream/base GitHub repo for PRs, statuses, merge, adopt, and native-stack inspection.
+- `fork_repo`: fork GitHub repo used for PR heads such as `my-user:feat/auth`.
+
+Use temporary overrides only for one-off pushes:
+
+```bash
+ez push --remote fork --repo upstream-owner/project --fork-repo my-user/project
+ez submit --remote fork --repo upstream-owner/project --fork-repo my-user/project
+```
+
+Overrides are not persisted. Use `ez config set` for durable repo defaults.
+GitHub native stacks require same-repository branches, so fork/cross-repository
+chains report `native_stack.state = "not_applicable"` and skip native-stack API
+mutation. Ordinary base-chained PRs, worktree-native sync, adopt, and merge
+still target the configured upstream `repo`.
+
 ### Self-review before pushing
 ```bash
 ez diff --stat       # what files changed vs parent
@@ -127,7 +157,7 @@ authoritative:
 | `not_linked` | Treat as an ordinary PR chain unless linking is the task. |
 | `unavailable` | Continue local-safe work; the public-preview endpoint returned 404. |
 | `unrepresentable` | Preserve the local graph; native stacks cannot represent this shape. |
-| `not_applicable` | Ignore native stack state for this branch/entry. |
+| `not_applicable` | Ignore native stack state for this branch/entry, including fork/cross-repository chains. |
 | `error` | Stop remote-native-stack decisions and surface the GitHub inspection error. |
 
 `native_stack` JSON includes `provider`, `preview`, local `branches` plus ordered
@@ -141,7 +171,9 @@ ez push -Am "feat: done"               # include untracked files too
 ez push --title "feat: auth" --body "..." # with PR metadata
 ez push --no-pr                        # push branch only
 ez push --pr                           # create/update PR even if no_pr config is true
+ez push --remote fork --repo upstream-owner/project --fork-repo my-user/project
 ez submit                                # atomically push entire stack
+ez submit --remote fork --repo upstream-owner/project --fork-repo my-user/project
 ez merge --yes                           # merge bottom PR non-interactively
 ez merge --stack --yes                   # atomically land a native stack; sequential fallback
 ez fold feat/child --yes                 # locally fold one PR-less layer into its parent

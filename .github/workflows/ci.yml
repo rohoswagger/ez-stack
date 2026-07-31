@@ -67,6 +67,6 @@ jobs:
           --all-features
           --workspace
           --no-fail-fast
-          --fail-under-lines 85
-          --fail-under-functions 86
+          --fail-under-lines 86
+          --fail-under-functions 87
           --fail-under-regions 85
