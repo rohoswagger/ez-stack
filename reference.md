@@ -46,9 +46,16 @@ Preferred workflow:
 
 | Intent | Command |
 |--------|---------|
-| Switch to branch | `ez switch <name>` |
-| Switch by PR number | `ez switch 42` |
+| Switch to branch through shell integration | `ez switch <name>` |
+| Switch by PR number through shell integration | `ez switch 42` |
+| Print target worktree path for scripts/agents | `ez switch <name> --no-cd-required` |
 | Move up/down in stack | `ez up` / `ez down` / `ez top` / `ez bottom` |
+
+`ez switch` can hand off to a linked worktree only when invoked through installed
+shell integration (`EZ_SHELL_INTEGRATION=1`). A direct binary invocation that
+would require that path handoff exits 5 before mutation and prints a manual
+`cd`/setup hint. Automation that intentionally consumes the path must pass
+`--no-cd-required`, read stdout, and re-anchor subsequent paths to that root.
 
 ## PR Management
 

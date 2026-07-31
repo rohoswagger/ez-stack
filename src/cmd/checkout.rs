@@ -99,7 +99,38 @@ pub(crate) fn switch_to(
     Ok(())
 }
 
-pub fn run(name: Option<&str>) -> Result<()> {
+fn shell_integration_active() -> bool {
+    std::env::var("EZ_SHELL_INTEGRATION").as_deref() == Ok("1")
+}
+
+fn ensure_cd_handoff_allowed(
+    state: &StackState,
+    target: &str,
+    wt_map: &HashMap<String, String>,
+    no_cd_required: bool,
+) -> Result<()> {
+    if no_cd_required || shell_integration_active() {
+        return Ok(());
+    }
+
+    if let Some(wt_path) = wt_map.get(target) {
+        return Err(EzError::UserMessage(format!(
+            "could not switch to `{target}` because it lives in another worktree\n  → Run `cd {wt_path}`\n  → Run `ez setup` to enable shell integration, or rerun with `--no-cd-required` if your script will handle the printed path"
+        ))
+        .into());
+    }
+
+    if state.is_managed(target) {
+        return Err(EzError::UserMessage(format!(
+            "could not switch to `{target}` because it requires creating a worktree, but shell integration is not active\n  → No worktree was created\n  → Run `ez setup` to enable shell integration, or rerun `ez switch {target} --no-cd-required` if your script will handle the printed path"
+        ))
+        .into());
+    }
+
+    Ok(())
+}
+
+pub fn run(name: Option<&str>, no_cd_required: bool) -> Result<()> {
     let state = StackState::load()?;
     let current = git::current_branch()?;
     let wt_map = worktree_map();
@@ -129,6 +160,7 @@ pub fn run(name: Option<&str>) -> Result<()> {
             return Ok(());
         }
 
+        ensure_cd_handoff_allowed(&state, &target, &wt_map, no_cd_required)?;
         switch_to(&state, &target, &wt_map)?;
         return Ok(());
     }
@@ -182,6 +214,7 @@ pub fn run(name: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
+    ensure_cd_handoff_allowed(&state, selected, &wt_map, no_cd_required)?;
     switch_to(&state, selected, &wt_map)?;
 
     Ok(())

@@ -205,7 +205,10 @@ fn offline_stack_inspection_scope_and_navigation_commands_work_end_to_end() {
         repo.path.canonicalize().expect("canonical repo path")
     );
     assert_eq!(
-        canonical_stdout_path(&run_ez(&child_path, &["switch", "feat/base"])),
+        canonical_stdout_path(&run_ez(
+            &child_path,
+            &["switch", "feat/base", "--no-cd-required"],
+        )),
         repo.path.canonicalize().expect("canonical repo path")
     );
     run_ez(&repo.path, &["scope", "clear"]);

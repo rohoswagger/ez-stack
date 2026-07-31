@@ -313,11 +313,16 @@ Optional branch must match the stack parent — useful for scripts to assert the
         after_help = "\
 Examples:
   ez switch feat/auth
-  ez switch 42"
+  ez switch 42
+  ez switch feat/auth --no-cd-required"
     )]
     Switch {
         /// Branch name or PR number to switch to directly
         name: Option<String>,
+
+        /// Print the target path without requiring shell integration to cd there
+        #[arg(long)]
+        no_cd_required: bool,
     },
 
     /// Show the visual stack tree with PR status
@@ -1183,6 +1188,23 @@ mod tests {
         match down.command {
             Commands::Down { branch } => assert_eq!(branch.as_deref(), Some("main")),
             _ => panic!("expected down"),
+        }
+    }
+
+    #[test]
+    fn parses_switch_no_cd_required_flag() {
+        let cli = Cli::try_parse_from(["ez", "switch", "feat/base", "--no-cd-required"])
+            .expect("parse switch --no-cd-required");
+
+        match cli.command {
+            Commands::Switch {
+                name,
+                no_cd_required,
+            } => {
+                assert_eq!(name.as_deref(), Some("feat/base"));
+                assert!(no_cd_required);
+            }
+            _ => panic!("expected switch command"),
         }
     }
 
