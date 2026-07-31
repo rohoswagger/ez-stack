@@ -11,6 +11,8 @@ use crate::ui;
 
 pub fn run(branch: Option<&str>, force: bool, yes: bool) -> Result<()> {
     let mut state = StackState::load()?;
+    let _lease_guard =
+        crate::worktree_lease::LeaseMutationGuard::acquire("delete worktree branch")?;
     if let Some(root) = git::current_linked_worktree_root()? {
         ui::linked_worktree_warning(&root);
     }
@@ -36,6 +38,12 @@ pub fn run(branch: Option<&str>, force: bool, yes: bool) -> Result<()> {
     });
 
     if let Some(worktree) = linked_worktree {
+        crate::cmd::worktree::guard_worktree_lock(
+            &target,
+            &worktree.path,
+            worktree.locked_reason.as_deref(),
+            "delete",
+        )?;
         return delete_with_worktree(&mut state, &target, force, yes, &worktree.path);
     }
 

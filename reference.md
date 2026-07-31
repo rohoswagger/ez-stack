@@ -85,12 +85,25 @@ Preferred workflow:
 | Run a command in every managed worktree | `ez worktree exec -- <command> [args...]` |
 | Run in selected layers, parent-first | `ez worktree exec <branch...> -- <command> [args...]` |
 | Attempt all layers and report each result | `ez worktree exec --keep-going --json -- <command> [args...]` |
+| Claim the current linked worktree for an agent | `ez worktree claim --owner <identity>` |
+| Claim a layer for a custom duration | `ez worktree claim <branch> --owner <identity> --ttl 2h` |
+| Inspect all lease and foreign-lock state | `ez worktree leases --json` |
+| Release your lease | `ez worktree release [branch] --owner <identity>` |
+| Explicitly take over an expired ez lease | `ez worktree claim <branch> --owner <identity> --break-stale` |
 | Push entire stack | `ez submit` |
 
 `restack`, `move`, `commit`, and `amend` rebase checked-out descendants in
 their owning worktrees. ez verifies branch ownership and disables inherited
 `rebase.autoStash`; dirty edits are preserved and reported instead of being
 silently stashed during a fleet mutation.
+
+Worktree claims are local/offline leases stored directly in Git's worktree lock
+reason. The default TTL is four hours; accepted suffixes are `s`, `m`, `h`, and
+`d`. Active and stale leases appear in `ez worktree leases` and under
+`worktree_lock` in `ez list --json`. Stale leases are never broken implicitly,
+and foreign Git locks are never overwritten or released by ez. Protected
+worktrees block delete, fold, merge cleanup, and sync cleanup, including forced
+cleanup.
 
 `delete` claims the exact branch/worktree pair and atomically quarantines its
 path before releasing the ownership lock. It removes the worktree and local
@@ -125,6 +138,9 @@ Every mutating command emits JSON to stderr:
 | create | `branch`, `parent`, `worktree` |
 | worktree ensure | `dry_run`, `entries`, `created_count`, `reused_count`, `would_create_count` |
 | worktree exec | `command`, `keep_going`, `attempted_count`, `succeeded_count`, `failed_count`, `skipped_count`, `stopped_early` |
+| worktree claim | `branch`, `path`, `claimed`, `lease` |
+| worktree release | `branch`, `path`, `released` |
+| worktree leases | `entries`, `active_count`, `stale_count`, `foreign_lock_count` |
 | delete | `branch`, `worktree`, `dev_port`, `killed_pids`, `reparented_children` |
 | fold | `branch`, `into`, `before_parent`, `after_parent`, `removed_worktree`, `reparented_children`, `remote_preserved` |
 | rebase conflict | `action: "conflict"`, `branch`, `parent`, `conflicting_files`, `git_stderr`, `next_command` |

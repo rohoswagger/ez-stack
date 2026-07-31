@@ -687,6 +687,67 @@ Examples:
     /// List all worktrees with their name, branch, and path
     List,
 
+    /// Claim a linked worktree for one agent without changing stack or branch state
+    #[command(after_help = "\
+Examples:
+  ez worktree claim --owner codex-1
+  ez worktree claim feat/auth --owner codex-1 --ttl 2h
+  ez worktree claim feat/auth --owner codex-1 --break-stale --json")]
+    Claim {
+        /// Managed branch to claim (defaults to the current branch)
+        branch: Option<String>,
+
+        /// Stable agent or developer identity recorded in the Git worktree lock
+        #[arg(long)]
+        owner: String,
+
+        /// Lease duration: a positive integer followed by s, m, h, or d
+        #[arg(long, default_value = "4h")]
+        ttl: String,
+
+        /// Replace an expired ez lease; never replaces an active or foreign lock
+        #[arg(long)]
+        break_stale: bool,
+
+        /// Print the claim as JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Release an ez lease while preserving foreign Git worktree locks
+    #[command(after_help = "\
+Examples:
+  ez worktree release --owner codex-1
+  ez worktree release feat/auth --owner codex-1
+  ez worktree release feat/auth --force")]
+    Release {
+        /// Managed branch to release (defaults to the current branch)
+        branch: Option<String>,
+
+        /// Owner expected to hold the lease
+        #[arg(long)]
+        owner: Option<String>,
+
+        /// Release an ez lease held by another owner; never releases a foreign lock
+        #[arg(long)]
+        force: bool,
+
+        /// Print the release result as JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show lease and foreign-lock state for every linked stack worktree
+    #[command(after_help = "\
+Examples:
+  ez worktree leases
+  ez worktree leases --json")]
+    Leases {
+        /// Print a deterministic JSON report to stdout
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Ensure every managed branch has a worktree without moving existing checkouts
     #[command(after_help = "\
 Examples:
@@ -1170,5 +1231,77 @@ mod tests {
             },
             _ => panic!("expected worktree command"),
         }
+    }
+
+    #[test]
+    fn parses_worktree_claim_release_and_leases() {
+        let claim = Cli::try_parse_from([
+            "ez",
+            "worktree",
+            "claim",
+            "feat/auth",
+            "--owner",
+            "agent-a",
+            "--ttl",
+            "2h",
+            "--break-stale",
+            "--json",
+        ])
+        .expect("parse worktree claim");
+        match claim.command {
+            Commands::Worktree(WorktreeArgs {
+                command:
+                    WorktreeCommands::Claim {
+                        branch,
+                        owner,
+                        ttl,
+                        break_stale,
+                        json,
+                    },
+            }) => {
+                assert_eq!(branch.as_deref(), Some("feat/auth"));
+                assert_eq!(owner, "agent-a");
+                assert_eq!(ttl, "2h");
+                assert!(break_stale);
+                assert!(json);
+            }
+            _ => panic!("expected worktree claim command"),
+        }
+
+        let release = Cli::try_parse_from([
+            "ez",
+            "worktree",
+            "release",
+            "feat/auth",
+            "--force",
+            "--json",
+        ])
+        .expect("parse worktree release");
+        match release.command {
+            Commands::Worktree(WorktreeArgs {
+                command:
+                    WorktreeCommands::Release {
+                        branch,
+                        owner,
+                        force,
+                        json,
+                    },
+            }) => {
+                assert_eq!(branch.as_deref(), Some("feat/auth"));
+                assert_eq!(owner, None);
+                assert!(force);
+                assert!(json);
+            }
+            _ => panic!("expected worktree release command"),
+        }
+
+        let leases =
+            Cli::try_parse_from(["ez", "worktree", "leases", "--json"]).expect("parse leases");
+        assert!(matches!(
+            leases.command,
+            Commands::Worktree(WorktreeArgs {
+                command: WorktreeCommands::Leases { json: true }
+            })
+        ));
     }
 }

@@ -7,6 +7,7 @@ use crate::git;
 use crate::github;
 use crate::stack::StackState;
 use crate::ui;
+use crate::worktree_lease::{Lease, now_unix};
 
 fn format_age(secs: Option<u64>) -> String {
     match secs {
@@ -87,6 +88,7 @@ struct BranchData {
     pr_number: Option<u64>,
     parent: Option<String>,
     wt_path: Option<String>,
+    wt_lock_reason: Option<String>,
     ci: String,
     age: Option<u64>,
     wt_status: (usize, usize, usize),
@@ -96,10 +98,9 @@ pub fn run(json: bool) -> Result<()> {
     let state = StackState::load()?;
     let current = git::current_branch()?;
 
-    let worktree_map: HashMap<String, String> = git::worktree_list()
-        .unwrap_or_default()
+    let worktree_map: HashMap<String, git::WorktreeInfo> = git::worktree_list()?
         .into_iter()
-        .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
+        .filter_map(|worktree| worktree.branch.clone().map(|branch| (branch, worktree)))
         .collect();
 
     let local_branches = git::branch_list()?;
@@ -107,16 +108,25 @@ pub fn run(json: bool) -> Result<()> {
 
     // Collect what we need per branch, then fetch everything in parallel.
     #[allow(clippy::type_complexity)]
-    let branch_specs: Vec<(String, bool, Option<u64>, Option<String>, Option<String>)> = order
+    let branch_specs: Vec<(
+        String,
+        bool,
+        Option<u64>,
+        Option<String>,
+        Option<(String, Option<String>)>,
+    )> = order
         .iter()
         .map(|b| {
             let meta = state.get_branch(b).ok();
+            let worktree = worktree_map
+                .get(b.as_str())
+                .map(|worktree| (worktree.path.clone(), worktree.locked_reason.clone()));
             (
                 b.clone(),
                 meta.is_some(),
                 meta.and_then(|m| m.pr_number),
                 meta.map(|m| m.parent.clone()),
-                worktree_map.get(b.as_str()).cloned(),
+                worktree,
             )
         })
         .collect();
@@ -145,9 +155,9 @@ pub fn run(json: bool) -> Result<()> {
     // Parallel git calls: age + working tree status per branch.
     let git_handles: Vec<_> = branch_specs
         .iter()
-        .map(|(name, _is_managed, _pr_num, _parent, wt_path)| {
+        .map(|(name, _is_managed, _pr_num, _parent, worktree)| {
             let name = name.clone();
-            let wt = wt_path.clone();
+            let wt = worktree.as_ref().map(|(path, _)| path.clone());
             thread::spawn(move || {
                 let age = git::log_oneline_time(&name);
                 let wt_status = wt
@@ -186,14 +196,18 @@ pub fn run(json: bool) -> Result<()> {
         .into_iter()
         .zip(results)
         .map(
-            |((name, is_managed, stored_pr_number, parent, wt_path), (ci, age, wt_status))| {
+            |((name, is_managed, stored_pr_number, parent, worktree), (ci, age, wt_status))| {
                 let pr_number = pr_map.get(&name).map(|pr| pr.number).or(stored_pr_number);
+                let (wt_path, wt_lock_reason) = worktree
+                    .map(|(path, reason)| (Some(path), reason))
+                    .unwrap_or((None, None));
                 BranchData {
                     name,
                     is_managed,
                     pr_number,
                     parent,
                     wt_path,
+                    wt_lock_reason,
                     ci,
                     age,
                     wt_status,
@@ -225,7 +239,11 @@ pub fn run(json: bool) -> Result<()> {
         } else {
             "-".into()
         };
-        let status = branch_status_label(b.is_managed, has_wt, b.wt_status);
+        let mut status = branch_status_label(b.is_managed, has_wt, b.wt_status);
+        if let Some(reason) = b.wt_lock_reason.as_deref() {
+            status.push_str("; ");
+            status.push_str(&worktree_lock_label(&b.name, reason));
+        }
 
         eprintln!("{}", row(m, &b.name, &pr, ci, &age, &port, &status));
     }
@@ -283,10 +301,43 @@ fn json_entries(
             "dev_port": if has_wt { Some(dev::dev_port(&b.name)) } else { None },
             "worktree_path": b.wt_path,
             "working_tree": wt_status,
+            "worktree_lock": b.wt_lock_reason.as_deref().map(|reason| {
+                worktree_lock_json(&b.name, reason)
+            }),
         }));
     }
 
     entries
+}
+
+fn worktree_lock_label(branch: &str, reason: &str) -> String {
+    match Lease::parse_reason(reason).filter(|lease| lease.branch == branch) {
+        Some(lease) if lease.is_stale().unwrap_or(false) => {
+            format!("stale lease: {}", lease.owner)
+        }
+        Some(lease) => format!("claimed: {}", lease.owner),
+        None if reason.is_empty() => "locked".to_string(),
+        None => format!("locked: {reason}"),
+    }
+}
+
+fn worktree_lock_json(branch: &str, reason: &str) -> serde_json::Value {
+    if let Some(lease) = Lease::parse_reason(reason).filter(|lease| lease.branch == branch) {
+        let view = lease.view(now_unix().unwrap_or(0));
+        serde_json::json!({
+            "kind": "lease",
+            "owner": view.owner,
+            "branch": view.branch,
+            "created_at": view.created_at,
+            "expires_at": view.expires_at,
+            "stale": view.stale,
+        })
+    } else {
+        serde_json::json!({
+            "kind": "foreign",
+            "reason": if reason.is_empty() { "<no reason>" } else { reason },
+        })
+    }
 }
 
 #[cfg(test)]
@@ -348,6 +399,7 @@ mod tests {
                 pr_number: None,
                 parent: None,
                 wt_path: None,
+                wt_lock_reason: None,
                 ci: String::new(),
                 age: None,
                 wt_status: (0, 0, 0),
@@ -362,5 +414,6 @@ mod tests {
         assert!(entries[1]["dev_port"].is_null());
         assert!(entries[1]["worktree_path"].is_null());
         assert!(entries[1]["working_tree"].is_null());
+        assert!(entries[1]["worktree_lock"].is_null());
     }
 }

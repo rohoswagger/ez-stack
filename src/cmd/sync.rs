@@ -61,6 +61,13 @@ fn inside_worktree_path(current_dir: &str, worktree_path: &str) -> bool {
 
 pub fn run(dry_run: bool, autostash: bool, force: bool) -> Result<()> {
     let state = StackState::load()?;
+    let _lease_guard = if dry_run {
+        None
+    } else {
+        Some(crate::worktree_lease::LeaseMutationGuard::acquire(
+            "sync worktree stack",
+        )?)
+    };
     if let Some(root) = git::current_linked_worktree_root()? {
         ui::linked_worktree_warning(&root);
     }
@@ -265,6 +272,23 @@ fn run_sync_inner(force: bool) -> Result<()> {
         // If cleanup fails, keep the branch tracked so `ez sync --force` or `ez delete`
         // can recover it later.
         if let Some(wt_path) = worktree_map.get(branch_name.as_str()) {
+            if let Err(error) =
+                crate::cmd::worktree::guard_registered_worktree(branch_name, wt_path, "clean up")
+            {
+                ui::warn(&error.to_string());
+                ui::info(&format!(
+                    "Kept `{branch_name}` tracked because its worktree is protected"
+                ));
+                ui::receipt(&serde_json::json!({
+                    "cmd": "sync",
+                    "branch": branch_name,
+                    "action": "cleanup_skipped",
+                    "reason": "worktree_locked",
+                    "parent": parent,
+                    "worktree": wt_path,
+                }));
+                continue;
+            }
             let is_current_worktree = inside_worktree_path(&current_dir, wt_path)
                 || inside_worktree_path(&original_root, wt_path);
             if is_current_worktree && let Err(e) = std::env::set_current_dir(&main_root) {

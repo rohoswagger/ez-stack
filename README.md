@@ -297,6 +297,30 @@ duration, and status per branch without polluting stdout, including explicit
 Commands are not interpreted by a shell. Pass `sh -lc '<command>'` explicitly
 when pipelines, redirects, globs, or other shell syntax are required.
 
+### Claim worktrees for concurrent agents
+
+```bash
+ez worktree claim --owner codex-1              # current linked worktree, 4h
+ez worktree claim feat/api --owner codex-2 --ttl 90m
+ez worktree leases --json                      # fleet-wide ownership dashboard
+ez worktree release feat/api --owner codex-2
+```
+
+Claims turn the workspace fleet into a coordination layer. Each lease is stored
+in Git's native worktree lock reason, so Git, ez, shell scripts, and other
+agents all observe one source of truth—there is no sidecar ownership database
+to drift. `ez list --json` exposes the owner, creation time, expiry, and stale
+status under `worktree_lock`; `ez worktree leases` shows both ez leases and
+foreign Git locks.
+
+Active leases block deletion, fold, merge cleanup, and sync cleanup even when
+those commands use `--force`. An expired lease is reported as stale but is
+never broken by a read or unrelated mutation. Take it over explicitly with
+`ez worktree claim <branch> --owner <new-owner> --break-stale`, or release an ez
+lease with `ez worktree release <branch> --force`. Ez never overwrites or
+releases a foreign Git lock. Claim and release are local/offline and do not
+change stack metadata, branch tips, remotes, or GitHub state.
+
 ### Tear down a worktree safely
 
 `ez delete <branch> --yes` claims the exact branch/worktree pair, atomically
@@ -305,8 +329,9 @@ and local branch, then stops only deterministic-port listeners whose working
 directory belonged to that worktree and whose process start identity still
 matches. This prevents a replacement at the original path or a reused PID from
 being destroyed. If removal fails, ez restores the original worktree path; if
-local branch deletion fails, ez recreates the worktree. Dirty, locked, stale, or
-otherwise invalid worktrees leave processes, files, refs, and metadata intact.
+local branch deletion fails, ez recreates the worktree. Dirty, leased, locked,
+stale, or otherwise invalid worktrees leave processes, files, refs, and
+metadata intact.
 
 ### Fold a local stack layer down
 

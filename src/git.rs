@@ -1,11 +1,14 @@
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use crate::error::EzError;
+
+static NEXT_WORKTREE_LOCK_CAS_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebaseConflict {
@@ -902,8 +905,13 @@ fn parse_worktree_list(output: &str) -> Vec<WorktreeInfo> {
     let mut current_path: Option<String> = None;
     let mut current_branch: Option<String> = None;
     let mut current_locked_reason: Option<String> = None;
+    let fields: Vec<&str> = if output.contains('\0') {
+        output.split('\0').collect()
+    } else {
+        output.lines().collect()
+    };
 
-    for line in output.lines() {
+    for line in fields {
         if line.is_empty() {
             if let Some(path) = current_path.take() {
                 worktrees.push(WorktreeInfo {
@@ -942,7 +950,7 @@ fn parse_worktree_list(output: &str) -> Vec<WorktreeInfo> {
 
 /// Returns all git worktrees for this repository.
 pub fn worktree_list() -> Result<Vec<WorktreeInfo>> {
-    let output = run_git(&["worktree", "list", "--porcelain"])?;
+    let output = run_git(&["worktree", "list", "--porcelain", "-z"])?;
     Ok(parse_worktree_list(&output))
 }
 
@@ -968,6 +976,164 @@ pub fn worktree_checkout(path: &str, branch: &str) -> Result<()> {
 pub fn worktree_unlock(path: &str) -> Result<()> {
     run_git(&["worktree", "unlock", path])?;
     Ok(())
+}
+
+/// Remove a worktree lock only when the lock file still contains `expected_reason`.
+///
+/// Git's `worktree unlock` is unconditional. Lease release and takeover instead
+/// quarantine the administrative lock file atomically, validate the exact file
+/// that was moved, and discard only that validated file. A raw Git process that
+/// replaces the lock before this operation is therefore preserved.
+pub fn worktree_unlock_if_reason(path: &str, expected_reason: &str) -> Result<()> {
+    let resolved = PathBuf::from(run_git(&["-C", path, "rev-parse", "--git-path", "locked"])?);
+    let lock_path = if resolved.is_absolute() {
+        resolved
+    } else {
+        Path::new(path).join(resolved)
+    };
+    let quarantine = quarantine_worktree_lock(&lock_path).with_context(|| {
+        format!(
+            "worktree lock changed at `{path}` before it could be released (expected `{expected_reason}`)"
+        )
+    })?;
+
+    let contents = match std::fs::read_to_string(&quarantine) {
+        Ok(contents) => contents,
+        Err(error) => {
+            restore_quarantined_worktree_lock(&lock_path, &quarantine)?;
+            return Err(error).context("read quarantined worktree lock");
+        }
+    };
+    let actual_reason = contents.trim_end_matches(['\r', '\n']);
+    if actual_reason != expected_reason {
+        let preservation = match restore_quarantined_worktree_lock(&lock_path, &quarantine) {
+            Ok(()) => "the replacement lock was restored".to_string(),
+            Err(error) => format!(
+                "a newer lock also exists; the replaced lock remains preserved at `{}` ({error})",
+                quarantine.display()
+            ),
+        };
+        bail!(
+            "worktree lock changed at `{path}`: expected `{expected_reason}`, found `{actual_reason}`; {preservation}"
+        );
+    }
+
+    std::fs::remove_file(&quarantine).with_context(|| {
+        format!(
+            "remove conditionally released worktree lock `{}`",
+            quarantine.display()
+        )
+    })
+}
+
+fn quarantine_worktree_lock(lock_path: &Path) -> Result<PathBuf> {
+    for _ in 0..100 {
+        let quarantine = lock_path.with_file_name(format!(
+            "locked.ez-cas-{}-{}",
+            std::process::id(),
+            NEXT_WORKTREE_LOCK_CAS_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        match rename_no_replace(lock_path, &quarantine) {
+            Ok(()) => return Ok(quarantine),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    bail!(
+        "could not reserve a unique quarantine beside `{}`",
+        lock_path.display()
+    )
+}
+
+fn restore_quarantined_worktree_lock(lock_path: &Path, quarantine: &Path) -> Result<()> {
+    rename_no_replace(quarantine, lock_path).with_context(|| {
+        format!(
+            "restore quarantined worktree lock from `{}` to `{}`",
+            quarantine.display(),
+            lock_path.display()
+        )
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn c_path(path: &Path) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+
+    std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("path contains a NUL byte: `{}`", path.display()),
+        )
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    unsafe extern "C" {
+        fn renamex_np(
+            from: *const std::ffi::c_char,
+            to: *const std::ffi::c_char,
+            flags: std::ffi::c_uint,
+        ) -> std::ffi::c_int;
+    }
+
+    const RENAME_EXCL: std::ffi::c_uint = 0x0000_0004;
+    let from = c_path(from)?;
+    let to = c_path(to)?;
+    let result = unsafe { renamex_np(from.as_ptr(), to.as_ptr(), RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    unsafe extern "C" {
+        fn syscall(number: std::ffi::c_long, ...) -> std::ffi::c_long;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    const SYS_RENAMEAT2: std::ffi::c_long = 316;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_RENAMEAT2: std::ffi::c_long = 276;
+    const AT_FDCWD: std::ffi::c_int = -100;
+    const RENAME_NOREPLACE: std::ffi::c_uint = 1;
+    let from = c_path(from)?;
+    let to = c_path(to)?;
+    let result = unsafe {
+        syscall(
+            SYS_RENAMEAT2,
+            AT_FDCWD,
+            from.as_ptr(),
+            AT_FDCWD,
+            to.as_ptr(),
+            RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
+fn rename_no_replace(_from: &Path, _to: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "conditional worktree unlock requires macOS or Linux on x86_64/aarch64",
+    ))
 }
 
 pub fn worktree_lock(path: &str, reason: &str) -> Result<()> {
@@ -1202,6 +1368,22 @@ mod tests {
         let result = parse_worktree_list(input);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn test_parse_worktree_list_nul_preserves_json_lock_reason() {
+        let reason = r#"ez-lease:{"version":1,"owner":"agent a","branch":"feat/x","created_at":1,"expires_at":2}"#;
+        let input = format!(
+            "worktree /repo/main\0HEAD abc123\0branch refs/heads/main\0\0\
+             worktree /repo/feature path\0HEAD def456\0branch refs/heads/feat/x\0locked {reason}\0\0"
+        );
+
+        let result = parse_worktree_list(&input);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[1].path, "/repo/feature path");
+        assert_eq!(result[1].branch.as_deref(), Some("feat/x"));
+        assert_eq!(result[1].locked_reason.as_deref(), Some(reason));
     }
 
     #[test]
@@ -1584,6 +1766,88 @@ exit 0
 
         worktree_remove_force(&wt_path).expect("remove worktree");
         worktree_prune().expect("prune");
+    }
+
+    #[test]
+    fn conditional_worktree_unlock_removes_only_the_expected_real_git_lock() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-worktree-conditional-unlock");
+        let _cwd = CwdGuard::enter(&repo);
+        create_branch_at("feat/lease", "main").expect("create branch");
+        let wt_path = worktree_path("feat/lease").expect("worktree path");
+        worktree_add(&wt_path, "feat/lease").expect("worktree add");
+        worktree_lock(&wt_path, "ez-lease:expected").expect("lock worktree");
+
+        worktree_unlock_if_reason(&wt_path, "ez-lease:expected")
+            .expect("unlock exact expected reason");
+
+        let worktree = worktree_list()
+            .expect("list worktrees")
+            .into_iter()
+            .find(|worktree| worktree.path == wt_path)
+            .expect("linked worktree");
+        assert_eq!(worktree.locked_reason, None);
+    }
+
+    #[test]
+    fn conditional_worktree_unlock_preserves_a_raw_git_replacement_lock() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-worktree-conditional-race");
+        let _cwd = CwdGuard::enter(&repo);
+        create_branch_at("feat/lease", "main").expect("create branch");
+        let wt_path = worktree_path("feat/lease").expect("worktree path");
+        worktree_add(&wt_path, "feat/lease").expect("worktree add");
+        worktree_lock(&wt_path, "ez-lease:observed").expect("lock observed lease");
+
+        run_cmd(&repo, "git", &["worktree", "unlock", &wt_path]);
+        run_cmd(
+            &repo,
+            "git",
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "raw-git replacement",
+                &wt_path,
+            ],
+        );
+
+        let error = worktree_unlock_if_reason(&wt_path, "ez-lease:observed")
+            .expect_err("replacement lock must survive");
+        assert!(
+            error.to_string().contains("raw-git replacement"),
+            "unexpected error: {error:#}"
+        );
+        let worktree = worktree_list()
+            .expect("list worktrees")
+            .into_iter()
+            .find(|worktree| worktree.path == wt_path)
+            .expect("linked worktree");
+        assert_eq!(
+            worktree.locked_reason.as_deref(),
+            Some("raw-git replacement")
+        );
+    }
+
+    #[test]
+    fn quarantined_lock_restore_never_clobbers_a_newer_lock() {
+        let dir = temp_dir("git-worktree-lock-restore-no-clobber");
+        let lock_path = dir.join("locked");
+        let quarantine = dir.join("locked.ez-cas");
+        std::fs::write(&lock_path, "newer foreign lock\n").expect("write newer lock");
+        std::fs::write(&quarantine, "quarantined foreign lock\n").expect("write quarantined lock");
+
+        restore_quarantined_worktree_lock(&lock_path, &quarantine)
+            .expect_err("restore must not replace a newer lock");
+
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).expect("newer lock remains"),
+            "newer foreign lock\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&quarantine).expect("quarantine remains"),
+            "quarantined foreign lock\n"
+        );
     }
 
     #[test]

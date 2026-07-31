@@ -47,6 +47,7 @@ fn preflight_clean_linked_worktrees(
         let Some(path) = worktree_map.get(&target.branch) else {
             continue;
         };
+        crate::cmd::worktree::guard_registered_worktree(&target.branch, path, "merge")?;
         let (staged, modified, untracked) = git::working_tree_status_at(path);
         if staged > 0 || modified > 0 || untracked > 0 {
             bail!(EzError::UserMessage(format!(
@@ -442,6 +443,7 @@ fn merge_branch(
 }
 
 pub fn run(method: &str, yes: bool, stack: bool) -> Result<()> {
+    let _lease_guard = crate::worktree_lease::LeaseMutationGuard::acquire("merge worktree stack")?;
     let mut state = StackState::load()?;
     if let Some(root) = git::current_linked_worktree_root()? {
         ui::linked_worktree_warning(&root);
