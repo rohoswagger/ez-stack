@@ -174,6 +174,13 @@ child exit code. Child commands receive `EZ_BRANCH`, `EZ_WORKTREE`, `EZ_PORT`,
 `EZ_STACK_INDEX`, and `EZ_STACK_SIZE`. The argv is executed directly; use
 `sh -lc` explicitly for shell syntax.
 
+Stack mutations are worktree-native. `ez restack`, `ez move`, `ez commit`, and
+`ez amend` operate on checked-out descendants inside their owning worktrees.
+Do not detach those worktrees or update their branch refs manually. ez verifies
+branch ownership around each rebase and disables inherited `rebase.autoStash`
+for its own mutations so dirty agent edits cannot become a hidden autostash
+conflict. Commit or stash the affected worktree, then retry the ez command.
+
 ### Finish
 ```bash
 cd $(ez delete my-task --yes)   # removes worktree + branch, stops the branch dev server, cd's to repo root

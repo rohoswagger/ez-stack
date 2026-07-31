@@ -35,6 +35,27 @@ That's it. No `git add`, no `git commit`, no `gh pr create`, no `cd`.
 
 **For humans:** Stacked PRs become effortless. Auto-restacking, auto-cleanup of merged branches, and a dashboard that shows everything at a glance.
 
+## The Worktree Moat
+
+Most stacked-PR tools treat worktrees as an edge case. ez treats the stack as a
+persistent workspace fleet:
+
+- Every PR layer can keep its own checked-out worktree, dependencies, editor,
+  agent, and deterministic dev port.
+- `ez worktree ensure` materializes the fleet, while `ez worktree exec` runs
+  setup, tests, or builds across it in parent-first order.
+- History mutations are worktree-native. `ez restack`, `ez move`, `ez commit`,
+  and `ez amend` rebase descendants inside the worktrees that own them instead
+  of detaching them or moving refs behind their indexes.
+- Fleet mutations verify that each worktree still owns the expected branch.
+  Dirty edits are never silently autostashed, even when the user's Git config
+  enables `rebase.autoStash`; the affected layer stays attached and retryable.
+- Conflicts are isolated to their owning layer and cleaned up without blocking
+  independent siblings from converging.
+
+That makes a stack more than a list of PRs: it is a set of durable, independently
+usable development environments that ez can operate as one unit.
+
 ## Dashboard
 
 ```bash

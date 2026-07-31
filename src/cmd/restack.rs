@@ -128,7 +128,18 @@ fn resolve_parent(
 /// commits that are not the branch's own or conflicts for no reason at all. git's merge-base is
 /// the real authority, so fall back to it whenever the recorded SHA is no longer part of the
 /// branch. Returns the base and whether it had to be derived.
-fn effective_old_base(branch: &str, parent: &str, stored_parent_head: &str) -> (String, bool) {
+pub(crate) fn effective_old_base(
+    branch: &str,
+    parent: &str,
+    stored_parent_head: &str,
+) -> (String, bool) {
+    if let Ok(parent_tip) = git::rev_parse(parent) {
+        let parent_tip = parent_tip.trim();
+        if parent_tip != stored_parent_head && git::is_ancestor(parent_tip, branch) {
+            return (parent_tip.to_string(), true);
+        }
+    }
+
     if !stored_parent_head.is_empty() && git::is_ancestor(stored_parent_head, branch) {
         return (stored_parent_head.to_string(), false);
     }
@@ -264,7 +275,6 @@ pub fn restack_branches(
                 ui::warn(&format!(
                     "Could not restack `{branch_name}` onto `{parent}`: {detail}"
                 ));
-                recover_after_failure(branch_name, current_root);
                 ui::hint(&format!(
                     "Fix `{branch_name}` (commit or stash its changes), then run `ez restack`"
                 ));

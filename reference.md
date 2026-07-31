@@ -87,6 +87,11 @@ Preferred workflow:
 | Attempt all layers and report each result | `ez worktree exec --keep-going --json -- <command> [args...]` |
 | Push entire stack | `ez submit` |
 
+`restack`, `move`, `commit`, and `amend` rebase checked-out descendants in
+their owning worktrees. ez verifies branch ownership and disables inherited
+`rebase.autoStash`; dirty edits are preserved and reported instead of being
+silently stashed during a fleet mutation.
+
 ## Setup and Maintenance
 
 | Intent | Command |
