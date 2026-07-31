@@ -512,6 +512,21 @@ fn parse_merge_async_status(value: &serde_json::Value) -> Result<MergeAsyncStatu
 }
 
 pub fn ensure_native_stack(pr_numbers: &[u64]) -> Result<NativeStackOutcome> {
+    reconcile_native_stack(pr_numbers, "ez submit", true)
+}
+
+pub fn reconcile_native_stack_exact(
+    pr_numbers: &[u64],
+    retry_command: &str,
+) -> Result<NativeStackOutcome> {
+    reconcile_native_stack(pr_numbers, retry_command, false)
+}
+
+fn reconcile_native_stack(
+    pr_numbers: &[u64],
+    retry_command: &str,
+    allow_existing_superset: bool,
+) -> Result<NativeStackOutcome> {
     if pr_numbers.len() < 2 {
         return Ok(NativeStackOutcome::NotNeeded);
     }
@@ -570,12 +585,12 @@ pub fn ensure_native_stack(pr_numbers: &[u64]) -> Result<NativeStackOutcome> {
             added: delta.len(),
         });
     }
-    if is_prefix(pr_numbers, &existing_prs) {
+    if allow_existing_superset && is_prefix(pr_numbers, &existing_prs) {
         return Ok(NativeStackOutcome::Unchanged { number });
     }
 
     bail!(EzError::GhError(format!(
-        "native stack #{number} diverges from desired PR chain; existing pull_requests={existing_prs:?}, desired pull_requests={pr_numbers:?}. Resolve the GitHub stack manually, then retry `ez submit`."
+        "native stack #{number} diverges from desired PR chain; existing pull_requests={existing_prs:?}, desired pull_requests={pr_numbers:?}. Resolve the GitHub stack manually, then retry `{retry_command}`."
     )));
 }
 

@@ -15,6 +15,7 @@ pub mod log;
 pub mod merge;
 pub mod move_branch;
 pub mod mutation_guard;
+pub mod native_stack;
 pub mod navigate;
 pub mod parent;
 pub mod pr_edit;
