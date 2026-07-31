@@ -33,23 +33,24 @@ Examples:
         yes: bool,
     },
 
-    /// Adopt branches from GitHub PRs into the local stack
+    /// Adopt GitHub PR stacks or explicit local/remote branches into the local stack
     #[command(after_help = "\
 Examples:
   ez adopt
   ez adopt --pr 42
   ez adopt --pr 42 --no-worktrees
-  ez adopt feat/auth feat/db")]
+  ez adopt feat/base
+  ez adopt feat/base feat/child")]
     Adopt {
         /// Adopt the chain for a specific PR number
-        #[arg(long)]
+        #[arg(long, conflicts_with = "branches")]
         pr: Option<u64>,
 
         /// Track branches without creating local worktrees
         #[arg(long)]
         no_worktrees: bool,
 
-        /// Specific branch names to adopt
+        /// Explicit branch chain to adopt, bottom-to-top; local and remote-only branches are supported
         branches: Vec<String>,
     },
 
@@ -846,6 +847,15 @@ mod tests {
             }
             _ => panic!("expected adopt command"),
         }
+    }
+
+    #[test]
+    fn adopt_pr_conflicts_with_positional_branches() {
+        let result = Cli::try_parse_from(["ez", "adopt", "--pr", "42", "feat/x"]);
+        assert!(
+            result.is_err(),
+            "--pr and positional branches should conflict"
+        );
     }
 
     #[test]

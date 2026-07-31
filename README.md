@@ -121,6 +121,7 @@ Use `--hook <name>` for project-specific hooks, or `--hook` alone to list availa
 |---------|-------------|
 | `ez create <name>` | Create worktree + branch (default). `--from main` for independent work. `--no-worktree` for branch only. |
 | `ez adopt --pr <number>` | Materialize a PR chain or native GitHub stack locally, with one worktree per active layer. `--no-worktrees` for metadata only. |
+| `ez adopt <branch>...` | Adopt an explicit bottom-to-top branch chain without requiring PRs or GitHub auth. Remote-only branches are fetched and materialized into worktrees by default. |
 | `ez list` | Dashboard for all local branches: PRs, CI, age, ports, and working tree state. `--json` for machine output. |
 | `ez delete [name]` | Delete branch + worktree. Auto-detects worktrees and best-effort stops listeners on the branch dev port. `--yes` for agents. |
 | `ez push` | Push + create/update PR. `-am "msg"` to stage+commit+push in one step. `--no-pr` skips PR updates, `--pr` overrides `no_pr` config. |
@@ -206,12 +207,19 @@ GitHub actually merges it.
 ```bash
 ez adopt --pr 42                 # native stack when available; PR base chain otherwise
 ez adopt --pr 42 --no-worktrees  # reconstruct stack metadata without provisioning worktrees
+ez adopt feat/base               # adopt a local or remote branch without requiring a PR
+ez adopt feat/base feat/child    # adopt an explicit bottom-to-top branch chain
+ez adopt feat/base --no-worktrees # reconstruct metadata only
 ```
 
-Native stack order from GitHub is authoritative when it is available. Ez fetches
-each active PR branch, reconstructs the local parent graph, and provisions an
-isolated worktree for every layer. If existing local metadata disagrees with the
-native stack, adoption stops before changing branches or worktrees.
+Native stack order from GitHub is authoritative when it is available. For
+PR-less explicit branch adoption, the positional order is authoritative
+bottom-to-top. Ez fetches each active PR or requested branch, reconstructs the
+local parent graph, and provisions an isolated worktree for every layer by
+default. Remote-only branches are materialized locally. If an existing local
+branch is behind or diverged from its remote, adoption stops before changing
+branches or worktrees. Explicit branch-only adoption does not need GitHub CLI
+auth because it works from git refs instead of PR metadata.
 
 ### Setup
 
