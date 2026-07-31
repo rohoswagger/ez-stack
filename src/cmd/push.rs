@@ -119,14 +119,7 @@ pub fn run(
     // Resolve PR creation: --pr > --no-pr > config > false
     let skip_pr = resolve_no_pr(force_pr, no_pr, state.no_pr);
 
-    // Resolve draft: --draft/--no-draft flags > config > false
-    let effective_draft = if no_draft {
-        false
-    } else if draft {
-        true
-    } else {
-        state.draft.unwrap_or(false)
-    };
+    let effective_draft = resolve_draft(draft, no_draft, state.draft);
 
     let resolved_body: Option<String> = match body_file {
         Some(path) => Some(github::body_from_file(path)?),
@@ -205,6 +198,16 @@ fn resolve_no_pr(force_pr: bool, no_pr: bool, config_no_pr: Option<bool>) -> boo
         false
     } else {
         no_pr || config_no_pr.unwrap_or(false)
+    }
+}
+
+pub(crate) fn resolve_draft(draft: bool, no_draft: bool, config_draft: Option<bool>) -> bool {
+    if no_draft {
+        false
+    } else if draft {
+        true
+    } else {
+        config_draft.unwrap_or(false)
     }
 }
 
@@ -357,69 +360,25 @@ mod tests {
 
     #[test]
     fn draft_resolution_no_draft_flag_wins() {
-        // --no-draft should override both --draft and config
-        let no_draft = true;
-        let draft = true;
-        let config_draft = Some(true);
-
-        let effective = if no_draft {
-            false
-        } else if draft {
-            true
-        } else {
-            config_draft.unwrap_or(false)
-        };
+        let effective = resolve_draft(true, true, Some(true));
         assert!(!effective, "--no-draft should override everything");
     }
 
     #[test]
     fn draft_resolution_flag_overrides_config() {
-        // --draft flag should override config=false
-        let no_draft = false;
-        let draft = true;
-        let config_draft = Some(false);
-
-        let effective = if no_draft {
-            false
-        } else if draft {
-            true
-        } else {
-            config_draft.unwrap_or(false)
-        };
+        let effective = resolve_draft(true, false, Some(false));
         assert!(effective, "--draft flag should override config");
     }
 
     #[test]
     fn draft_resolution_config_used_when_no_flags() {
-        // No flags, config=true should win
-        let no_draft = false;
-        let draft = false;
-        let config_draft = Some(true);
-
-        let effective = if no_draft {
-            false
-        } else if draft {
-            true
-        } else {
-            config_draft.unwrap_or(false)
-        };
+        let effective = resolve_draft(false, false, Some(true));
         assert!(effective, "config should be used when no flags");
     }
 
     #[test]
     fn draft_resolution_defaults_to_false() {
-        // No flags, no config → false
-        let no_draft = false;
-        let draft = false;
-        let config_draft: Option<bool> = None;
-
-        let effective = if no_draft {
-            false
-        } else if draft {
-            true
-        } else {
-            config_draft.unwrap_or(false)
-        };
+        let effective = resolve_draft(false, false, None);
         assert!(!effective, "default should be false");
     }
 

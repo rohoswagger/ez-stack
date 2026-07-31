@@ -78,11 +78,13 @@ ez commit -m "add auth types"
 ez create feat/auth-api          # stacks on auth-types
 ez commit -m "add auth API"
 
-ez submit                        # pushes all, creates PRs with correct bases
+ez submit                        # atomically pushes all, creates PRs with correct bases
 
 # After the first PR merges:
 ez sync                          # cleans up, restacks remaining branches
 ```
+
+`ez submit` pushes every branch in one atomic `--force-with-lease` operation before creating or updating PRs. When GitHub native stacked PRs are enabled, it links 2+ PRs into a native stack; if that preview API is unavailable, the ordinary base-chained PRs still succeed.
 
 ## Scope Guard
 
@@ -182,13 +184,21 @@ Intended workflow:
 
 | Command | Description |
 |---------|-------------|
-| `ez submit` | Push entire stack + create/update all PRs |
+| `ez submit` | Atomically push entire stack, create/update all PRs, and link native GitHub stacks when available |
 | `ez pr-link` | Print PR URL to stdout |
 | `ez pr-edit --title "..." --body "..."` | Edit PR metadata |
 | `ez draft` / `ez ready` | Toggle PR draft status |
 | `ez merge` | Merge bottom PR via GitHub |
 | `ez merge --yes` | Merge non-interactively for agents/scripts |
-| `ez merge --stack --yes` | Merge the current linear stack bottom-to-top |
+| `ez merge --stack --yes` | Atomically merge a native GitHub stack; fall back to bottom-to-top for ordinary PR chains |
+
+Merges use GitHub's asynchronous merge API when available, including native
+stack and merge-queue support, with a legacy fallback for repositories where
+that API is unavailable. For an exact native-stack match, `--stack` sends one
+request for the top PR and reconciles the whole local worktree fleet. A
+successfully merged branch has its clean linked worktree removed; a queued
+branch keeps its worktree, local branch, remote branch, and stack metadata until
+GitHub actually merges it.
 
 ### Setup
 

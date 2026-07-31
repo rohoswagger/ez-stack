@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 
-use crate::cmd::push::push_or_update_pr;
+use crate::cmd::push::{push_or_update_pr, resolve_draft};
 use crate::error::EzError;
 use crate::git;
 use crate::github;
@@ -37,14 +37,7 @@ pub fn run(
         bail!(EzError::BranchNotInStack(current.clone()));
     }
 
-    // Resolve draft: --draft/--no-draft flags > config > false
-    let effective_draft = if no_draft {
-        false
-    } else if draft {
-        true
-    } else {
-        state.draft.unwrap_or(false)
-    };
+    let effective_draft = resolve_draft(draft, no_draft, state.draft);
 
     let resolved_body: Option<String> = match body_file {
         Some(path) => Some(github::body_from_file(path)?),
@@ -64,15 +57,23 @@ pub fn run(
     let remote = state.remote.clone();
     let body_explicitly_set = body.is_some() || body_file.is_some();
     let mut pr_urls: Vec<(String, String)> = Vec::new();
+    let mut pr_numbers: Vec<u64> = Vec::new();
+
+    for branch in &branches_to_submit {
+        git::fetch_branch(&remote, branch)?;
+    }
+
+    let branch_refs: Vec<&str> = branches_to_submit.iter().map(String::as_str).collect();
+    let sp = ui::spinner(&format!(
+        "Pushing {} branch(es) atomically...",
+        branch_refs.len()
+    ));
+    git::push_atomic(&remote, &branch_refs)?;
+    sp.finish_and_clear();
+    ui::info(&format!("Pushed {} branch(es)", branch_refs.len()));
 
     for branch in &branches_to_submit {
         let parent = state.get_branch(branch)?.parent.clone();
-
-        // Push with force-with-lease.
-        let sp = ui::spinner(&format!("Pushing `{branch}`..."));
-        git::fetch_branch(&remote, branch)?;
-        git::push(&remote, branch, true)?;
-        sp.finish_and_clear();
 
         // Create or update the PR.
         let pr_url = push_or_update_pr(
@@ -86,6 +87,9 @@ pub fn run(
         )?;
 
         let pr_number = state.get_branch(branch).ok().and_then(|m| m.pr_number);
+        if let Some(number) = pr_number {
+            pr_numbers.push(number);
+        }
         ui::receipt(&serde_json::json!({
             "cmd": "submit",
             "branch": branch,
@@ -98,6 +102,17 @@ pub fn run(
 
     state.save()?;
 
+    match github::ensure_native_stack(&pr_numbers) {
+        Ok(outcome) => {
+            report_native_stack_outcome(&outcome);
+            ui::receipt(&native_stack_receipt_value(&outcome));
+        }
+        Err(err) => {
+            ui::warn(&format!("GitHub native stack update skipped: {err}"));
+            ui::receipt(&native_stack_error_receipt_value(&err.to_string()));
+        }
+    }
+
     // Print summary.
     ui::success(&format!("Submitted {} PR(s):", pr_urls.len()));
     for (branch, url) in &pr_urls {
@@ -107,9 +122,70 @@ pub fn run(
     Ok(())
 }
 
+fn report_native_stack_outcome(outcome: &github::NativeStackOutcome) {
+    match outcome {
+        github::NativeStackOutcome::NotNeeded => {}
+        github::NativeStackOutcome::Created { number } => {
+            ui::info(&format!("Linked PRs into GitHub native stack #{number}"));
+        }
+        github::NativeStackOutcome::Extended { number, added } => {
+            ui::info(&format!(
+                "Extended GitHub native stack #{number} with {added} PR(s)"
+            ));
+        }
+        github::NativeStackOutcome::Unchanged { number } => {
+            ui::info(&format!("GitHub native stack #{number} is up to date"));
+        }
+        github::NativeStackOutcome::Unavailable => {
+            ui::info("GitHub native stacks unavailable; ordinary PR chain succeeded");
+        }
+    }
+}
+
+fn native_stack_receipt_value(outcome: &github::NativeStackOutcome) -> serde_json::Value {
+    match outcome {
+        github::NativeStackOutcome::NotNeeded => serde_json::json!({
+            "cmd": "submit",
+            "native_stack_action": "not_needed",
+        }),
+        github::NativeStackOutcome::Created { number } => serde_json::json!({
+            "cmd": "submit",
+            "native_stack_action": "created",
+            "native_stack_number": number,
+        }),
+        github::NativeStackOutcome::Extended { number, added } => serde_json::json!({
+            "cmd": "submit",
+            "native_stack_action": "extended",
+            "native_stack_number": number,
+            "native_stack_added": added,
+        }),
+        github::NativeStackOutcome::Unchanged { number } => serde_json::json!({
+            "cmd": "submit",
+            "native_stack_action": "unchanged",
+            "native_stack_number": number,
+        }),
+        github::NativeStackOutcome::Unavailable => serde_json::json!({
+            "cmd": "submit",
+            "native_stack_action": "unavailable",
+        }),
+    }
+}
+
+fn native_stack_error_receipt_value(error: &str) -> serde_json::Value {
+    serde_json::json!({
+        "cmd": "submit",
+        "native_stack_action": "error",
+        "native_stack_error": error,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{
+        CwdGuard, PathGuard, cmd_output, init_git_repo, install_fake_bin, run_cmd, take_env_lock,
+        write_file,
+    };
 
     #[test]
     fn branches_to_submit_orders_bottom_to_top_and_skips_trunk() {
@@ -133,5 +209,93 @@ mod tests {
     fn branches_to_submit_handles_trunk_only_path() {
         let path = vec!["main".to_string()];
         assert!(branches_to_submit(&path, "main").is_empty());
+    }
+
+    #[test]
+    fn native_stack_receipt_records_created_stack_number() {
+        let value = native_stack_receipt_value(&github::NativeStackOutcome::Created { number: 88 });
+
+        assert_eq!(value["native_stack_action"], "created");
+        assert_eq!(value["native_stack_number"], 88);
+    }
+
+    #[test]
+    fn native_stack_receipt_records_unavailable_without_number() {
+        let value = native_stack_receipt_value(&github::NativeStackOutcome::Unavailable);
+
+        assert_eq!(value["native_stack_action"], "unavailable");
+        assert!(value.get("native_stack_number").is_none());
+    }
+
+    #[test]
+    fn submit_atomic_push_failure_aborts_before_github_mutation() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("submit-atomic-abort");
+        let _cwd = CwdGuard::enter(&repo);
+
+        let main_head = cmd_output(&repo, "git", &["rev-parse", "HEAD"]);
+        run_cmd(&repo, "git", &["checkout", "-b", "feat/a"]);
+        write_file(&repo, "a.txt", "a\n");
+        run_cmd(&repo, "git", &["add", "a.txt"]);
+        run_cmd(&repo, "git", &["commit", "-m", "add a"]);
+        let a_head = cmd_output(&repo, "git", &["rev-parse", "HEAD"]);
+
+        run_cmd(&repo, "git", &["checkout", "-b", "feat/b"]);
+        write_file(&repo, "b.txt", "b\n");
+        run_cmd(&repo, "git", &["add", "b.txt"]);
+        run_cmd(&repo, "git", &["commit", "-m", "add b"]);
+
+        let mut state = StackState::new("main".to_string());
+        state.remote = "missing-origin".to_string();
+        state.add_branch("feat/a", "main", &main_head, None, None);
+        state.add_branch("feat/b", "feat/a", &a_head, None, None);
+        state.save().expect("save state");
+        let before = std::fs::read_to_string(StackState::state_path().expect("state path"))
+            .expect("state before");
+
+        let fake_dir = install_fake_bin(
+            "submit-atomic-abort-gh",
+            "gh",
+            r#"#!/bin/sh
+case "$1 $2" in
+  "pr create"|"pr edit"|"api -X")
+    echo "$@" >> "$EZ_FAKE_GH_LOG"
+    ;;
+esac
+exit 0
+"#,
+        );
+        let gh_log = fake_dir.join("gh-mutating.log");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &gh_log);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let err = run(false, false, None, None, None).expect_err("atomic push should fail");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+        }
+        assert!(
+            err.to_string().contains("missing-origin")
+                || err
+                    .to_string()
+                    .contains("does not appear to be a git repository")
+                || err
+                    .to_string()
+                    .contains("Could not read from remote repository"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            !gh_log.exists(),
+            "GitHub mutation should not occur before a successful atomic push"
+        );
+        let after = std::fs::read_to_string(StackState::state_path().expect("state path"))
+            .expect("state after");
+        assert_eq!(after, before, "submit state should not change");
+
+        let state = StackState::load().expect("load state");
+        assert_eq!(state.get_branch("feat/a").expect("feat/a").pr_number, None);
+        assert_eq!(state.get_branch("feat/b").expect("feat/b").pr_number, None);
     }
 }
