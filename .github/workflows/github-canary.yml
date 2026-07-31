@@ -1,0 +1,35 @@
+name: GitHub Canary
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  canary:
+    name: GitHub Canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: github-canary-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build ez
+        run: cargo build --bin ez --release --locked
+
+      - name: Run GitHub canary
+        env:
+          EZ_BIN: ${{ github.workspace }}/target/release/ez
+          EZ_CANARY_REPO: ${{ github.repository }}
+          EZ_CANARY_ID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/github-canary.sh
