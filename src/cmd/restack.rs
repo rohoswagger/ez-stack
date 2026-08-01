@@ -789,4 +789,51 @@ mod tests {
         let b_sha2 = git::rev_parse("feat/b").expect("b sha2");
         assert_eq!(state.get_branch("feat/c").expect("c").parent_head, b_sha2);
     }
+
+    #[test]
+    fn cascade_restack_saves_failure_state_and_returns_to_root() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("cascade-conflict");
+        let _cwd = CwdGuard::enter(&repo);
+
+        let main_sha = git::rev_parse("main").expect("main sha");
+
+        git::create_branch_at("feat/a", "main").expect("branch a");
+        let a_sha1 = commit_file(&repo, "feat/a", "a.txt");
+        git::create_branch_at("feat/b", "feat/a").expect("branch b");
+        commit_contents(&repo, "feat/b", "tracked.txt", "child\n", "child edit");
+
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/a", "main", &main_sha, None, None);
+        state.add_branch("feat/b", "feat/a", &a_sha1, None, None);
+        state.save().expect("save state");
+
+        let a_sha2 = commit_contents(&repo, "feat/a", "tracked.txt", "parent\n", "parent edit");
+        assert_ne!(a_sha1, a_sha2);
+
+        let root = git::repo_root().expect("repo root");
+        let error = cascade_restack(&mut state, "feat/a", &root, "feat/a", "test")
+            .expect_err("conflicting child should make cascade incomplete");
+
+        assert!(error.to_string().contains("could not be restacked"));
+        assert_eq!(git::current_branch().expect("current branch"), "feat/a");
+        assert_eq!(
+            state.get_branch("feat/b").expect("b").parent_head,
+            a_sha1,
+            "failed child keeps its stale parent_head for retry"
+        );
+        assert_eq!(
+            StackState::load()
+                .expect("load saved state")
+                .get_branch("feat/b")
+                .expect("saved b")
+                .parent_head,
+            a_sha1,
+            "cascade failure should persist the retryable state"
+        );
+        assert!(
+            !git::abort_rebase_for_branch("feat/b", &root).expect("abort check"),
+            "failed cascade should not leave a rebase in progress"
+        );
+    }
 }

@@ -454,6 +454,77 @@ fn restack_aligns_branch_when_patch_is_already_applied_on_parent() {
 }
 
 #[test]
+fn restack_refuses_dirty_stale_worktree_without_state_mutation() {
+    let repo = DefensiveRepo::new("restack-dirty-stale-worktree");
+    defensive_run_ez(&repo.path, &["create", "feat/topic", "--from", "main"]);
+    let topic = defensive_expected_worktree(&repo.path, "feat/topic");
+    let topic_before = defensive_commit_file(&topic, "topic.txt", "topic\n", "topic");
+    defensive_run(&repo.path, "git", &["checkout", "main"]);
+    defensive_commit_file(&repo.path, "main-before.txt", "main\n", "main before");
+    defensive_run(&repo.path, "git", &["cherry-pick", "feat/topic"]);
+    let main_tip = defensive_commit_file(
+        &repo.path,
+        "main-only.txt",
+        "tracked on main\n",
+        "main-only file",
+    );
+    assert_ne!(
+        topic_before, main_tip,
+        "cherry-pick should create a different main tip"
+    );
+    std::fs::write(topic.join("main-only.txt"), "untracked topic file\n")
+        .expect("dirty topic worktree");
+    assert!(
+        defensive_status(&topic).contains("?? main-only.txt"),
+        "topic worktree must start with an untracked collision"
+    );
+    assert!(
+        defensive_git_output(&repo.path, &["worktree", "list", "--porcelain"])
+            .contains("branch refs/heads/feat/topic"),
+        "topic branch must be checked out in its linked worktree"
+    );
+    assert_eq!(
+        defensive_git_output(&repo.path, &["branch", "--show-current"]),
+        "main",
+        "restack must start from the main worktree"
+    );
+    let state_before = defensive_stack_state(&repo.path);
+
+    let output = defensive_run_ez_raw(&repo.path, &["restack"]);
+
+    defensive_assert_failure(&output);
+    assert_eq!(output.status.code(), Some(3));
+    let stderr = defensive_stderr(&output);
+    assert!(
+        stderr.contains("Could not align `feat/topic` to `main`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("would be overwritten by merge"), "{stderr}");
+    let incomplete = defensive_receipt_with_action(&output, "restack_incomplete");
+    assert_eq!(incomplete["failed"][0]["branch"], "feat/topic");
+    assert_eq!(incomplete["failed"][0]["reason"], "error");
+    assert_eq!(
+        defensive_ref_tip(&repo.path, "feat/topic"),
+        topic_before,
+        "dirty linked worktree should keep the branch at its original tip"
+    );
+    assert_eq!(
+        defensive_stack_state(&repo.path),
+        state_before,
+        "failed alignment should not advance parent_head"
+    );
+    assert_eq!(
+        std::fs::read_to_string(topic.join("main-only.txt")).expect("read untracked topic file"),
+        "untracked topic file\n"
+    );
+    assert_eq!(
+        defensive_git_output(&repo.path, &["branch", "--show-current"]),
+        "main",
+        "restack should return to the original branch after reporting the failure"
+    );
+}
+
+#[test]
 fn restack_reparents_child_when_recorded_parent_branch_was_deleted() {
     let repo = DefensiveRepo::new("restack-reparent-deleted-parent");
     let main_initial = defensive_ref_tip(&repo.path, "main");
