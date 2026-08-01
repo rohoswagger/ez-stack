@@ -472,6 +472,7 @@ fn inside_worktree_delete_cancelled(target: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{CwdGuard, init_git_repo, run_cmd, take_env_lock, temp_dir};
 
     #[test]
     fn inside_worktree_path_matches_exact_and_nested() {
@@ -500,5 +501,106 @@ mod tests {
     fn inside_worktree_delete_cancelled_mentions_worktree_delete_yes_command() {
         let warning = inside_worktree_delete_cancelled("feat/auth");
         assert!(warning.contains("ez worktree delete feat/auth --yes"));
+    }
+
+    #[test]
+    fn restore_quarantined_worktree_rejects_missing_quarantine_path() {
+        let missing = temp_dir("delete-missing-quarantine")
+            .join("missing")
+            .to_string_lossy()
+            .to_string();
+        let original = temp_dir("delete-missing-quarantine-original")
+            .join("original")
+            .to_string_lossy()
+            .to_string();
+
+        let error = restore_quarantined_worktree(&missing, &original, "feat/missing", "claim")
+            .expect_err("missing quarantine path should fail");
+
+        assert!(error.to_string().contains("no longer exists"));
+    }
+
+    #[test]
+    fn restore_quarantined_worktree_rejects_unregistered_quarantine_path() {
+        let _lock = take_env_lock();
+        let repo = init_git_repo("delete-unregistered-quarantine");
+        let _cwd = CwdGuard::enter(&repo);
+        let quarantine = temp_dir("delete-unregistered-quarantine-path")
+            .join("quarantine")
+            .to_string_lossy()
+            .to_string();
+        std::fs::create_dir_all(&quarantine).expect("create unregistered quarantine");
+        let original = temp_dir("delete-unregistered-quarantine-original")
+            .join("original")
+            .to_string_lossy()
+            .to_string();
+
+        let error = restore_quarantined_worktree(&quarantine, &original, "feat/missing", "claim")
+            .expect_err("unregistered quarantine should fail");
+
+        assert!(error.to_string().contains("is no longer registered"));
+    }
+
+    #[test]
+    fn restore_quarantined_worktree_rejects_changed_branch_ownership() {
+        let _lock = take_env_lock();
+        let repo = init_git_repo("delete-changed-branch-quarantine");
+        let _cwd = CwdGuard::enter(&repo);
+        run_cmd(&repo, "git", &["branch", "feat/actual"]);
+        let quarantine = temp_dir("delete-changed-branch-quarantine-path").join("quarantine");
+        run_cmd(
+            &repo,
+            "git",
+            &[
+                "worktree",
+                "add",
+                quarantine.to_str().expect("quarantine path"),
+                "feat/actual",
+            ],
+        );
+        let quarantine =
+            std::fs::canonicalize(&quarantine).expect("canonicalize quarantine worktree path");
+        run_cmd(
+            &repo,
+            "git",
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "claim",
+                quarantine.to_str().expect("quarantine path"),
+            ],
+        );
+        let original = temp_dir("delete-changed-branch-original")
+            .join("original")
+            .to_string_lossy()
+            .to_string();
+
+        let error = restore_quarantined_worktree(
+            quarantine.to_str().expect("quarantine path"),
+            &original,
+            "feat/expected",
+            "claim",
+        )
+        .expect_err("changed branch ownership should fail");
+
+        assert!(error.to_string().contains("ownership changed"));
+        assert!(error.to_string().contains("feat/actual"));
+    }
+
+    #[test]
+    fn verify_delete_claim_rejects_unregistered_path() {
+        let _lock = take_env_lock();
+        let repo = init_git_repo("delete-claim-unregistered");
+        let _cwd = CwdGuard::enter(&repo);
+        let path = temp_dir("delete-claim-unregistered-path")
+            .join("missing-worktree")
+            .to_string_lossy()
+            .to_string();
+
+        let error = verify_delete_claim(&path, "feat/missing", "claim")
+            .expect_err("unregistered path should fail claim verification");
+
+        assert!(error.to_string().contains("path is no longer registered"));
     }
 }
