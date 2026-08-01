@@ -29,7 +29,7 @@ pub fn run(title: Option<&str>, body: Option<&str>, body_file: Option<&str>) -> 
             .or_else(|_| std::env::var("EDITOR"))
             .unwrap_or_else(|_| "vi".to_string());
 
-        let body_current = github::get_pr_body(pr_number)?;
+        let body_current = github::get_pr_body(pr_number, state.repo.as_deref())?;
         let tmp_path = format!("/tmp/ez-pr-{pr_number}.md");
         std::fs::write(&tmp_path, &body_current)?;
 
@@ -52,9 +52,9 @@ pub fn run(title: Option<&str>, body: Option<&str>, body_file: Option<&str>) -> 
             return Ok(());
         }
 
-        github::edit_pr(pr_number, None, Some(&new_body))?;
+        github::edit_pr(pr_number, None, Some(&new_body), state.repo.as_deref())?;
 
-        if let Ok(Some(pr)) = github::get_pr_status(&current) {
+        if let Ok(Some(pr)) = github::get_pr_status(&pr_number.to_string(), state.repo.as_deref()) {
             ui::success(&format!("Updated PR #{}: {}", pr.number, pr.url));
         } else {
             ui::success(&format!("Updated PR #{pr_number} body"));
@@ -68,9 +68,14 @@ pub fn run(title: Option<&str>, body: Option<&str>, body_file: Option<&str>) -> 
         body.map(|s| s.to_string())
     };
 
-    github::edit_pr(pr_number, title, resolved_body.as_deref())?;
+    github::edit_pr(
+        pr_number,
+        title,
+        resolved_body.as_deref(),
+        state.repo.as_deref(),
+    )?;
 
-    if let Ok(Some(pr)) = github::get_pr_status(&current) {
+    if let Ok(Some(pr)) = github::get_pr_status(&pr_number.to_string(), state.repo.as_deref()) {
         ui::success(&format!("Updated PR #{}: {}", pr.number, pr.url));
     } else {
         ui::success(&format!("Updated PR #{pr_number}"));

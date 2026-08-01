@@ -180,11 +180,21 @@ fn pr_numbers_for_branches(state: &StackState, branches: &[String]) -> Vec<u64> 
 }
 
 pub(crate) fn inspect_branch(state: &StackState, branch: &str) -> NativeStackInspection {
-    inspect_branch_with_lookup(state, branch, github::lookup_native_stack_for_pr)
+    if state.is_fork_workflow() {
+        return fork_not_applicable_branch_inspection(state, branch);
+    }
+    inspect_branch_with_lookup(state, branch, |pr_number| {
+        github::lookup_native_stack_for_pr(pr_number, state.repo.as_deref())
+    })
 }
 
 pub(crate) fn inspect_all(state: &StackState) -> HashMap<String, NativeStackInspection> {
-    inspect_all_with_lookup(state, github::lookup_native_stack_for_pr)
+    if state.is_fork_workflow() {
+        return fork_not_applicable_all_inspections(state);
+    }
+    inspect_all_with_lookup(state, |pr_number| {
+        github::lookup_native_stack_for_pr(pr_number, state.repo.as_deref())
+    })
 }
 
 fn inspect_branch_with_lookup(
@@ -350,6 +360,93 @@ fn not_applicable_inspection(branch: &str) -> NativeStackInspection {
     )
 }
 
+fn fork_not_applicable_reason() -> String {
+    "GitHub native stacks require pull requests in one repository; fork/cross-repository workflows keep the ez stack local".to_string()
+}
+
+fn fork_not_applicable_inspection(
+    branches: Vec<String>,
+    pull_requests: Vec<u64>,
+) -> NativeStackInspection {
+    base_inspection(
+        "not_applicable",
+        branches,
+        pull_requests,
+        None,
+        Some(fork_not_applicable_reason()),
+        None,
+    )
+}
+
+fn fork_not_applicable_branch_inspection(
+    state: &StackState,
+    branch: &str,
+) -> NativeStackInspection {
+    if state.is_trunk(branch) || !state.is_managed(branch) {
+        return fork_not_applicable_inspection(vec![branch.to_string()], Vec::new());
+    }
+
+    let plan = native_stack_plan(state);
+    if let Some(component) = plan
+        .skipped
+        .iter()
+        .find(|component| component.branches.iter().any(|name| name == branch))
+    {
+        return fork_not_applicable_inspection(
+            component.branches.clone(),
+            component.pr_numbers.clone(),
+        );
+    }
+    if let Some(chain) = plan
+        .chains
+        .iter()
+        .find(|chain| chain.branches.iter().any(|name| name == branch))
+    {
+        return fork_not_applicable_inspection(chain.branches.clone(), chain.pr_numbers.clone());
+    }
+
+    let pr_number = state
+        .branches
+        .get(branch)
+        .and_then(|meta| meta.pr_number)
+        .into_iter()
+        .collect();
+    fork_not_applicable_inspection(vec![branch.to_string()], pr_number)
+}
+
+fn fork_not_applicable_all_inspections(
+    state: &StackState,
+) -> HashMap<String, NativeStackInspection> {
+    let mut inspections = HashMap::new();
+    let plan = native_stack_plan(state);
+
+    for component in &plan.skipped {
+        let inspection = fork_not_applicable_inspection(
+            component.branches.clone(),
+            component.pr_numbers.clone(),
+        );
+        for branch in &component.branches {
+            inspections.insert(branch.clone(), inspection.clone());
+        }
+    }
+
+    for chain in &plan.chains {
+        let inspection =
+            fork_not_applicable_inspection(chain.branches.clone(), chain.pr_numbers.clone());
+        for branch in &chain.branches {
+            inspections.insert(branch.clone(), inspection.clone());
+        }
+    }
+
+    for branch in state.branches.keys() {
+        inspections
+            .entry(branch.clone())
+            .or_insert_with(|| fork_not_applicable_branch_inspection(state, branch));
+    }
+
+    inspections
+}
+
 fn base_inspection(
     state: &str,
     branches: Vec<String>,
@@ -408,6 +505,9 @@ pub(crate) fn report_outcome(outcome: &github::NativeStackOutcome) {
         github::NativeStackOutcome::Unavailable => {
             ui::info("GitHub native stacks unavailable; ordinary PR chain succeeded");
         }
+        github::NativeStackOutcome::NotApplicable { reason } => {
+            ui::info(&format!("GitHub native stacks not applicable: {reason}"));
+        }
     }
 }
 
@@ -441,6 +541,11 @@ pub(crate) fn receipt_value(
         github::NativeStackOutcome::Unavailable => serde_json::json!({
             "cmd": command,
             "native_stack_action": "unavailable",
+        }),
+        github::NativeStackOutcome::NotApplicable { reason } => serde_json::json!({
+            "cmd": command,
+            "native_stack_action": "not_applicable",
+            "native_stack_reason": reason,
         }),
     };
     if !branches.is_empty() {

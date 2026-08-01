@@ -50,13 +50,25 @@ pub fn run(
     body: Option<&str>,
     body_file: Option<&str>,
     base_override: Option<&str>,
+    remote_override: Option<&str>,
+    repo_override: Option<&str>,
+    fork_repo_override: Option<&str>,
     stack: bool,
     stage_all: bool,
     stage_all_files: bool,
     commit_message: Option<&str>,
 ) -> Result<()> {
     if stack {
-        return crate::cmd::submit::run(draft, no_draft, title, body, body_file);
+        return crate::cmd::submit::run(
+            draft,
+            no_draft,
+            title,
+            body,
+            body_file,
+            remote_override,
+            repo_override,
+            fork_repo_override,
+        );
     }
 
     if let Some(root) = git::current_linked_worktree_root()? {
@@ -114,7 +126,20 @@ pub fn run(
         bail!(EzError::BranchNotInStack(current.clone()));
     }
 
-    let remote = &state.remote.clone();
+    let effective_remote = remote_override
+        .map(str::to_string)
+        .unwrap_or_else(|| state.remote.clone());
+    let effective_repo = repo_override
+        .map(str::to_string)
+        .or_else(|| state.repo.clone());
+    let effective_fork_repo = fork_repo_override
+        .map(str::to_string)
+        .or_else(|| state.fork_repo.clone());
+    let is_fork_workflow = state.is_fork_workflow_with(
+        Some(&effective_remote),
+        effective_repo.as_deref(),
+        effective_fork_repo.as_deref(),
+    );
 
     // Resolve PR creation: --pr > --no-pr > config > false
     let skip_pr = resolve_no_pr(force_pr, no_pr, state.no_pr);
@@ -134,8 +159,8 @@ pub fn run(
 
     // Push the branch with force-with-lease.
     let sp = ui::spinner(&format!("Pushing `{current}`..."));
-    git::fetch_branch(remote, &current)?;
-    git::push(remote, &current, true)?;
+    git::fetch_branch(&effective_remote, &current)?;
+    git::push(&effective_remote, &current, true)?;
     sp.finish_and_clear();
     ui::info(&format!("Pushed `{current}`"));
 
@@ -146,6 +171,9 @@ pub fn run(
             "cmd": "push",
             "branch": current,
             "no_pr": true,
+            "remote": effective_remote,
+            "repo": effective_repo,
+            "fork_repo": effective_fork_repo,
             "scope_defined": commit_scope_defined,
             "scope_mode": commit_scope_mode,
             "out_of_scope_count": commit_out_of_scope_files.len(),
@@ -171,6 +199,10 @@ pub fn run(
         title,
         resolved_body.as_deref(),
         body_explicitly_set,
+        &effective_remote,
+        effective_repo.as_deref(),
+        effective_fork_repo.as_deref(),
+        is_fork_workflow,
     )?;
 
     let pr_number = state.get_branch(&current).ok().and_then(|m| m.pr_number);
@@ -184,6 +216,9 @@ pub fn run(
         "pr_number": pr_number,
         "pr_url": pr_url,
         "created": !had_pr_before,
+        "remote": effective_remote,
+        "repo": effective_repo,
+        "fork_repo": effective_fork_repo,
         "scope_defined": commit_scope_defined,
         "scope_mode": commit_scope_mode,
         "out_of_scope_count": commit_out_of_scope_files.len(),
@@ -214,6 +249,7 @@ pub(crate) fn resolve_draft(draft: bool, no_draft: bool, config_draft: Option<bo
 /// Push-or-update logic shared with the `submit` command.
 ///
 /// Returns the PR URL.
+#[allow(clippy::too_many_arguments)]
 pub fn push_or_update_pr(
     state: &mut StackState,
     branch: &str,
@@ -222,12 +258,22 @@ pub fn push_or_update_pr(
     title_override: Option<&str>,
     body_override: Option<&str>,
     body_explicitly_set: bool,
+    push_remote: &str,
+    repo: Option<&str>,
+    fork_repo: Option<&str>,
+    fork_workflow: bool,
 ) -> Result<String> {
     // Collect upstream ancestor PRs for the stack section.
     // path_to_trunk returns [branch, ..., trunk]; we want ancestors only.
-    let ancestors = stack_ancestors(state, branch, &github::repo_name().unwrap_or_default());
+    let ancestors = stack_ancestors(state, branch, &github::repo_name(repo).unwrap_or_default());
 
-    let existing_pr = github::get_pr_status(branch)?;
+    let head = github::pull_request_head(push_remote, repo, fork_repo, fork_workflow, branch)?;
+    let lookup = state
+        .get_branch(branch)?
+        .pr_number
+        .map(|number| number.to_string())
+        .unwrap_or_else(|| head.clone());
+    let existing_pr = github::get_pr_status(&lookup, repo)?;
 
     let pr_url = match existing_pr {
         Some(pr) => {
@@ -239,7 +285,7 @@ pub fn push_or_update_pr(
             // clobber a manual `gh pr edit --base` change.
             if pr.base != parent {
                 if git::is_ancestor(parent, branch) {
-                    if let Err(e) = github::update_pr_base(pr.number, parent) {
+                    if let Err(e) = github::update_pr_base(pr.number, parent, repo) {
                         ui::warn(&format!(
                             "Push succeeded but PR #{} base could not be updated to `{parent}`: {e}",
                             pr.number
@@ -260,7 +306,7 @@ pub fn push_or_update_pr(
             if body_explicitly_set {
                 let raw_body = body_override.unwrap_or("Part of a stack managed by `ez`.");
                 let body = crate::stack_body::build_stack_body(&ancestors, raw_body);
-                if let Err(e) = github::edit_pr(pr.number, title_override, Some(&body)) {
+                if let Err(e) = github::edit_pr(pr.number, title_override, Some(&body), repo) {
                     ui::warn(&format!(
                         "Push succeeded but PR #{} could not be updated: {e}",
                         pr.number
@@ -269,7 +315,7 @@ pub fn push_or_update_pr(
                     ui::info(&format!("Updated PR #{}", pr.number));
                 }
             } else if title_override.is_some() {
-                if let Err(e) = github::edit_pr(pr.number, title_override, None) {
+                if let Err(e) = github::edit_pr(pr.number, title_override, None, repo) {
                     ui::warn(&format!(
                         "Push succeeded but PR #{} title could not be updated: {e}",
                         pr.number
@@ -297,7 +343,7 @@ pub fn push_or_update_pr(
             // Always append stack section to new PRs.
             let body = crate::stack_body::build_stack_body(&ancestors, raw_body);
 
-            let pr = github::create_pr(title, &body, parent, branch, draft)?;
+            let pr = github::create_pr(title, &body, parent, &head, draft, repo)?;
             state.get_branch_mut(branch)?.pr_number = Some(pr.number);
             ui::info(&format!("Created PR #{}: {}", pr.number, pr.url));
             pr.url

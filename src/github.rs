@@ -22,6 +22,17 @@ fn run_gh(args: &[&str]) -> Result<String> {
     }
 }
 
+fn run_gh_in_repo(args: &[&str], repo: Option<&str>) -> Result<String> {
+    let Some(repo) = repo else {
+        return run_gh(args);
+    };
+    validate_repo_name(repo)?;
+    let mut scoped_args = Vec::with_capacity(args.len() + 2);
+    scoped_args.extend_from_slice(args);
+    scoped_args.extend_from_slice(&["--repo", repo]);
+    run_gh(&scoped_args)
+}
+
 fn run_gh_with_stdin(args: &[&str], stdin: &str) -> Result<String> {
     let mut child = Command::new("gh")
         .args(args)
@@ -67,6 +78,7 @@ pub enum NativeStackOutcome {
     Created { number: u64 },
     Extended { number: u64, added: usize },
     Unchanged { number: u64 },
+    NotApplicable { reason: String },
     Unavailable,
 }
 
@@ -95,14 +107,21 @@ pub fn body_from_file(path: &str) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("failed to read body file `{path}`"))
 }
 
-pub fn create_pr(title: &str, body: &str, base: &str, head: &str, draft: bool) -> Result<PrInfo> {
+pub fn create_pr(
+    title: &str,
+    body: &str,
+    base: &str,
+    head: &str,
+    draft: bool,
+    repo: Option<&str>,
+) -> Result<PrInfo> {
     let mut args = vec![
         "pr", "create", "--title", title, "--body", body, "--base", base, "--head", head,
     ];
     if draft {
         args.push("--draft");
     }
-    let url = run_gh(&args)?;
+    let url = run_gh_in_repo(&args, repo)?;
 
     // Extract PR number from URL
     let number = url
@@ -122,19 +141,25 @@ pub fn create_pr(title: &str, body: &str, base: &str, head: &str, draft: bool) -
     })
 }
 
-pub fn update_pr_base(pr_number: u64, new_base: &str) -> Result<()> {
-    run_gh(&["pr", "edit", &pr_number.to_string(), "--base", new_base])?;
+pub fn update_pr_base(pr_number: u64, new_base: &str, repo: Option<&str>) -> Result<()> {
+    run_gh_in_repo(
+        &["pr", "edit", &pr_number.to_string(), "--base", new_base],
+        repo,
+    )?;
     Ok(())
 }
 
-pub fn get_pr_status(branch: &str) -> Result<Option<PrInfo>> {
-    let output = run_gh(&[
-        "pr",
-        "view",
-        branch,
-        "--json",
-        "number,url,state,title,isDraft,mergedAt,baseRefName",
-    ]);
+pub fn get_pr_status(branch: &str, repo: Option<&str>) -> Result<Option<PrInfo>> {
+    let output = run_gh_in_repo(
+        &[
+            "pr",
+            "view",
+            branch,
+            "--json",
+            "number,url,state,title,isDraft,mergedAt,baseRefName",
+        ],
+        repo,
+    );
 
     match output {
         Ok(json_str) => {
@@ -153,12 +178,20 @@ pub fn get_pr_status(branch: &str) -> Result<Option<PrInfo>> {
     }
 }
 
-pub fn get_all_pr_statuses() -> std::collections::HashMap<String, PrInfo> {
+pub fn get_all_pr_statuses(repo: Option<&str>) -> std::collections::HashMap<String, PrInfo> {
     let mut map = std::collections::HashMap::new();
     let mut page = 1;
 
     loop {
-        let route = format!("repos/{{owner}}/{{repo}}/pulls?state=all&per_page=100&page={page}");
+        let route = match repo {
+            Some(repo) => {
+                if validate_repo_name(repo).is_err() {
+                    break;
+                }
+                format!("repos/{repo}/pulls?state=all&per_page=100&page={page}")
+            }
+            None => format!("repos/{{owner}}/{{repo}}/pulls?state=all&per_page=100&page={page}"),
+        };
         let output = run_gh(&["api", &route]);
 
         let Ok(json_str) = output else {
@@ -231,13 +264,14 @@ fn pr_info_from_rest_value(value: &serde_json::Value) -> Option<(String, PrInfo)
 /// URL, with a fallback to `gh repo view` if the URL is unparseable.
 pub fn get_pr_statuses_for(
     remote: &str,
+    repo: Option<&str>,
     branches: &[&str],
 ) -> std::collections::HashMap<String, PrInfo> {
     if branches.is_empty() {
         return std::collections::HashMap::new();
     }
 
-    let Ok((owner, name)) = resolve_owner_repo(remote) else {
+    let Ok((owner, name)) = resolve_owner_repo(remote, repo) else {
         return std::collections::HashMap::new();
     };
 
@@ -257,10 +291,64 @@ pub fn get_pr_statuses_for(
     parse_pr_statuses_response(&value, branches)
 }
 
+/// Fetch exact pull requests by their stored upstream numbers in one GraphQL request.
+///
+/// Forks commonly reuse branch names, so branch-only lookup is not a safe identity
+/// for cleanup decisions. Results are keyed by the expected local branch and are
+/// included only when the stored pull request still reports that same head ref.
+pub fn get_pr_statuses_by_number(
+    remote: &str,
+    repo: Option<&str>,
+    branches: &[(&str, u64)],
+) -> std::collections::HashMap<String, PrInfo> {
+    if branches.is_empty() {
+        return std::collections::HashMap::new();
+    }
+
+    let Ok((owner, name)) = resolve_owner_repo(remote, repo) else {
+        return std::collections::HashMap::new();
+    };
+
+    let mut query =
+        String::from("query($owner:String!,$name:String!){repository(owner:$owner,name:$name){");
+    for (index, (_, number)) in branches.iter().enumerate() {
+        query.push_str(&format!(
+            "b{index}:pullRequest(number:{number}){{number url state title baseRefName headRefName isDraft mergedAt}}"
+        ));
+    }
+    query.push_str("}}");
+
+    let owner_arg = format!("owner={owner}");
+    let name_arg = format!("name={name}");
+    let query_arg = format!("query={query}");
+    let Ok(json_str) = run_gh(&[
+        "api", "graphql", "-F", &owner_arg, "-F", &name_arg, "-f", &query_arg,
+    ]) else {
+        return std::collections::HashMap::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&json_str) else {
+        return std::collections::HashMap::new();
+    };
+
+    let mut statuses = std::collections::HashMap::new();
+    let repository = &value["data"]["repository"];
+    for (index, (branch, _)) in branches.iter().enumerate() {
+        let alias = format!("b{index}");
+        let node = &repository[&alias];
+        if node["headRefName"].as_str() != Some(*branch) {
+            continue;
+        }
+        if let Some(pr) = pr_info_from_graphql_node(node) {
+            statuses.insert((*branch).to_string(), pr);
+        }
+    }
+    statuses
+}
+
 /// Look up one PR by number. Returns `None` on any failure — callers surface
 /// the missing-PR case as a user-facing error.
-pub fn get_pr_by_number(remote: &str, number: u64) -> Option<(String, PrInfo)> {
-    let (owner, name) = resolve_owner_repo(remote).ok()?;
+pub fn get_pr_by_number(remote: &str, repo: Option<&str>, number: u64) -> Option<(String, PrInfo)> {
+    let (owner, name) = resolve_owner_repo(remote, repo).ok()?;
 
     let query = "query($owner:String!,$name:String!,$num:Int!){repository(owner:$owner,name:$name){pullRequest(number:$num){number url state title baseRefName headRefName isDraft mergedAt}}}";
     let owner_arg = format!("owner={owner}");
@@ -292,13 +380,16 @@ fn parse_pr_by_number_response(value: &serde_json::Value) -> Option<(String, PrI
 /// Fast path: parse `git remote get-url <remote>` locally (~10ms). Falls back
 /// to `gh repo view` (~400ms, network) if the URL is unparseable — e.g. an
 /// SSH-config alias or a non-standard host. Errors only when both fail.
-fn resolve_owner_repo(remote: &str) -> Result<(String, String)> {
+fn resolve_owner_repo(remote: &str, repo: Option<&str>) -> Result<(String, String)> {
+    if let Some(repo) = repo {
+        return configured_owner_repo(repo);
+    }
     if let Ok(url) = crate::git::remote_url(remote) {
         if let Some(pair) = parse_owner_repo_from_remote_url(&url) {
             return Ok(pair);
         }
     }
-    let repo = repo_name()?;
+    let repo = repo_name(None)?;
     repo.split_once('/')
         .map(|(o, n)| (o.to_string(), n.to_string()))
         .ok_or_else(|| anyhow::anyhow!("unexpected repo name format `{repo}`"))
@@ -342,6 +433,44 @@ fn parse_owner_repo_from_remote_url(url: &str) -> Option<(String, String)> {
     None
 }
 
+fn configured_owner_repo(repo: &str) -> Result<(String, String)> {
+    validate_repo_name(repo)?;
+    let (owner, name) = repo
+        .split_once('/')
+        .expect("validated repo name should contain slash");
+    Ok((owner.to_string(), name.to_string()))
+}
+
+fn validate_repo_name(repo: &str) -> Result<()> {
+    let invalid = || {
+        anyhow::anyhow!(
+            "invalid GitHub repository `{repo}` — expected `OWNER/REPO`, for example `octocat/Hello-World`"
+        )
+    };
+    let (owner, name) = repo.split_once('/').ok_or_else(invalid)?;
+    if repo.trim() != repo
+        || owner.is_empty()
+        || name.is_empty()
+        || name.contains('/')
+        || owner.chars().any(char::is_whitespace)
+        || name.chars().any(char::is_whitespace)
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+pub(crate) fn remote_repo_differs(push_remote: &str, target_repo: &str) -> Option<bool> {
+    let target = configured_owner_repo(target_repo).ok()?;
+    let url = crate::git::remote_url(push_remote).ok()?;
+    let push = parse_owner_repo_from_remote_url(&url)?;
+    Some(!owner_repo_eq(&push, &target))
+}
+
+fn owner_repo_eq(left: &(String, String), right: &(String, String)) -> bool {
+    left.0.eq_ignore_ascii_case(&right.0) && left.1.eq_ignore_ascii_case(&right.1)
+}
+
 fn split_owner_repo(path: &str) -> Option<(String, String)> {
     let mut parts = path.splitn(3, '/');
     let owner = parts.next()?.trim();
@@ -351,6 +480,55 @@ fn split_owner_repo(path: &str) -> Option<(String, String)> {
     }
     let repo = repo.strip_suffix(".git").unwrap_or(repo);
     Some((owner.to_string(), repo.to_string()))
+}
+
+pub fn pull_request_head(
+    push_remote: &str,
+    target_repo: Option<&str>,
+    fork_repo: Option<&str>,
+    fork_workflow: bool,
+    branch: &str,
+) -> Result<String> {
+    let target = match target_repo {
+        Some(repo) => Some(configured_owner_repo(repo)?),
+        None => None,
+    };
+
+    if let Some(repo) = fork_repo {
+        let fork = configured_owner_repo(repo)?;
+        if target
+            .as_ref()
+            .is_none_or(|target| !owner_repo_eq(target, &fork))
+        {
+            return Ok(format!("{}:{branch}", fork.0));
+        }
+        return Ok(branch.to_string());
+    }
+
+    let Ok(url) = crate::git::remote_url(push_remote) else {
+        if fork_workflow {
+            bail!(
+                "could not resolve GitHub owner for push remote `{push_remote}` — set `fork_repo = \"OWNER/REPO\"` when pushing fork branches to an SSH alias or non-GitHub remote"
+            );
+        }
+        return Ok(branch.to_string());
+    };
+    let Some(push_repo) = parse_owner_repo_from_remote_url(&url) else {
+        if fork_workflow {
+            bail!(
+                "could not parse GitHub owner from push remote `{push_remote}` URL `{url}` — set `fork_repo = \"OWNER/REPO\"` to create fork pull requests"
+            );
+        }
+        return Ok(branch.to_string());
+    };
+
+    if target
+        .as_ref()
+        .is_some_and(|target| !owner_repo_eq(target, &push_repo))
+    {
+        return Ok(format!("{}:{branch}", push_repo.0));
+    }
+    Ok(branch.to_string())
 }
 
 /// Construct a GraphQL query asking for the most recent PR for each branch.
@@ -414,16 +592,17 @@ fn pr_info_from_graphql_node(node: &serde_json::Value) -> Option<PrInfo> {
     })
 }
 
-pub fn merge_pr(pr_number: u64, method: &str) -> Result<MergePrOutcome> {
-    merge_pr_with_poll_interval(pr_number, method, Duration::from_secs(1))
+pub fn merge_pr(pr_number: u64, method: &str, repo: Option<&str>) -> Result<MergePrOutcome> {
+    merge_pr_with_poll_interval(pr_number, method, Duration::from_secs(1), repo)
 }
 
 fn merge_pr_with_poll_interval(
     pr_number: u64,
     method: &str,
     poll_interval: Duration,
+    repo: Option<&str>,
 ) -> Result<MergePrOutcome> {
-    let repo = repo_name()?;
+    let repo = repo_name(repo)?;
     let route = format!("repos/{repo}/pulls/{pr_number}/merge-async");
     let method_json = serde_json::to_string(method)?;
     let payload = format!(r#"{{"merge_method":{method_json},"merge_action":"default"}}"#);
@@ -533,27 +712,29 @@ fn parse_merge_async_status(value: &serde_json::Value) -> Result<MergeAsyncStatu
     }
 }
 
-pub fn ensure_native_stack(pr_numbers: &[u64]) -> Result<NativeStackOutcome> {
-    reconcile_native_stack(pr_numbers, "ez submit", true)
+pub fn ensure_native_stack(pr_numbers: &[u64], repo: Option<&str>) -> Result<NativeStackOutcome> {
+    reconcile_native_stack(pr_numbers, "ez submit", true, repo)
 }
 
 pub fn reconcile_native_stack_exact(
     pr_numbers: &[u64],
     retry_command: &str,
+    repo: Option<&str>,
 ) -> Result<NativeStackOutcome> {
-    reconcile_native_stack(pr_numbers, retry_command, false)
+    reconcile_native_stack(pr_numbers, retry_command, false, repo)
 }
 
 fn reconcile_native_stack(
     pr_numbers: &[u64],
     retry_command: &str,
     allow_existing_superset: bool,
+    repo: Option<&str>,
 ) -> Result<NativeStackOutcome> {
     if pr_numbers.len() < 2 {
         return Ok(NativeStackOutcome::NotNeeded);
     }
 
-    let repo = repo_name()?;
+    let repo = repo_name(repo)?;
     let bottom = pr_numbers[0];
     let route = format!("repos/{repo}/stacks?pull_request={bottom}");
     let existing = match run_gh(&["api", &route, "-H", GITHUB_API_VERSION_HEADER]) {
@@ -620,15 +801,15 @@ fn reconcile_native_stack(
     )));
 }
 
-pub fn native_stack_for_pr(pr_number: u64) -> Result<Option<NativeStackInfo>> {
-    match lookup_native_stack_for_pr(pr_number)? {
+pub fn native_stack_for_pr(pr_number: u64, repo: Option<&str>) -> Result<Option<NativeStackInfo>> {
+    match lookup_native_stack_for_pr(pr_number, repo)? {
         NativeStackLookup::Found(info) => Ok(Some(info)),
         NativeStackLookup::NotLinked | NativeStackLookup::Unavailable => Ok(None),
     }
 }
 
-pub fn lookup_native_stack_for_pr(pr_number: u64) -> Result<NativeStackLookup> {
-    let repo = repo_name()?;
+pub fn lookup_native_stack_for_pr(pr_number: u64, repo: Option<&str>) -> Result<NativeStackLookup> {
+    let repo = repo_name(repo)?;
     let route = format!("repos/{repo}/stacks?pull_request={pr_number}");
     let response = match run_gh(&["api", &route, "-H", GITHUB_API_VERSION_HEADER]) {
         Ok(json) => json,
@@ -691,7 +872,12 @@ fn is_prefix<T: PartialEq>(prefix: &[T], values: &[T]) -> bool {
     prefix.len() <= values.len() && values.starts_with(prefix)
 }
 
-pub fn edit_pr(pr_number: u64, title: Option<&str>, body: Option<&str>) -> Result<()> {
+pub fn edit_pr(
+    pr_number: u64,
+    title: Option<&str>,
+    body: Option<&str>,
+    repo: Option<&str>,
+) -> Result<()> {
     let number_str = pr_number.to_string();
     let mut args: Vec<&str> = vec!["pr", "edit", &number_str];
     if let Some(t) = title {
@@ -703,7 +889,7 @@ pub fn edit_pr(pr_number: u64, title: Option<&str>, body: Option<&str>) -> Resul
     if args.len() == 3 {
         anyhow::bail!("No edits specified — provide --title, --body, or --body-file");
     }
-    run_gh(&args)?;
+    run_gh_in_repo(&args, repo)?;
     Ok(())
 }
 
@@ -711,7 +897,11 @@ pub fn is_gh_authenticated() -> bool {
     run_gh(&["auth", "status"]).is_ok()
 }
 
-pub fn repo_name() -> Result<String> {
+pub fn repo_name(configured: Option<&str>) -> Result<String> {
+    if let Some(repo) = configured {
+        validate_repo_name(repo)?;
+        return Ok(repo.to_string());
+    }
     let output = run_gh(&[
         "repo",
         "view",
@@ -727,22 +917,25 @@ pub fn repo_name() -> Result<String> {
 }
 
 /// Fetch the current body of a PR (raw markdown, no stack section stripped).
-pub fn get_pr_body(pr_number: u64) -> Result<String> {
-    let body = run_gh(&[
-        "pr",
-        "view",
-        &pr_number.to_string(),
-        "--json",
-        "body",
-        "-q",
-        ".body",
-    ])?;
+pub fn get_pr_body(pr_number: u64, repo: Option<&str>) -> Result<String> {
+    let body = run_gh_in_repo(
+        &[
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--json",
+            "body",
+            "-q",
+            ".body",
+        ],
+        repo,
+    )?;
     Ok(body)
 }
 
 /// Open the PR for a branch in the default browser.
-pub fn open_pr_in_browser(branch: &str) -> Result<()> {
-    run_gh(&["pr", "view", "--web", branch])?;
+pub fn open_pr_in_browser(branch: &str, repo: Option<&str>) -> Result<()> {
+    run_gh_in_repo(&["pr", "view", "--web", branch], repo)?;
     Ok(())
 }
 
@@ -751,11 +944,20 @@ pub fn open_pr_in_browser(branch: &str) -> Result<()> {
 /// Fetch CI status for all branches in one API call.
 /// Returns a map of branch_name → status emoji (✓/✗/⏳).
 /// Uses the most recent run per branch.
-pub fn get_all_ci_statuses() -> std::collections::HashMap<String, String> {
+pub fn get_all_ci_statuses(repo: Option<&str>) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
+    let route = match repo {
+        Some(repo) => {
+            if validate_repo_name(repo).is_err() {
+                return map;
+            }
+            format!("repos/{repo}/actions/runs?per_page=50")
+        }
+        None => "repos/{owner}/{repo}/actions/runs?per_page=50".to_string(),
+    };
     let output = run_gh(&[
         "api",
-        "repos/{owner}/{repo}/actions/runs?per_page=50",
+        &route,
         "--jq",
         r#".workflow_runs[] | "\(.head_branch)\t\(.status)\t\(.conclusion)""#,
     ]);
@@ -786,19 +988,22 @@ pub fn get_all_ci_statuses() -> std::collections::HashMap<String, String> {
     map
 }
 
-pub fn get_ci_status(branch: &str) -> String {
-    let output = run_gh(&[
-        "run",
-        "list",
-        "--branch",
-        branch,
-        "--limit",
-        "1",
-        "--json",
-        "status,conclusion",
-        "--jq",
-        ".[0]",
-    ]);
+pub fn get_ci_status(branch: &str, repo: Option<&str>) -> String {
+    let output = run_gh_in_repo(
+        &[
+            "run",
+            "list",
+            "--branch",
+            branch,
+            "--limit",
+            "1",
+            "--json",
+            "status,conclusion",
+            "--jq",
+            ".[0]",
+        ],
+        repo,
+    );
     match output {
         Ok(json_str) if !json_str.is_empty() && json_str != "null" => {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
@@ -820,12 +1025,12 @@ pub fn get_ci_status(branch: &str) -> String {
 
 /// Set or unset draft status on a PR.
 /// `ready = true` → mark ready for review; `ready = false` → mark as draft.
-pub fn set_pr_ready(pr_number: u64, ready: bool) -> Result<()> {
+pub fn set_pr_ready(pr_number: u64, ready: bool, repo: Option<&str>) -> Result<()> {
     let number = pr_number.to_string();
     if ready {
-        run_gh(&["pr", "ready", &number])?;
+        run_gh_in_repo(&["pr", "ready", &number], repo)?;
     } else {
-        run_gh(&["pr", "ready", "--undo", &number])?;
+        run_gh_in_repo(&["pr", "ready", "--undo", &number], repo)?;
     }
     Ok(())
 }
@@ -833,7 +1038,7 @@ pub fn set_pr_ready(pr_number: u64, ready: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{PathGuard, install_fake_bin, take_env_lock, temp_dir};
+    use crate::test_support::{CwdGuard, PathGuard, install_fake_bin, take_env_lock, temp_dir};
 
     fn install_fake_gh(name: &str) -> std::path::PathBuf {
         install_fake_bin(
@@ -969,23 +1174,23 @@ esac
         let fake_dir = install_fake_gh("wrappers");
         let _path = PathGuard::install(&fake_dir);
 
-        let created = create_pr("Title", "Body", "main", "feature", true).expect("create pr");
+        let created = create_pr("Title", "Body", "main", "feature", true, None).expect("create pr");
         assert_eq!(created.number, 77);
         assert!(created.is_draft);
 
-        update_pr_base(77, "develop").expect("update base");
-        edit_pr(77, Some("New title"), Some("New body")).expect("edit pr");
+        update_pr_base(77, "develop", None).expect("update base");
+        edit_pr(77, Some("New title"), Some("New body"), None).expect("edit pr");
         assert_eq!(
-            merge_pr(77, "squash").expect("merge pr"),
+            merge_pr(77, "squash", None).expect("merge pr"),
             MergePrOutcome::Merged
         );
-        set_pr_ready(77, true).expect("ready");
-        open_pr_in_browser("feature").expect("open in browser");
+        set_pr_ready(77, true, None).expect("ready");
+        open_pr_in_browser("feature", None).expect("open in browser");
         assert!(is_gh_authenticated());
-        assert_eq!(repo_name().expect("repo name"), "org/repo");
-        assert_eq!(get_pr_body(123).expect("body"), "Body text");
+        assert_eq!(repo_name(None).expect("repo name"), "org/repo");
+        assert_eq!(get_pr_body(123, None).expect("body"), "Body text");
 
-        let status = get_pr_status("feature")
+        let status = get_pr_status("feature", None)
             .expect("pr status")
             .expect("some pr");
         assert_eq!(status.number, 55);
@@ -994,18 +1199,116 @@ esac
     }
 
     #[test]
+    fn gh_wrappers_append_repo_only_when_configured() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-repo-argv",
+            "gh",
+            r#"#!/bin/sh
+printf '%s' "$1" >> "$EZ_FAKE_GH_LOG"
+shift
+for arg in "$@"; do printf ' %s' "$arg" >> "$EZ_FAKE_GH_LOG"; done
+printf '\n' >> "$EZ_FAKE_GH_LOG"
+if [ "$1" = "create" ]; then
+  echo "https://github.com/upstream/repo/pull/77"
+elif [ "$1" = "view" ] && [ "$2" = "feature" ]; then
+  echo '{"number":55,"url":"https://github.com/upstream/repo/pull/55","state":"OPEN","title":"Feature PR","isDraft":false,"mergedAt":null,"baseRefName":"main"}'
+fi
+exit 0
+"#,
+        );
+        let log_path = fake_dir.join("args.log");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &log_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        create_pr(
+            "Title",
+            "Body",
+            "main",
+            "fork-owner:feature",
+            true,
+            Some("upstream/repo"),
+        )
+        .expect("create");
+        get_pr_status("feature", Some("upstream/repo")).expect("status");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+        }
+        let log = std::fs::read_to_string(log_path).expect("log");
+        assert!(log.contains(
+            "pr create --title Title --body Body --base main --head fork-owner:feature --draft --repo upstream/repo"
+        ));
+        assert!(log.contains(
+            "pr view feature --json number,url,state,title,isDraft,mergedAt,baseRefName --repo upstream/repo"
+        ));
+    }
+
+    #[test]
+    fn repo_name_prefers_configured_repo_without_invoking_gh() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-repo-config-no-exec",
+            "gh",
+            r#"#!/bin/sh
+echo "gh should not be invoked" >&2
+exit 1
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        assert_eq!(
+            repo_name(Some("upstream/repo")).expect("configured repo"),
+            "upstream/repo"
+        );
+    }
+
+    #[test]
+    fn configured_repo_names_must_be_owner_repo() {
+        for repo in ["", "owner", "owner/", "/repo", "owner/repo/extra"] {
+            let err = repo_name(Some(repo)).expect_err("invalid configured repo");
+            assert!(
+                err.to_string().contains("expected `OWNER/REPO`"),
+                "repo={repo}, err={err:#}"
+            );
+        }
+    }
+
+    #[test]
     fn gh_bulk_helpers_parse_fake_cli_output() {
         let _guard = take_env_lock();
         let fake_dir = install_fake_gh("bulk");
         let _path = PathGuard::install(&fake_dir);
 
-        let prs = get_all_pr_statuses();
+        let prs = get_all_pr_statuses(None);
         assert_eq!(prs.get("feat/reused").expect("reused").number, 10);
         assert_eq!(prs.get("feat/other").expect("other").base, "develop");
 
-        let ci = get_all_ci_statuses();
+        let ci = get_all_ci_statuses(None);
         assert_eq!(ci.get("feat/reused").expect("ci"), "✓");
         assert_eq!(ci.get("feat/other").expect("ci"), "⏳");
+    }
+
+    #[test]
+    fn graphql_helpers_use_configured_repo_instead_of_remote_discovery() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_gh("graphql-configured-repo");
+        let _path = PathGuard::install(&fake_dir);
+        let log_path = fake_dir.join("graphql.log");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &log_path);
+        }
+
+        let map = get_pr_statuses_for("missing-remote", Some("upstream/repo"), &["feat/merged"]);
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+        }
+        assert_eq!(map.get("feat/merged").expect("pr").number, 42);
+        let log = std::fs::read_to_string(log_path).expect("graphql log");
+        assert!(log.contains("\t-F\towner=upstream\t-F\tname=repo\t-f\tquery="));
     }
 
     #[test]
@@ -1024,7 +1327,7 @@ exit 0
         );
         let _path = PathGuard::install(&fake_dir);
 
-        let err = create_pr("Title", "Body", "main", "feature", false)
+        let err = create_pr("Title", "Body", "main", "feature", false, None)
             .expect_err("invalid PR URL should fail");
         assert!(
             err.to_string()
@@ -1049,7 +1352,7 @@ exit 0
         );
         let _path = PathGuard::install(&fake_dir);
 
-        let err = get_pr_status("feature").expect_err("bad json should bubble up");
+        let err = get_pr_status("feature", None).expect_err("bad json should bubble up");
         assert!(
             err.to_string().contains("key must be a string")
                 || err.to_string().contains("expected ident")
@@ -1070,7 +1373,7 @@ exit 0
         );
         let _path = PathGuard::install(&fake_dir);
 
-        let err = repo_name().expect_err("empty repo name should fail");
+        let err = repo_name(None).expect_err("empty repo name should fail");
         assert!(
             err.to_string()
                 .contains("could not determine repository name"),
@@ -1091,7 +1394,7 @@ exit 1
         );
         let _path = PathGuard::install(&fake_dir);
 
-        let err = merge_pr(12, "squash").expect_err("merge should fail");
+        let err = merge_pr(12, "squash", None).expect_err("merge should fail");
         assert!(
             err.to_string().contains("permission denied"),
             "unexpected error: {err:#}"
@@ -1126,7 +1429,7 @@ exit 2
         }
         let _path = PathGuard::install(&fake_dir);
 
-        let outcome = merge_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO)
+        let outcome = merge_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO, None)
             .expect("async merge");
 
         unsafe {
@@ -1174,7 +1477,7 @@ exit 2
         }
         let _path = PathGuard::install(&fake_dir);
 
-        let outcome = merge_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO)
+        let outcome = merge_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO, None)
             .expect("pending merge");
 
         unsafe {
@@ -1206,7 +1509,8 @@ exit 2
         let _path = PathGuard::install(&fake_dir);
 
         assert_eq!(
-            merge_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO).expect("enqueued"),
+            merge_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO, None)
+                .expect("enqueued"),
             MergePrOutcome::Enqueued
         );
     }
@@ -1232,7 +1536,7 @@ exit 2
         );
         let _path = PathGuard::install(&fake_dir);
 
-        let err = merge_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO)
+        let err = merge_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO, None)
             .expect_err("failed merge");
 
         assert!(
@@ -1270,7 +1574,7 @@ exit 2
         }
         let _path = PathGuard::install(&fake_dir);
 
-        let outcome = merge_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO)
+        let outcome = merge_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO, None)
             .expect("legacy fallback");
 
         unsafe {
@@ -1310,13 +1614,13 @@ exit 0
         );
         let _path = PathGuard::install(&fake_dir);
 
-        assert_eq!(get_ci_status("feature"), "");
+        assert_eq!(get_ci_status("feature", None), "");
     }
 
     #[test]
     fn ensure_native_stack_not_needed_for_fewer_than_two_prs() {
         assert_eq!(
-            ensure_native_stack(&[10]).expect("single pr"),
+            ensure_native_stack(&[10], None).expect("single pr"),
             NativeStackOutcome::NotNeeded
         );
     }
@@ -1341,7 +1645,7 @@ exit 2
         );
         let _path = PathGuard::install(&fake_dir);
 
-        let stack = native_stack_for_pr(20)
+        let stack = native_stack_for_pr(20, None)
             .expect("lookup")
             .expect("stack should exist");
 
@@ -1376,7 +1680,7 @@ exit 2
         );
         let _path = PathGuard::install(&fake_dir);
 
-        assert_eq!(native_stack_for_pr(20).expect("lookup"), None);
+        assert_eq!(native_stack_for_pr(20, None).expect("lookup"), None);
     }
 
     #[test]
@@ -1399,7 +1703,7 @@ exit 2
         );
         let _path = PathGuard::install(&fake_dir);
 
-        assert_eq!(native_stack_for_pr(20).expect("lookup"), None);
+        assert_eq!(native_stack_for_pr(20, None).expect("lookup"), None);
     }
 
     #[test]
@@ -1431,7 +1735,7 @@ exit 2
         }
         let _path = PathGuard::install(&fake_dir);
 
-        let outcome = ensure_native_stack(&[10, 20, 30]).expect("create stack");
+        let outcome = ensure_native_stack(&[10, 20, 30], None).expect("create stack");
 
         unsafe {
             std::env::remove_var("EZ_FAKE_GH_PAYLOAD");
@@ -1472,7 +1776,7 @@ exit 2
         }
         let _path = PathGuard::install(&fake_dir);
 
-        let outcome = ensure_native_stack(&[10, 20, 30, 40]).expect("extend stack");
+        let outcome = ensure_native_stack(&[10, 20, 30, 40], None).expect("extend stack");
 
         unsafe {
             std::env::remove_var("EZ_FAKE_GH_PAYLOAD");
@@ -1518,7 +1822,7 @@ exit 2
         }
         let _path = PathGuard::install(&fake_dir);
 
-        let outcome = ensure_native_stack(&[10, 20]).expect("unchanged stack");
+        let outcome = ensure_native_stack(&[10, 20], None).expect("unchanged stack");
 
         unsafe {
             std::env::remove_var("EZ_FAKE_GH_LOG");
@@ -1555,7 +1859,7 @@ exit 2
         }
         let _path = PathGuard::install(&fake_dir);
 
-        let outcome = ensure_native_stack(&[10, 20]).expect("partial prefix");
+        let outcome = ensure_native_stack(&[10, 20], None).expect("partial prefix");
 
         unsafe {
             std::env::remove_var("EZ_FAKE_GH_LOG");
@@ -1585,7 +1889,7 @@ exit 2
         let _path = PathGuard::install(&fake_dir);
 
         assert_eq!(
-            ensure_native_stack(&[10, 20]).expect("unavailable"),
+            ensure_native_stack(&[10, 20], None).expect("unavailable"),
             NativeStackOutcome::Unavailable
         );
     }
@@ -1618,7 +1922,7 @@ exit 2
         }
         let _path = PathGuard::install(&fake_dir);
 
-        let err = ensure_native_stack(&[10, 20, 30]).expect_err("divergence");
+        let err = ensure_native_stack(&[10, 20, 30], None).expect_err("divergence");
 
         unsafe {
             std::env::remove_var("EZ_FAKE_GH_LOG");
@@ -1692,6 +1996,119 @@ exit 2
         assert!(parse_owner_repo_from_remote_url("git@github.com:onyx-dot-app").is_none());
         // Total junk.
         assert!(parse_owner_repo_from_remote_url("not a url").is_none());
+    }
+
+    #[test]
+    fn pull_request_head_uses_explicit_fork_owner_when_fork_differs_from_target() {
+        assert_eq!(
+            pull_request_head(
+                "origin",
+                Some("upstream/project"),
+                Some("fork-owner/project"),
+                true,
+                "feat/x"
+            )
+            .expect("head"),
+            "fork-owner:feat/x"
+        );
+    }
+
+    #[test]
+    fn pull_request_head_leaves_same_repo_heads_unqualified() {
+        assert_eq!(
+            pull_request_head(
+                "origin",
+                Some("upstream/project"),
+                Some("upstream/project"),
+                false,
+                "feat/x"
+            )
+            .expect("head"),
+            "feat/x"
+        );
+    }
+
+    #[test]
+    fn pull_request_head_qualifies_parsed_push_remote_when_target_differs() {
+        let _guard = take_env_lock();
+        let repo = temp_dir("ez-pr-head-remote");
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repo)
+            .status()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "fork",
+                "https://github.com/fork-owner/project.git",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("remote add");
+        let _cwd = CwdGuard::enter(&repo);
+
+        assert_eq!(
+            pull_request_head("fork", Some("upstream/project"), None, true, "feat/x")
+                .expect("head"),
+            "fork-owner:feat/x"
+        );
+    }
+
+    #[test]
+    fn pull_request_head_errors_actionably_when_target_differs_and_owner_cannot_be_resolved() {
+        let _guard = take_env_lock();
+        let repo = temp_dir("ez-pr-head-alias");
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repo)
+            .status()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["remote", "add", "fork", "github-fork:fork-owner/project"])
+            .current_dir(&repo)
+            .status()
+            .expect("remote add");
+        let _cwd = CwdGuard::enter(&repo);
+
+        let err = pull_request_head("fork", Some("upstream/project"), None, true, "feat/x")
+            .expect_err("unparseable fork remote should require fork_repo");
+        assert!(
+            err.to_string().contains("set `fork_repo = \"OWNER/REPO\"`"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn pull_request_head_preserves_unqualified_head_for_unresolved_same_repo_workflow() {
+        let _guard = take_env_lock();
+        let repo = temp_dir("ez-pr-head-same-repo-alias");
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repo)
+            .status()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["remote", "add", "origin", "github-work:owner/project"])
+            .current_dir(&repo)
+            .status()
+            .expect("remote add");
+        let _cwd = CwdGuard::enter(&repo);
+
+        assert_eq!(
+            pull_request_head("origin", Some("owner/project"), None, false, "feat/x")
+                .expect("same-repo head"),
+            "feat/x"
+        );
+    }
+
+    #[test]
+    fn pull_request_head_without_target_repo_preserves_legacy_branch_head() {
+        assert_eq!(
+            pull_request_head("origin", None, None, false, "feat/x").expect("head"),
+            "feat/x"
+        );
     }
 
     #[test]
@@ -1808,7 +2225,7 @@ exit 2
         let empty_dir = temp_dir("ez-empty-path");
         let _path = PathGuard::install(&empty_dir);
 
-        let map = get_pr_statuses_for("origin", &[]);
+        let map = get_pr_statuses_for("origin", None, &[]);
         assert!(map.is_empty());
     }
 
@@ -1820,7 +2237,7 @@ exit 2
 
         // We pass three branches matching the fake gh's canned aliases:
         // b0 → merged, b1 → open, b2 → no PR.
-        let map = get_pr_statuses_for("origin", &["feat/merged", "feat/open", "feat/no-pr"]);
+        let map = get_pr_statuses_for("origin", None, &["feat/merged", "feat/open", "feat/no-pr"]);
 
         let merged = map.get("feat/merged").expect("merged branch present");
         assert_eq!(merged.number, 42);
@@ -1851,7 +2268,7 @@ exit 2
         }
         let branches: Vec<String> = (0..25).map(|i| format!("feat/b{i}")).collect();
         let refs: Vec<&str> = branches.iter().map(String::as_str).collect();
-        let _ = get_pr_statuses_for("origin", &refs);
+        let _ = get_pr_statuses_for("origin", None, &refs);
         unsafe {
             std::env::remove_var("EZ_FAKE_GH_LOG");
         }

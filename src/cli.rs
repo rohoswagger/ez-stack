@@ -164,6 +164,7 @@ Examples:
   ez push --draft
   ez push --pr
   ez push --no-pr
+  ez push --remote fork --repo upstream-owner/project --fork-repo fork-owner/project
   ez push --stack
   ez push -am \"feat: add auth\"
   ez push -Am \"feat: add auth and new snapshots\"")]
@@ -200,6 +201,18 @@ Examples:
         #[arg(long)]
         base: Option<String>,
 
+        /// Override the git remote to push to for this command only
+        #[arg(long)]
+        remote: Option<String>,
+
+        /// Override the GitHub repo targeted by PR operations for this command only
+        #[arg(long)]
+        repo: Option<String>,
+
+        /// Override the fork GitHub repo used as the PR head for this command only
+        #[arg(long)]
+        fork_repo: Option<String>,
+
         /// Push all branches in the stack (equivalent to ez submit)
         #[arg(long)]
         stack: bool,
@@ -227,6 +240,7 @@ Examples:
 Examples:
   ez submit
   ez submit --draft
+  ez submit --remote fork --repo upstream-owner/project --fork-repo fork-owner/project
 
 Note: --draft only affects newly created PRs. Existing PRs are not changed.
 Use `ez ready` to undraft an existing PR.")]
@@ -250,6 +264,18 @@ Use `ez ready` to undraft an existing PR.")]
         /// PR body from file
         #[arg(long)]
         body_file: Option<String>,
+
+        /// Override the git remote to push to for this command only
+        #[arg(long)]
+        remote: Option<String>,
+
+        /// Override the GitHub repo targeted by PR operations for this command only
+        #[arg(long)]
+        repo: Option<String>,
+
+        /// Override the fork GitHub repo used as the PR head for this command only
+        #[arg(long)]
+        fork_repo: Option<String>,
     },
 
     /// Fetch trunk, detect merged PRs, clean up, and restack
@@ -646,8 +672,10 @@ Examples:
 Examples:
   ez config set trunk develop
   ez config set remote fork
+  ez config set upstream_remote upstream
   ez config set default_from dev
   ez config set repo owner/name
+  ez config set fork_repo fork-owner/name
   ez config set draft true
   ez config set no_pr true
   ez config set rerere true")]
@@ -657,6 +685,17 @@ Examples:
 
         /// New value
         value: String,
+    },
+
+    /// Unset an optional config key
+    #[command(after_help = "\
+Examples:
+  ez config unset upstream_remote
+  ez config unset fork_repo
+  ez config unset draft")]
+    Unset {
+        /// Config key to unset
+        key: String,
     },
 }
 
@@ -1009,6 +1048,9 @@ mod tests {
                 stage_all_files,
                 no_pr,
                 no_draft,
+                remote,
+                repo,
+                fork_repo,
                 ..
             } => {
                 assert_eq!(message.as_deref(), Some("feat: ship new files"));
@@ -1016,6 +1058,9 @@ mod tests {
                 assert!(stage_all_files);
                 assert!(!no_pr);
                 assert!(!no_draft);
+                assert!(remote.is_none());
+                assert!(repo.is_none());
+                assert!(fork_repo.is_none());
             }
             _ => panic!("expected push command"),
         }
@@ -1088,6 +1133,64 @@ mod tests {
             } => {
                 assert!(no_draft);
                 assert!(!draft);
+            }
+            _ => panic!("expected submit command"),
+        }
+    }
+
+    #[test]
+    fn parses_push_fork_target_overrides() {
+        let cli = Cli::try_parse_from([
+            "ez",
+            "push",
+            "--remote",
+            "fork",
+            "--repo",
+            "upstream-owner/project",
+            "--fork-repo",
+            "fork-owner/project",
+        ])
+        .expect("parse push fork target overrides");
+
+        match cli.command {
+            Commands::Push {
+                remote,
+                repo,
+                fork_repo,
+                ..
+            } => {
+                assert_eq!(remote.as_deref(), Some("fork"));
+                assert_eq!(repo.as_deref(), Some("upstream-owner/project"));
+                assert_eq!(fork_repo.as_deref(), Some("fork-owner/project"));
+            }
+            _ => panic!("expected push command"),
+        }
+    }
+
+    #[test]
+    fn parses_submit_fork_target_overrides() {
+        let cli = Cli::try_parse_from([
+            "ez",
+            "submit",
+            "--remote",
+            "fork",
+            "--repo",
+            "upstream-owner/project",
+            "--fork-repo",
+            "fork-owner/project",
+        ])
+        .expect("parse submit fork target overrides");
+
+        match cli.command {
+            Commands::Submit {
+                remote,
+                repo,
+                fork_repo,
+                ..
+            } => {
+                assert_eq!(remote.as_deref(), Some("fork"));
+                assert_eq!(repo.as_deref(), Some("upstream-owner/project"));
+                assert_eq!(fork_repo.as_deref(), Some("fork-owner/project"));
             }
             _ => panic!("expected submit command"),
         }

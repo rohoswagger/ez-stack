@@ -192,8 +192,15 @@ fn adoption_parent_head(branch: &str, parent: &str) -> Result<String> {
     git::merge_base(branch, parent)
 }
 
-fn expand_ancestor_chains(prs: &mut HashMap<String, github::PrInfo>, remote: &str, trunk: &str) {
-    expand_ancestor_chains_with(prs, trunk, |refs| github::get_pr_statuses_for(remote, refs));
+fn expand_ancestor_chains(
+    prs: &mut HashMap<String, github::PrInfo>,
+    remote: &str,
+    repo: Option<&str>,
+    trunk: &str,
+) {
+    expand_ancestor_chains_with(prs, trunk, |refs| {
+        github::get_pr_statuses_for(remote, repo, refs)
+    });
 }
 
 fn expand_ancestor_chains_with<F>(
@@ -240,44 +247,47 @@ fn orphan_local_prs<'a>(prs: &'a HashMap<String, github::PrInfo>, trunk: &str) -
     orphans
 }
 
-fn fetch_local_prs(remote: &str) -> Result<HashMap<String, github::PrInfo>> {
+fn fetch_local_prs(remote: &str, repo: Option<&str>) -> Result<HashMap<String, github::PrInfo>> {
     let local = git::branch_list().unwrap_or_default();
     if local.is_empty() {
         return Ok(HashMap::new());
     }
     let refs: Vec<&str> = local.iter().map(String::as_str).collect();
-    let mut prs = github::get_pr_statuses_for(remote, &refs);
+    let mut prs = github::get_pr_statuses_for(remote, repo, &refs);
     prs.retain(|_, pr| is_active_pr(pr));
     Ok(prs)
 }
 
 fn fetch_prs_by_number(
     remote: &str,
+    repo: Option<&str>,
     trunk: &str,
     number: u64,
 ) -> Result<(String, HashMap<String, github::PrInfo>)> {
-    let (head, pr) = github::get_pr_by_number(remote, number).ok_or_else(|| {
+    let (head, pr) = github::get_pr_by_number(remote, repo, number).ok_or_else(|| {
         anyhow::anyhow!("PR #{number} not found — make sure it exists and is accessible")
     })?;
     let title = pr.title.clone();
     let mut prs = HashMap::new();
     prs.insert(head, pr);
-    expand_ancestor_chains(&mut prs, remote, trunk);
+    expand_ancestor_chains(&mut prs, remote, repo, trunk);
     prs.retain(|_, p| is_active_pr(p));
     Ok((title, prs))
 }
 
 fn fetch_candidates_by_pr_number(
     remote: &str,
+    repo: Option<&str>,
     trunk: &str,
     number: u64,
+    use_native_stack: bool,
 ) -> Result<(String, Option<u64>, Vec<AdoptCandidate>)> {
-    if let Some(native_stack) = github::native_stack_for_pr(number)? {
+    if use_native_stack && let Some(native_stack) = github::native_stack_for_pr(number, repo)? {
         let mut ordered_prs = Vec::new();
         let mut requested_title = None;
 
         for pr_number in &native_stack.pull_requests {
-            let (head, pr) = github::get_pr_by_number(remote, *pr_number).ok_or_else(|| {
+            let (head, pr) = github::get_pr_by_number(remote, repo, *pr_number).ok_or_else(|| {
                 anyhow::anyhow!(
                     "PR #{pr_number} from native stack #{} not found — make sure it exists and is accessible",
                     native_stack.number
@@ -298,7 +308,7 @@ fn fetch_candidates_by_pr_number(
         ));
     }
 
-    let (title, prs) = fetch_prs_by_number(remote, trunk, number)?;
+    let (title, prs) = fetch_prs_by_number(remote, repo, trunk, number)?;
     Ok((title, None, build_adopt_graph(trunk, &prs)))
 }
 
@@ -628,8 +638,13 @@ pub fn run(pr: Option<u64>, specific_branches: &[String], no_worktrees: bool) ->
 
     let (candidates, native_stack_number, explicit_chain) = if let Some(pr_number) = pr {
         let sp = ui::spinner(&format!("Fetching PR #{pr_number} and its chain..."));
-        let (title, native_stack_number, graph) =
-            fetch_candidates_by_pr_number(&state.remote, &state.trunk, pr_number)?;
+        let (title, native_stack_number, graph) = fetch_candidates_by_pr_number(
+            state.fetch_remote(),
+            state.repo.as_deref(),
+            &state.trunk,
+            pr_number,
+            !state.is_fork_workflow(),
+        )?;
         sp.finish_and_clear();
 
         if graph.is_empty() {
@@ -643,7 +658,8 @@ pub fn run(pr: Option<u64>, specific_branches: &[String], no_worktrees: bool) ->
     } else if !specific_branches.is_empty() {
         let prs = if gh_authenticated {
             let refs: Vec<&str> = specific_branches.iter().map(String::as_str).collect();
-            let mut prs = github::get_pr_statuses_for(&state.remote, &refs);
+            let mut prs =
+                github::get_pr_statuses_for(state.fetch_remote(), state.repo.as_deref(), &refs);
             prs.retain(|_, pr| is_active_pr(pr));
             prs
         } else {
@@ -657,7 +673,12 @@ pub fn run(pr: Option<u64>, specific_branches: &[String], no_worktrees: bool) ->
         if all_have_open_pr {
             let sp = ui::spinner("Fetching PRs for named branches...");
             let mut prs = prs;
-            expand_ancestor_chains(&mut prs, &state.remote, &state.trunk);
+            expand_ancestor_chains(
+                &mut prs,
+                state.fetch_remote(),
+                state.repo.as_deref(),
+                &state.trunk,
+            );
             prs.retain(|_, pr| is_active_pr(pr));
             sp.finish_and_clear();
 
@@ -691,7 +712,7 @@ pub fn run(pr: Option<u64>, specific_branches: &[String], no_worktrees: bool) ->
         // deliberately don't auto-expand to the remote chain, since that
         // would silently re-introduce per-PR network cost in large repos.
         let sp = ui::spinner("Fetching PRs for local branches...");
-        let prs = fetch_local_prs(&state.remote)?;
+        let prs = fetch_local_prs(state.fetch_remote(), state.repo.as_deref())?;
         sp.finish_and_clear();
 
         if prs.is_empty() {
@@ -722,7 +743,7 @@ pub fn run(pr: Option<u64>, specific_branches: &[String], no_worktrees: bool) ->
         (graph, None, false)
     };
     validate_managed_adopt_candidates(&state, &candidates, native_stack_number)?;
-    let candidate_refs = fetch_and_validate_candidate_refs(&state.remote, &candidates)?;
+    let candidate_refs = fetch_and_validate_candidate_refs(state.fetch_remote(), &candidates)?;
 
     ui::header(&format!("Found {} branch(es) to adopt", candidates.len()));
     for c in &candidates {
@@ -1249,7 +1270,8 @@ exit 2
         let _path = PathGuard::install(&fake_dir);
 
         let (title, native_stack_number, candidates) =
-            fetch_candidates_by_pr_number("origin", "main", 20).expect("fetch native candidates");
+            fetch_candidates_by_pr_number("origin", None, "main", 20, true)
+                .expect("fetch native candidates");
 
         unsafe {
             std::env::remove_var("EZ_FAKE_GH_LOG");

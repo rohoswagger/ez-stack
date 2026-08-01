@@ -26,7 +26,7 @@ pub fn run(ready: bool) -> Result<()> {
         ))
     })?;
 
-    github::set_pr_ready(pr_number, ready)?;
+    github::set_pr_ready(pr_number, ready, state.repo.as_deref())?;
 
     if ready {
         ui::success(&format!("PR #{pr_number} marked as ready for review"));

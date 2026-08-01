@@ -9,10 +9,18 @@ const KNOWN_KEYS: &[(&str, &str)] = &[
     ("trunk", "Trunk branch name (e.g. main, master, develop)"),
     ("remote", "Default git remote (e.g. origin, fork, upstream)"),
     (
+        "upstream_remote",
+        "Git remote to fetch trunk and PR refs from (defaults to remote)",
+    ),
+    (
         "default_from",
         "Default parent for `ez create` when on trunk",
     ),
     ("repo", "GitHub repo for PR operations (owner/name)"),
+    (
+        "fork_repo",
+        "GitHub fork repo used as PR head repository (owner/name)",
+    ),
     ("draft", "Default new PRs to draft (true/false)"),
     ("no_pr", "Default push to skip PR creation (true/false)"),
     (
@@ -23,6 +31,16 @@ const KNOWN_KEYS: &[(&str, &str)] = &[
 
 /// Keys that accept only boolean values.
 const BOOL_KEYS: &[&str] = &["draft", "no_pr", "rerere"];
+const OPTIONAL_KEYS: &[&str] = &[
+    "upstream_remote",
+    "default_from",
+    "repo",
+    "fork_repo",
+    "draft",
+    "no_pr",
+    "rerere",
+];
+const REPO_KEYS: &[&str] = &["repo", "fork_repo"];
 
 fn is_known_key(key: &str) -> bool {
     KNOWN_KEYS.iter().any(|(k, _)| *k == key)
@@ -30,6 +48,22 @@ fn is_known_key(key: &str) -> bool {
 
 fn is_bool_key(key: &str) -> bool {
     BOOL_KEYS.contains(&key)
+}
+
+fn is_optional_key(key: &str) -> bool {
+    OPTIONAL_KEYS.contains(&key)
+}
+
+fn is_repo_key(key: &str) -> bool {
+    REPO_KEYS.contains(&key)
+}
+
+fn known_keys_list() -> String {
+    KNOWN_KEYS
+        .iter()
+        .map(|(k, _)| *k)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Parse a user-supplied string as a boolean.
@@ -42,6 +76,26 @@ fn parse_bool(value: &str) -> Result<bool> {
             "invalid boolean value `{value}`\n  → Accepted values: true, false, 1, 0, yes, no"
         ))),
     }
+}
+
+fn validate_repo_name(value: &str) -> Result<()> {
+    let Some((owner, repo)) = value.split_once('/') else {
+        bail!(EzError::UserMessage(format!(
+            "invalid GitHub repo `{value}`\n  → Expected owner/name"
+        )));
+    };
+    if value.trim() != value
+        || owner.is_empty()
+        || repo.is_empty()
+        || repo.contains('/')
+        || owner.chars().any(char::is_whitespace)
+        || repo.chars().any(char::is_whitespace)
+    {
+        bail!(EzError::UserMessage(format!(
+            "invalid GitHub repo `{value}`\n  → Expected owner/name"
+        )));
+    }
+    Ok(())
 }
 
 pub fn list() -> Result<()> {
@@ -66,11 +120,7 @@ pub fn get(key: &str) -> Result<()> {
     if !is_known_key(key) {
         bail!(EzError::UserMessage(format!(
             "unknown config key `{key}`\n  → Known keys: {}",
-            KNOWN_KEYS
-                .iter()
-                .map(|(k, _)| *k)
-                .collect::<Vec<_>>()
-                .join(", ")
+            known_keys_list()
         )));
     }
 
@@ -92,11 +142,7 @@ pub fn set(key: &str, value: &str) -> Result<()> {
     if !is_known_key(key) {
         bail!(EzError::UserMessage(format!(
             "unknown config key `{key}`\n  → Known keys: {}",
-            KNOWN_KEYS
-                .iter()
-                .map(|(k, _)| *k)
-                .collect::<Vec<_>>()
-                .join(", ")
+            known_keys_list()
         )));
     }
 
@@ -127,12 +173,45 @@ pub fn set(key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn unset(key: &str) -> Result<()> {
+    if !is_known_key(key) {
+        bail!(EzError::UserMessage(format!(
+            "unknown config key `{key}`\n  → Known keys: {}",
+            known_keys_list()
+        )));
+    }
+    if !is_optional_key(key) {
+        bail!(EzError::UserMessage(format!(
+            "config key `{key}` cannot be unset\n  → Set it to a new value with: ez config set {key} <value>"
+        )));
+    }
+
+    let mut state = StackState::load()?;
+    let old_value = get_value(&state, key);
+    unset_value(&mut state, key)?;
+    state.save()?;
+
+    match old_value {
+        Some(old) => ui::success(&format!("{key}: {old} → (not set)")),
+        None => ui::info(&format!("{key} is already unset")),
+    }
+
+    ui::receipt(&serde_json::json!({
+        "cmd": "config unset",
+        "key": key,
+    }));
+
+    Ok(())
+}
+
 fn get_value(state: &StackState, key: &str) -> Option<String> {
     match key {
         "trunk" => Some(state.trunk.clone()),
         "remote" => Some(state.remote.clone()),
+        "upstream_remote" => state.upstream_remote.clone(),
         "default_from" => state.default_from.clone(),
         "repo" => state.repo.clone(),
+        "fork_repo" => state.fork_repo.clone(),
         "draft" => state.draft.map(|v| v.to_string()),
         "no_pr" => state.no_pr.map(|v| v.to_string()),
         "rerere" => state.rerere.map(|v| v.to_string()),
@@ -145,6 +224,9 @@ fn set_value(state: &mut StackState, key: &str, value: &str) -> Result<()> {
     if is_bool_key(key) {
         let _ = parse_bool(value)?;
     }
+    if is_repo_key(key) {
+        validate_repo_name(value)?;
+    }
 
     match key {
         "trunk" => {
@@ -153,11 +235,17 @@ fn set_value(state: &mut StackState, key: &str, value: &str) -> Result<()> {
         "remote" => {
             state.remote = value.to_string();
         }
+        "upstream_remote" => {
+            state.upstream_remote = Some(value.to_string());
+        }
         "default_from" => {
             state.default_from = Some(value.to_string());
         }
         "repo" => {
             state.repo = Some(value.to_string());
+        }
+        "fork_repo" => {
+            state.fork_repo = Some(value.to_string());
         }
         "draft" => {
             state.draft = Some(parse_bool(value)?);
@@ -177,6 +265,25 @@ fn set_value(state: &mut StackState, key: &str, value: &str) -> Result<()> {
         _ => {
             bail!(EzError::UserMessage(format!("unknown config key `{key}`")));
         }
+    }
+    Ok(())
+}
+
+fn unset_value(state: &mut StackState, key: &str) -> Result<()> {
+    match key {
+        "upstream_remote" => state.upstream_remote = None,
+        "default_from" => state.default_from = None,
+        "repo" => state.repo = None,
+        "fork_repo" => state.fork_repo = None,
+        "draft" => state.draft = None,
+        "no_pr" => state.no_pr = None,
+        "rerere" => {
+            state.rerere = None;
+            disable_rerere();
+        }
+        _ => bail!(EzError::UserMessage(format!(
+            "config key `{key}` cannot be unset"
+        ))),
     }
     Ok(())
 }
@@ -264,6 +371,8 @@ mod tests {
         let state = StackState::load().unwrap();
         assert_eq!(get_value(&state, "default_from"), None);
         assert_eq!(get_value(&state, "repo"), None);
+        assert_eq!(get_value(&state, "upstream_remote"), None);
+        assert_eq!(get_value(&state, "fork_repo"), None);
     }
 
     #[test]
@@ -319,6 +428,55 @@ mod tests {
     }
 
     #[test]
+    fn set_updates_upstream_remote_and_fork_repo() {
+        let _guard = take_env_lock();
+        let (_repo, _cwd) = setup_state();
+
+        let mut state = StackState::load().unwrap();
+        set_value(&mut state, "upstream_remote", "upstream").unwrap();
+        set_value(&mut state, "fork_repo", "fork-owner/repo").unwrap();
+        state.save().unwrap();
+
+        let reloaded = StackState::load().unwrap();
+        assert_eq!(reloaded.upstream_remote, Some("upstream".to_string()));
+        assert_eq!(reloaded.fork_repo, Some("fork-owner/repo".to_string()));
+    }
+
+    #[test]
+    fn repo_keys_require_owner_name() {
+        let _guard = take_env_lock();
+        let (_repo, _cwd) = setup_state();
+
+        let mut state = StackState::load().unwrap();
+        let err = set_value(&mut state, "repo", "owner-only").expect_err("should reject");
+        assert!(err.to_string().contains("Expected owner/name"));
+        let err =
+            set_value(&mut state, "fork_repo", "owner/repo/extra").expect_err("should reject");
+        assert!(err.to_string().contains("Expected owner/name"));
+    }
+
+    #[test]
+    fn unset_optional_key_clears_value() {
+        let _guard = take_env_lock();
+        let (_repo, _cwd) = setup_state();
+
+        let mut state = StackState::load().unwrap();
+        set_value(&mut state, "fork_repo", "fork-owner/repo").unwrap();
+        unset_value(&mut state, "fork_repo").unwrap();
+        assert_eq!(state.fork_repo, None);
+    }
+
+    #[test]
+    fn unset_required_key_fails() {
+        let _guard = take_env_lock();
+        let (_repo, _cwd) = setup_state();
+
+        let mut state = StackState::load().unwrap();
+        let err = unset_value(&mut state, "remote").expect_err("should fail");
+        assert!(err.to_string().contains("cannot be unset"));
+    }
+
+    #[test]
     fn unknown_key_returns_none() {
         let _guard = take_env_lock();
         let (_repo, _cwd) = setup_state();
@@ -341,8 +499,10 @@ mod tests {
     fn is_known_key_works() {
         assert!(is_known_key("trunk"));
         assert!(is_known_key("remote"));
+        assert!(is_known_key("upstream_remote"));
         assert!(is_known_key("default_from"));
         assert!(is_known_key("repo"));
+        assert!(is_known_key("fork_repo"));
         assert!(is_known_key("draft"));
         assert!(is_known_key("no_pr"));
         assert!(is_known_key("rerere"));

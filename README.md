@@ -115,6 +115,52 @@ ez sync                          # cleans up, restacks remaining branches
 
 `ez sync` reconciles those native GitHub stacks after it fetches trunk, removes merged worktree layers, and restacks the surviving branches. Ez's local model is deliberately richer than GitHub's: independent linear components are linked separately, PR-less local layers split native chains, and branching worktree graphs are reported and left untouched rather than flattened into a false linear order. Native-stack API errors are non-destructive—the local Git/worktree sync remains successful and emits a structured receipt describing the skipped GitHub action.
 
+### Fork/upstream GitHub workflows
+
+Fork workflows keep push transport, upstream GitHub targeting, and local
+worktrees separate:
+
+```bash
+git remote add upstream git@github.com:upstream-owner/project.git
+git remote add fork git@github.com:my-user/project.git
+
+ez config set remote fork
+ez config set upstream_remote upstream
+ez config set repo upstream-owner/project
+ez config set fork_repo my-user/project
+```
+
+| Setting | Meaning |
+|---------|---------|
+| `remote` | Git push destination for stack branches. |
+| `upstream_remote` | Trunk and PR-ref fetch remote. Defaults to `remote`. |
+| `repo` | Upstream/base GitHub repo for PRs, statuses, merge, adopt, and native-stack inspection. |
+| `fork_repo` | Fork GitHub repo used to qualify PR heads as `owner:branch`. |
+
+With that config, `ez push` pushes the current branch to `fork`, then creates
+or updates the PR in `upstream-owner/project` with a head like
+`my-user:feat/auth`. `ez submit` does the same for every branch in the stack.
+The ordinary stacked PR base chain remains fully supported, and `ez sync` still
+fetches trunk from `upstream`, cleans merged layers, and restacks each linked
+worktree.
+
+For one-off targeting, pass temporary overrides:
+
+```bash
+ez push --remote fork --repo upstream-owner/project --fork-repo my-user/project
+ez submit --remote fork --repo upstream-owner/project --fork-repo my-user/project
+```
+
+CLI overrides affect only that invocation; they are not written to
+`.git/ez/stack.json`. Existing repositories that only set `remote` keep the old
+behavior: fetch, push, and GitHub PR operations all derive from that remote
+unless `repo` is configured.
+
+GitHub's native stacked PR API currently requires all stacked PR branches to
+live in the same repository. For fork or other cross-repository stacks, ez
+deliberately skips the native-stack API and reports `not_applicable`; local
+worktree sync and ordinary base-chained PRs continue.
+
 ## Scope Guard
 
 Keep an agent focused on the files a branch is supposed to touch:
@@ -156,7 +202,7 @@ Use `--hook <name>` for project-specific hooks, or `--hook` alone to list availa
 | `ez list` | Dashboard for all local branches: PRs, CI, age, ports, and working tree state. `--json` for machine output. |
 | `ez delete [name]` | Delete branch + worktree. Auto-detects worktrees and best-effort stops listeners on the branch dev port. `--yes` for agents. |
 | `ez fold [branch] --yes` | Locally fold one PR-less stack layer into its parent without rewriting commits. Removes the folded local worktree/branch, reparents children, and preserves remotes. |
-| `ez push` | Push + create/update PR. `-am "msg"` to stage+commit+push in one step. `--no-pr` skips PR updates, `--pr` overrides `no_pr` config. |
+| `ez push` | Push + create/update PR. `-am "msg"` to stage+commit+push in one step. `--no-pr` skips PR updates, `--pr` overrides `no_pr` config. `--remote`, `--repo`, and `--fork-repo` temporarily override fork/upstream targeting. |
 
 ### Committing
 
@@ -237,16 +283,17 @@ local PR segment. JSON adds `native_stack.provider`, `preview`, `state`,
 ordered `pull_requests`.
 
 States are `in_sync`, `diverged`, `not_linked`, `unavailable` (public-preview
-404), `unrepresentable` (branching or invalid local graph), `not_applicable`,
-and `error`. This is the worktree-native moat: the local graph stays
-authoritative, GitHub native stacks remain the collaboration/merge layer, and
-divergence is reported instead of flattened or cached.
+404), `unrepresentable` (branching or invalid local graph), `not_applicable`
+(no applicable PR segment or fork/cross-repository stack), and `error`. This is
+the worktree-native moat: the local graph stays authoritative, GitHub native
+stacks remain the collaboration/merge layer when they apply, and divergence is
+reported instead of flattened or cached.
 
 ### PRs
 
 | Command | Description |
 |---------|-------------|
-| `ez submit` | Atomically push entire stack, create/update all PRs, and link native GitHub stacks when available |
+| `ez submit` | Atomically push entire stack, create/update all PRs, and link native GitHub stacks when available. `--remote`, `--repo`, and `--fork-repo` temporarily override fork/upstream targeting. |
 | `ez pr-link` | Print PR URL to stdout |
 | `ez pr-edit --title "..." --body "..."` | Edit PR metadata |
 | `ez draft` / `ez ready` | Toggle PR draft status |
@@ -386,7 +433,7 @@ linear history. If any affected worktree is dirty or a descendant is stale,
 |---------|-------------|
 | `ez init --yes` | Initialize ez and accept recommended non-interactive defaults |
 | `ez setup --yes` | Configure shell integration |
-| `ez config list/get/set` | View or update repo settings such as `default_from`, `draft`, `no_pr`, and `rerere` |
+| `ez config list/get/set/unset` | View or update repo settings such as `remote`, `upstream_remote`, `repo`, `fork_repo`, `default_from`, `draft`, `no_pr`, and `rerere` |
 | `ez skill install` | Install the ez-workflow skill for AI agents |
 | `ez update` | Update to latest version |
 

@@ -65,13 +65,17 @@ pub fn run(json: bool, native_stack: bool) -> Result<()> {
             .map(|tip| tip != meta.parent_head)
             .unwrap_or(false);
 
-        let pr_status = github::get_pr_status(&current).unwrap_or(None);
+        let pr_status = meta.pr_number.and_then(|number| {
+            github::get_pr_status(&number.to_string(), state.repo.as_deref())
+                .ok()
+                .flatten()
+        });
         let pr_number_val: serde_json::Value = match meta.pr_number {
             Some(n) => serde_json::Value::Number(n.into()),
             None => serde_json::Value::Null,
         };
         let pr_url_val: serde_json::Value = match meta.pr_number {
-            Some(n) => match github::repo_name().ok() {
+            Some(n) => match github::repo_name(state.repo.as_deref()).ok() {
                 Some(repo) => {
                     serde_json::Value::String(format!("https://github.com/{repo}/pull/{n}"))
                 }
@@ -224,7 +228,7 @@ pub fn run(json: bool, native_stack: bool) -> Result<()> {
 
     // PR status
     if let Some(pr_number) = meta.pr_number {
-        match github::get_pr_status(&current) {
+        match github::get_pr_status(&pr_number.to_string(), state.repo.as_deref()) {
             Ok(Some(pr)) => {
                 let badge = ui::pr_badge(pr.number, &pr.state, pr.is_draft);
                 let state_label = if pr.is_draft {

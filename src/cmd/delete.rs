@@ -93,7 +93,7 @@ pub fn run(branch: Option<&str>, force: bool, yes: bool) -> Result<()> {
         for child_name in &children {
             let child = state.get_branch(child_name)?;
             if let Some(child_pr) = child.pr_number
-                && let Err(e) = github::update_pr_base(child_pr, &new_base)
+                && let Err(e) = github::update_pr_base(child_pr, &new_base, state.repo.as_deref())
             {
                 ui::warn(&format!("Failed to update PR base for `{child_name}`: {e}"));
             }
@@ -300,7 +300,7 @@ fn delete_with_worktree(
     if pr_number.is_some() {
         for (child_name, child_pr) in &child_prs {
             if let Some(pr) = child_pr {
-                if let Err(e) = github::update_pr_base(*pr, &parent) {
+                if let Err(e) = github::update_pr_base(*pr, &parent, state.repo.as_deref()) {
                     ui::warn(&format!("Failed to update PR base for `{child_name}`: {e}"));
                 }
             }

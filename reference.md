@@ -62,7 +62,7 @@ Native stack states:
 | `not_linked` | Local PR segment is not currently linked as a GitHub native stack. |
 | `unavailable` | GitHub returned public-preview 404 for the stack endpoint. |
 | `unrepresentable` | Local graph is branching or invalid for a linear native stack. |
-| `not_applicable` | The current branch/entry has no applicable local PR segment. |
+| `not_applicable` | The current branch/entry has no applicable local PR segment, or the stack crosses repositories and cannot use GitHub's native stack API. |
 | `error` | GitHub inspection failed for another reason. |
 
 JSON adds a `native_stack` object only when `--native-stack` is supplied. It
@@ -93,6 +93,7 @@ would require that path handoff exits 5 before mutation and prints a manual
 | Intent | Command |
 |--------|---------|
 | Push current branch and create/update PR | `ez push` |
+| Push to a fork and create/update PRs in upstream | `ez push --remote fork --repo upstream-owner/project --fork-repo my-user/project` |
 | Push without creating/updating PR | `ez push --no-pr` |
 | Force PR creation when `no_pr` config is true | `ez push --pr` |
 | Print PR URL to stdout | `ez pr-link` |
@@ -101,6 +102,43 @@ would require that path handoff exits 5 before mutation and prints a manual
 | Merge bottom PR | `ez merge` |
 | Merge non-interactively | `ez merge --yes` |
 | Merge current linear stack bottom-to-top | `ez merge --stack --yes` |
+| Push the current stack through a fork | `ez submit --remote fork --repo upstream-owner/project --fork-repo my-user/project` |
+
+### Fork/upstream targeting
+
+Configure fork-based contribution once per repository:
+
+```bash
+git remote add upstream git@github.com:upstream-owner/project.git
+git remote add fork git@github.com:my-user/project.git
+
+ez config set remote fork
+ez config set upstream_remote upstream
+ez config set repo upstream-owner/project
+ez config set fork_repo my-user/project
+```
+
+The settings have separate responsibilities:
+
+| Setting | Responsibility |
+|---------|----------------|
+| `remote` | Push destination for local stack branches. |
+| `upstream_remote` | Fetch source for trunk and PR refs. Falls back to `remote`. |
+| `repo` | GitHub owner/name for PR create/update/view/edit/ready, statuses, adopt, merge, and native-stack inspection. |
+| `fork_repo` | GitHub owner/name used to qualify PR heads as `owner:branch` when creating fork PRs. |
+
+`ez push` and `ez submit` accept `--remote`, `--repo`, and `--fork-repo` for
+one invocation. These overrides do not persist to `.git/ez/stack.json`; use
+`ez config set` for durable defaults. Repositories without `upstream_remote` or
+`fork_repo` keep the previous behavior. When `repo` is not configured, ez still
+derives the GitHub repository from the configured push remote.
+
+GitHub's native stacked PR API is same-repository only. If `fork_repo` targets a
+different repository from `repo`, or the push remote clearly targets a different
+repository from the upstream repo, ez reports native stack state as
+`not_applicable` and skips native-stack mutation. The ordinary base-chained PR
+stack, worktree fleet, `sync`, `adopt`, and `merge` workflows remain available
+against the upstream GitHub repo.
 
 ## Syncing
 
@@ -160,6 +198,10 @@ registered paths are never recursively deleted.
 | List repo config | `ez config list` |
 | Read repo config | `ez config get default_from` |
 | Update repo config | `ez config set draft true` |
+| Configure fork push remote | `ez config set remote fork` |
+| Configure upstream fetch remote | `ez config set upstream_remote upstream` |
+| Configure upstream GitHub repo | `ez config set repo upstream-owner/project` |
+| Configure fork GitHub repo | `ez config set fork_repo my-user/project` |
 | Update ez | `ez update` |
 | Check for updates | `ez update --check` |
 

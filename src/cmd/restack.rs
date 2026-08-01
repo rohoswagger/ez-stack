@@ -377,10 +377,11 @@ pub fn run() -> Result<()> {
     let original_branch = git::current_branch()?;
     let current_root = git::repo_root()?;
 
-    ui::info(&format!("Fetching from `{}`...", state.remote));
-    git::fetch(&state.remote)?;
+    let fetch_remote = state.fetch_remote().to_string();
+    ui::info(&format!("Fetching from `{fetch_remote}`..."));
+    git::fetch(&fetch_remote)?;
     match git::update_branch_to_latest_remote(
-        &state.remote,
+        &fetch_remote,
         &state.trunk,
         &original_branch,
         &current_root,

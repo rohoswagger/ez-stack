@@ -135,18 +135,20 @@ pub fn run(json: bool) -> Result<()> {
     let has_any_branches = !branch_specs.is_empty();
     let branch_names_for_prs: Vec<String> =
         branch_specs.iter().map(|(name, ..)| name.clone()).collect();
-    let remote_for_prs = state.remote.clone();
+    let remote_for_prs = state.fetch_remote().to_string();
+    let repo_for_prs = state.repo.clone();
     let pr_handle = thread::spawn(move || {
         if has_any_branches {
             let refs: Vec<&str> = branch_names_for_prs.iter().map(String::as_str).collect();
-            github::get_pr_statuses_for(&remote_for_prs, &refs)
+            github::get_pr_statuses_for(&remote_for_prs, repo_for_prs.as_deref(), &refs)
         } else {
             HashMap::new()
         }
     });
+    let repo_for_ci = state.repo.clone();
     let ci_handle = thread::spawn(move || {
         if has_any_branches {
-            github::get_all_ci_statuses()
+            github::get_all_ci_statuses(repo_for_ci.as_deref())
         } else {
             HashMap::new()
         }

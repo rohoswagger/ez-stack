@@ -71,6 +71,20 @@ fn skipped_native_stack_receipt(component: &SkippedNativeStackComponent) -> serd
 }
 
 fn reconcile_native_stacks(state: &StackState) {
+    if state.is_fork_workflow() {
+        let outcome = github::NativeStackOutcome::NotApplicable {
+            reason: "GitHub native stacks require pull requests in one repository; fork/cross-repository workflows keep the ez stack local".to_string(),
+        };
+        ui::receipt(&crate::cmd::native_stack::receipt_value(
+            "sync",
+            &[],
+            &[],
+            &outcome,
+        ));
+        crate::cmd::native_stack::report_outcome(&outcome);
+        return;
+    }
+
     let plan = native_stack::native_stack_plan(state);
 
     for component in &plan.skipped {
@@ -94,7 +108,11 @@ fn reconcile_native_stacks(state: &StackState) {
     }
 
     for chain in chains {
-        match github::reconcile_native_stack_exact(&chain.pr_numbers, "ez sync") {
+        match github::reconcile_native_stack_exact(
+            &chain.pr_numbers,
+            "ez sync",
+            state.repo.as_deref(),
+        ) {
             Ok(outcome) => {
                 crate::cmd::native_stack::report_outcome(&outcome);
                 ui::receipt(&crate::cmd::native_stack::receipt_value(
@@ -130,7 +148,7 @@ fn update_reparented_pr_bases(
             continue;
         };
 
-        match github::update_pr_base(pr_number, &meta.parent) {
+        match github::update_pr_base(pr_number, &meta.parent, state.repo.as_deref()) {
             Ok(()) => {
                 ui::info(&format!(
                     "Updated PR #{pr_number} base for `{branch}` to `{}`",
@@ -179,7 +197,7 @@ pub fn run(dry_run: bool, autostash: bool, force: bool) -> Result<()> {
 
     if dry_run {
         ui::header("Sync preview (--dry-run, no changes will be made)");
-        ui::info(&format!("Would fetch from `{}`", state.remote));
+        ui::info(&format!("Would fetch from `{}`", state.fetch_remote()));
         ui::info(&format!(
             "Would update `{}` to latest remote (no checkout needed)",
             state.trunk
@@ -223,19 +241,23 @@ pub fn run(dry_run: bool, autostash: bool, force: bool) -> Result<()> {
             ui::info("No restacking needed based on current local state");
         }
 
-        let native_plan = native_stack::native_stack_plan(&state);
-        for chain in native_stack::linkable_chains(&native_plan) {
-            ui::info(&format!(
-                "Would reconcile GitHub native stack for PRs {:?} ({})",
-                chain.pr_numbers,
-                chain.branches.join(" -> ")
-            ));
-        }
-        for component in &native_plan.skipped {
-            ui::info(&format!(
-                "Would skip GitHub native stack for `{}` ({})",
-                component.root, component.reason
-            ));
+        if state.is_fork_workflow() {
+            ui::info("GitHub native stacks are not applicable to fork/cross-repository workflows");
+        } else {
+            let native_plan = native_stack::native_stack_plan(&state);
+            for chain in native_stack::linkable_chains(&native_plan) {
+                ui::info(&format!(
+                    "Would reconcile GitHub native stack for PRs {:?} ({})",
+                    chain.pr_numbers,
+                    chain.branches.join(" -> ")
+                ));
+            }
+            for component in &native_plan.skipped {
+                ui::info(&format!(
+                    "Would skip GitHub native stack for `{}` ({})",
+                    component.root, component.reason
+                ));
+            }
         }
 
         ui::hint("Run `ez sync` (without --dry-run) to apply these changes");
@@ -275,18 +297,19 @@ fn run_sync_inner(force: bool) -> Result<()> {
     let mut reparented_branches = std::collections::BTreeSet::new();
 
     // Fetch from remote.
-    ui::info(&format!("Fetching from `{}`...", state.remote));
-    git::fetch(&state.remote)?;
+    let fetch_remote = state.fetch_remote().to_string();
+    ui::info(&format!("Fetching from `{fetch_remote}`..."));
+    git::fetch(&fetch_remote)?;
 
     match git::reset_branch_to_latest_remote(
-        &state.remote,
+        &fetch_remote,
         &state.trunk,
         &original_branch,
         &original_root,
     ) {
         Ok(true) => ui::info(&format!(
             "Reset `{}` to latest `{}/{}`",
-            state.trunk, state.remote, state.trunk
+            state.trunk, fetch_remote, state.trunk
         )),
         Ok(false) => {}
         Err(e) => ui::warn(&format!("Could not update `{}` — {e}", state.trunk)),
@@ -324,8 +347,25 @@ fn run_sync_inner(force: bool) -> Result<()> {
     let has_any_prs = !cleanup_candidates.is_empty();
     let pr_statuses = if has_any_prs {
         let sp = ui::spinner("Checking PR states...");
-        let branch_refs: Vec<&str> = cleanup_candidates.iter().map(String::as_str).collect();
-        let statuses = github::get_pr_statuses_for(&state.remote, &branch_refs);
+        let statuses = if state.is_fork_workflow() {
+            let numbered_branches: Vec<(&str, u64)> = cleanup_candidates
+                .iter()
+                .filter_map(|branch| {
+                    state
+                        .branches
+                        .get(branch)
+                        .and_then(|meta| meta.pr_number.map(|number| (branch.as_str(), number)))
+                })
+                .collect();
+            github::get_pr_statuses_by_number(
+                &fetch_remote,
+                state.repo.as_deref(),
+                &numbered_branches,
+            )
+        } else {
+            let branch_refs: Vec<&str> = cleanup_candidates.iter().map(String::as_str).collect();
+            github::get_pr_statuses_for(&fetch_remote, state.repo.as_deref(), &branch_refs)
+        };
         sp.finish_and_clear();
         statuses
     } else {

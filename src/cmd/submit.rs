@@ -16,12 +16,16 @@ fn branches_to_submit(path_to_trunk: &[String], trunk: &str) -> Vec<String> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     draft: bool,
     no_draft: bool,
     title: Option<&str>,
     body: Option<&str>,
     body_file: Option<&str>,
+    remote_override: Option<&str>,
+    repo_override: Option<&str>,
+    fork_repo_override: Option<&str>,
 ) -> Result<()> {
     let mut state = StackState::load()?;
     if let Some(root) = git::current_linked_worktree_root()? {
@@ -54,13 +58,26 @@ pub fn run(
         return Ok(());
     }
 
-    let remote = state.remote.clone();
+    let effective_remote = remote_override
+        .map(str::to_string)
+        .unwrap_or_else(|| state.remote.clone());
+    let effective_repo = repo_override
+        .map(str::to_string)
+        .or_else(|| state.repo.clone());
+    let effective_fork_repo = fork_repo_override
+        .map(str::to_string)
+        .or_else(|| state.fork_repo.clone());
+    let is_fork_workflow = state.is_fork_workflow_with(
+        Some(&effective_remote),
+        effective_repo.as_deref(),
+        effective_fork_repo.as_deref(),
+    );
     let body_explicitly_set = body.is_some() || body_file.is_some();
     let mut pr_urls: Vec<(String, String)> = Vec::new();
     let mut pr_numbers: Vec<u64> = Vec::new();
 
     for branch in &branches_to_submit {
-        git::fetch_branch(&remote, branch)?;
+        git::fetch_branch(&effective_remote, branch)?;
     }
 
     let branch_refs: Vec<&str> = branches_to_submit.iter().map(String::as_str).collect();
@@ -68,7 +85,7 @@ pub fn run(
         "Pushing {} branch(es) atomically...",
         branch_refs.len()
     ));
-    git::push_atomic(&remote, &branch_refs)?;
+    git::push_atomic(&effective_remote, &branch_refs)?;
     sp.finish_and_clear();
     ui::info(&format!("Pushed {} branch(es)", branch_refs.len()));
 
@@ -84,6 +101,10 @@ pub fn run(
             title,
             resolved_body.as_deref(),
             body_explicitly_set,
+            &effective_remote,
+            effective_repo.as_deref(),
+            effective_fork_repo.as_deref(),
+            is_fork_workflow,
         )?;
 
         let pr_number = state.get_branch(branch).ok().and_then(|m| m.pr_number);
@@ -95,6 +116,9 @@ pub fn run(
             "branch": branch,
             "pr_number": pr_number,
             "pr_url": pr_url,
+            "remote": effective_remote.clone(),
+            "repo": effective_repo.clone(),
+            "fork_repo": effective_fork_repo.clone(),
         }));
 
         pr_urls.push((branch.clone(), pr_url));
@@ -102,7 +126,17 @@ pub fn run(
 
     state.save()?;
 
-    match github::ensure_native_stack(&pr_numbers) {
+    let native_stack_outcome = if is_fork_workflow {
+        Ok(github::NativeStackOutcome::NotApplicable {
+            reason:
+                "fork and cross-repository pull requests are not supported by GitHub native stacks"
+                    .to_string(),
+        })
+    } else {
+        github::ensure_native_stack(&pr_numbers, effective_repo.as_deref())
+    };
+
+    match native_stack_outcome {
         Ok(outcome) => {
             crate::cmd::native_stack::report_outcome(&outcome);
             ui::receipt(&crate::cmd::native_stack::receipt_value(
@@ -208,7 +242,8 @@ exit 0
         }
         let _path = PathGuard::install(&fake_dir);
 
-        let err = run(false, false, None, None, None).expect_err("atomic push should fail");
+        let err = run(false, false, None, None, None, None, None, None)
+            .expect_err("atomic push should fail");
 
         unsafe {
             std::env::remove_var("EZ_FAKE_GH_LOG");

@@ -46,9 +46,10 @@ pub(crate) fn stale_switch_target_warning(
     if state.is_trunk(&parent) {
         // Best-effort refresh so the warning compares against latest trunk, not a stale local ref.
         if let (Ok(current_branch), Ok(current_root)) = (git::current_branch(), git::repo_root()) {
-            let _ = git::fetch_branch(&state.remote, &state.trunk);
+            let fetch_remote = state.fetch_remote();
+            let _ = git::fetch_branch(fetch_remote, &state.trunk);
             let _ = git::update_branch_to_latest_remote(
-                &state.remote,
+                fetch_remote,
                 &state.trunk,
                 &current_branch,
                 &current_root,
@@ -184,7 +185,9 @@ pub fn run(name: Option<&str>, no_cd_required: bool) -> Result<()> {
             if let Some(meta) = state.branches.get(name)
                 && let Some(pr_number) = meta.pr_number
             {
-                if let Ok(Some(pr)) = github::get_pr_status(name) {
+                if let Ok(Some(pr)) =
+                    github::get_pr_status(&pr_number.to_string(), state.repo.as_deref())
+                {
                     return format!(
                         "{} {}",
                         branch_text,
@@ -240,16 +243,9 @@ mod tests {
                 scope_mode: None,
             },
         );
-        StackState {
-            trunk: "main".to_string(),
-            remote: "origin".to_string(),
-            default_from: None,
-            repo: None,
-            draft: None,
-            no_pr: None,
-            rerere: None,
-            branches,
-        }
+        let mut state = StackState::new("main".to_string());
+        state.branches = branches;
+        state
     }
 
     #[test]
