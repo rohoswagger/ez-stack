@@ -142,6 +142,22 @@ pub fn create_branch_at(name: &str, base: &str) -> Result<()> {
     Ok(())
 }
 
+/// Move an existing local branch ref without checking it out, but only if it
+/// still points at `expected_old`.
+///
+/// Callers must not use this for a branch that is checked out in a worktree,
+/// because updating the ref behind that worktree would leave its index and files
+/// out of sync with HEAD.
+pub fn compare_and_swap_local_branch_ref(
+    name: &str,
+    target: &str,
+    expected_old: &str,
+) -> Result<()> {
+    let local_ref = format!("refs/heads/{name}");
+    run_git(&["update-ref", &local_ref, target, expected_old])?;
+    Ok(())
+}
+
 pub fn checkout(branch: &str) -> Result<()> {
     run_git(&["checkout", branch])?;
     Ok(())
@@ -563,6 +579,15 @@ pub fn hard_reset(remote_ref: &str) -> Result<()> {
 
 pub fn hard_reset_at(dir: &str, remote_ref: &str) -> Result<()> {
     run_git(&["-C", dir, "reset", "--hard", remote_ref])?;
+    Ok(())
+}
+
+/// Move a checked-out branch while preserving concurrent worktree edits.
+///
+/// Unlike `reset --hard`, `reset --keep` refuses any move that would overwrite
+/// local changes and retains compatible edits across the ref move.
+pub fn reset_keep_at(dir: &str, target: &str) -> Result<()> {
+    run_git(&["-C", dir, "reset", "--keep", target])?;
     Ok(())
 }
 

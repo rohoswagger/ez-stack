@@ -208,6 +208,7 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Parent => cmd::parent::run(),
         Commands::Track { branch, parent } => cmd::track::run(branch, parent),
         Commands::Delete { branch, force, yes } => cmd::delete::run(branch.as_deref(), force, yes),
+        Commands::Fold { branch, yes } => cmd::fold::run(branch.as_deref(), yes),
         Commands::Move { onto } => cmd::move_branch::run(onto.as_deref()),
         Commands::Merge { method, yes, stack } => cmd::merge::run(&method, yes, stack),
         Commands::PrEdit {

@@ -416,6 +416,25 @@ Examples:
         yes: bool,
     },
 
+    /// Fold one local stack layer down into its parent without rewriting commits
+    #[command(after_help = "\
+Examples:
+  ez fold
+  ez fold feat/child
+  ez fold feat/child --yes
+
+This is a local/offline fold-down for PR-less stack layers. It advances the
+parent branch to the folded branch tip, removes the folded local branch and
+worktree, reparents children, and preserves remote branches.")]
+    Fold {
+        /// Branch to fold into its parent (defaults to current branch)
+        branch: Option<String>,
+
+        /// Skip confirmation prompt (for agents and scripts)
+        #[arg(short, long)]
+        yes: bool,
+    },
+
     /// Move (reparent) the current branch onto another branch
     #[command(after_help = "\
 Examples:
@@ -984,6 +1003,32 @@ mod tests {
                 assert!(stack);
             }
             _ => panic!("expected merge command"),
+        }
+    }
+
+    #[test]
+    fn parses_fold_defaults_to_current_branch() {
+        let cli = Cli::try_parse_from(["ez", "fold"]).expect("parse fold");
+
+        match cli.command {
+            Commands::Fold { branch, yes } => {
+                assert!(branch.is_none());
+                assert!(!yes);
+            }
+            _ => panic!("expected fold command"),
+        }
+    }
+
+    #[test]
+    fn parses_fold_branch_and_yes_flag() {
+        let cli = Cli::try_parse_from(["ez", "fold", "feat/child", "--yes"]).expect("parse fold");
+
+        match cli.command {
+            Commands::Fold { branch, yes } => {
+                assert_eq!(branch.as_deref(), Some("feat/child"));
+                assert!(yes);
+            }
+            _ => panic!("expected fold command"),
         }
     }
 

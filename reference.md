@@ -78,6 +78,7 @@ Preferred workflow:
 | Intent | Command |
 |--------|---------|
 | Move branch to new parent | `ez move --onto <branch>` |
+| Fold one clean PR-less layer into its parent | `ez fold [branch] --yes` |
 | Push entire stack | `ez submit` |
 
 ## Setup and Maintenance
@@ -105,6 +106,7 @@ Every mutating command emits JSON to stderr:
 | push | `pr_number`, `pr_url`, `created` |
 | create | `branch`, `parent`, `worktree` |
 | delete | `branch`, `worktree`, `dev_port`, `killed_pids`, `reparented_children` |
+| fold | `branch`, `into`, `before_parent`, `after_parent`, `removed_worktree`, `reparented_children`, `remote_preserved` |
 | rebase conflict | `action: "conflict"`, `branch`, `parent`, `conflicting_files`, `git_stderr`, `next_command` |
 
 Commit and push receipts also include scope fields when relevant:

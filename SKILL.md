@@ -46,7 +46,7 @@ cd $(ez create my-task --from main)
 # 3. You're in .worktrees/my-task with your own branch. Work here.
 ```
 
-After any `ez create`, `ez switch`, `ez checkout`, `ez delete`, or `ez sync` that may change directories, immediately re-anchor file operations to the active worktree root:
+After any `ez create`, `ez switch`, `ez checkout`, `ez delete`, `ez fold`, or `ez sync` that may change directories, immediately re-anchor file operations to the active worktree root:
 
 ```bash
 pwd
@@ -112,6 +112,7 @@ ez push --pr                           # create/update PR even if no_pr config i
 ez submit                                # atomically push entire stack
 ez merge --yes                           # merge bottom PR non-interactively
 ez merge --stack --yes                   # atomically land a native stack; sequential fallback
+ez fold feat/child --yes                 # locally fold one PR-less layer into its parent
 ```
 
 `ez merge` uses GitHub's asynchronous merge API when available. After a direct
@@ -120,6 +121,14 @@ main worktree path for shell integration. For an exact native-stack match,
 `--stack` makes one atomic request through the top PR and reconciles all local
 worktrees together. If GitHub enqueues the merge, ez preserves the worktrees,
 branches, and stack state until the queue finishes.
+
+`ez fold [branch] --yes` is local/offline and applies only to one PR-less stack
+layer at a time. It advances the parent to the folded branch tip without
+rewriting commits, removes the folded local branch/worktree, reparents direct
+children, and preserves remote branches. It is not a squash, range fold, or
+GitHub PR mutation. Fold only a non-bottom, clean, fully restacked layer; the
+command aborts without mutation when an affected worktree is dirty or a
+descendant needs restacking.
 
 ### Sync with other agents' work
 ```bash
@@ -185,4 +194,4 @@ Check `redundant_commits > 0` after sync/restack — means commits were auto-dro
 
 ## Advanced Commands
 
-See [reference.md](reference.md) for the full command reference: `ez adopt`, `ez commit`, `ez amend`, `ez diff`, `ez status`, `ez restack`, `ez log`, `ez move`, `ez merge`, `ez switch`, `ez pr-edit`, `ez draft`/`ez ready`, `ez pr-link`, `ez config`, `ez update`, `ez setup`, `ez skill install`.
+See [reference.md](reference.md) for the full command reference: `ez adopt`, `ez commit`, `ez amend`, `ez diff`, `ez status`, `ez restack`, `ez log`, `ez move`, `ez fold`, `ez merge`, `ez switch`, `ez pr-edit`, `ez draft`/`ez ready`, `ez pr-link`, `ez config`, `ez update`, `ez setup`, `ez skill install`.
