@@ -324,9 +324,11 @@ mkdir -p "$SANDBOX_HOME"
 HOME="$SANDBOX_HOME" SHELL="/bin/bash" run "$EZ_BIN_CANON" setup --yes
 assert_file "${SANDBOX_HOME}/.bash_profile"
 capture "$EZ_BIN_CANON" shell-init >/dev/null
-run "$EZ_BIN_CANON" skill install
-assert_file ".agents/skills/ez-workflow/SKILL.md"
-run "$EZ_BIN_CANON" skill uninstall
+HOME="$SANDBOX_HOME" USERPROFILE="$SANDBOX_HOME" run "$EZ_BIN_CANON" skill install
+assert_file "${SANDBOX_HOME}/.agents/skills/ez-workflow/SKILL.md"
+[ ! -e ".agents/skills/ez-workflow" ] || fail "skill install wrote into the cloned repository"
+HOME="$SANDBOX_HOME" USERPROFILE="$SANDBOX_HOME" run "$EZ_BIN_CANON" skill uninstall
+[ ! -e "${SANDBOX_HOME}/.agents/skills/ez-workflow" ] || fail "skill uninstall left the canonical skill installed"
 end_group
 
 log_group "local branch and stack operations"
