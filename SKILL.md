@@ -55,6 +55,11 @@ git rev-parse --show-toplevel
 
 Use that path, not the main repo checkout, for every subsequent read or write. Never reuse an absolute file path captured before switching into a linked worktree.
 
+For non-shell agent/tool invocations, do not call plain `ez switch <target>` when
+the target may live in another worktree. Use `ez switch <target> --no-cd-required`,
+capture stdout as the active root, then run all later reads, writes, and commands
+from that root or paths re-anchored under it.
+
 **Always use `--from main`** for independent tasks. Without it, ez stacks on the current branch.
 
 **Hooks:** If `.ez/hooks/post-create/default.md` exists in the repo, ez prints its instructions after worktree creation. Follow them to set up the worktree (install deps, copy env, etc.). Use `--hook <name>` for a specific hook: `ez create feat/auth --hook setup-node` reads `.ez/hooks/post-create/setup-node.md`.

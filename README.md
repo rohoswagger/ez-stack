@@ -196,8 +196,8 @@ Intended workflow:
 
 | Command | Description |
 |---------|-------------|
-| `ez switch <name>` | Switch to branch (cd's to worktree if applicable) |
-| `ez switch <pr-number>` | Switch by PR number |
+| `ez switch <name>` | Switch to branch. Auto-cd to a linked worktree requires shell integration; direct callers use `ez switch <name> --no-cd-required`, then `cd`/re-anchor to the printed path. |
+| `ez switch <pr-number>` | Switch by PR number. Uses the same shell-integration cd contract as branch targets. |
 | `ez up` / `ez down` | Navigate the stack |
 | `ez top` / `ez bottom` | Jump to stack endpoints |
 
