@@ -390,15 +390,16 @@ fn run_sync_inner(force: bool) -> Result<()> {
         }
     }
 
+    let main_root = git::main_worktree_root().unwrap_or_else(|_| original_root.clone());
+
     // Build branch→worktree map for pruning merged branches.
-    // Only include worktrees under .worktrees/ — the main worktree must never be removed.
+    // Trust git's worktree registry and exclude only the actual main worktree root.
     let worktree_map: std::collections::HashMap<String, String> = git::worktree_list()
         .unwrap_or_default()
         .into_iter()
-        .filter(|wt| wt.path.contains("/.worktrees/"))
+        .filter(|wt| wt.path != main_root)
         .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
         .collect();
-    let main_root = git::main_worktree_root().unwrap_or_else(|_| original_root.clone());
     let current_dir = std::env::current_dir()
         .ok()
         .map(|path| path.to_string_lossy().into_owned())
