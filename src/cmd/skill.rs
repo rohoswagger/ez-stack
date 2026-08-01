@@ -100,14 +100,22 @@ fn write_skill_file(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn try_symlink_or_copy(link_dir: &Path, expected_target: &Path) -> Result<AgentInstallStatus> {
-    match symlink_dir(expected_target, link_dir) {
+fn try_symlink_or_copy_with(
+    link_dir: &Path,
+    expected_target: &Path,
+    create_symlink: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<AgentInstallStatus> {
+    match create_symlink(expected_target, link_dir) {
         Ok(()) => Ok(AgentInstallStatus::Linked),
         Err(_) => {
             write_skill_file(link_dir)?;
             Ok(AgentInstallStatus::Copied)
         }
     }
+}
+
+fn try_symlink_or_copy(link_dir: &Path, expected_target: &Path) -> Result<AgentInstallStatus> {
+    try_symlink_or_copy_with(link_dir, expected_target, symlink_dir)
 }
 
 fn is_ez_workflow_skill(content: &str) -> bool {
@@ -344,6 +352,7 @@ mod tests {
         assert!(!is_ez_workflow_skill("name: ez-workflow\n"));
         assert!(!is_ez_workflow_skill("---\n---\nname: ez-workflow\n"));
         assert!(!is_ez_workflow_skill("---\nname: other-workflow\n---\n"));
+        assert!(!is_ez_workflow_skill("---\nsummary: missing name\n"));
         assert!(is_ez_workflow_skill("---\nname: ez-workflow\n---\n"));
     }
 
@@ -360,6 +369,26 @@ mod tests {
         std::fs::write(dir.join("nested/file.txt"), "remove me too\n").expect("write nested");
         remove_path(&dir).expect("remove dir");
         assert!(!dir.exists());
+
+        #[cfg(unix)]
+        {
+            let socket_root = PathBuf::from("/tmp").join(format!(
+                "ez-skill-sock-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&socket_root).expect("create short socket root");
+            let socket = socket_root.join("agent.sock");
+            let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+            remove_path(&socket).expect("ignore special file");
+            assert!(socket.exists());
+            drop(listener);
+            std::fs::remove_file(socket).expect("remove socket");
+            std::fs::remove_dir(socket_root).expect("remove socket root");
+        }
     }
 
     #[test]
@@ -403,6 +432,28 @@ mod tests {
     }
 
     #[test]
+    fn symlink_failure_installs_a_managed_compatibility_copy() {
+        let root = temp_dir("skill-symlink-copy-fallback");
+        let canonical = canonical_skill_dir(&root);
+        write_skill_file(&canonical).expect("write canonical skill");
+        let copy_target = root.join(".codex/skills").join(SKILL_NAME);
+
+        let status = try_symlink_or_copy_with(&copy_target, &canonical, |_, _| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "simulated symlink denial",
+            ))
+        })
+        .expect("install fallback copy");
+
+        assert_eq!(status, AgentInstallStatus::Copied);
+        assert_eq!(
+            std::fs::read_to_string(copy_target.join(SKILL_FILE)).expect("read fallback copy"),
+            SKILL_CONTENT
+        );
+    }
+
+    #[test]
     fn uninstall_is_idempotent_when_nothing_is_installed() {
         let root = temp_dir("skill-uninstall-missing");
         uninstall_from_root(&root).expect("uninstall missing skill");
@@ -427,6 +478,10 @@ mod tests {
         write_skill_file(&copy_target).expect("write fallback copy");
         assert!(
             is_managed_agent_skill_target(&canonical, &copy_target).expect("copy target check")
+        );
+        assert_eq!(
+            ensure_agent_skill_target(&canonical, &copy_target).expect("unchanged copy check"),
+            AgentInstallStatus::Unchanged
         );
 
         std::fs::write(copy_target.join(SKILL_FILE), "---\nname: other\n---\n")
@@ -487,6 +542,127 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(copied_dir.join(SKILL_FILE)).expect("read copied skill"),
             SKILL_CONTENT
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn install_repairs_stale_canonical_symlink_and_managed_copy() {
+        let root = temp_dir("skill-install-repair");
+        let canonical_dir = canonical_skill_dir(&root);
+        let canonical_file = canonical_skill_file(&root);
+        std::fs::create_dir_all(&canonical_dir).expect("create canonical dir");
+        std::fs::write(&canonical_file, "stale canonical\n").expect("write stale canonical");
+
+        let link_dirs = agent_skill_dirs(&root);
+        let stale_link = &link_dirs[0];
+        std::fs::create_dir_all(stale_link.parent().expect("link parent"))
+            .expect("create link parent");
+        symlink_dir(Path::new("../wrong-target"), stale_link).expect("create stale symlink");
+
+        let stale_copy = &link_dirs[1];
+        std::fs::create_dir_all(stale_copy).expect("create stale copy dir");
+        std::fs::write(
+            stale_copy.join(SKILL_FILE),
+            "---\nname: ez-workflow\n---\nstale\n",
+        )
+        .expect("write stale managed copy");
+
+        install_into_root(&root).expect("repair installation");
+
+        assert_eq!(
+            std::fs::read_to_string(&canonical_file).expect("read canonical"),
+            SKILL_CONTENT
+        );
+        assert_eq!(
+            std::fs::read_link(stale_link).expect("read repaired symlink"),
+            relative_path(stale_link.parent().expect("link parent"), &canonical_dir)
+        );
+        assert_eq!(
+            std::fs::read_to_string(stale_copy.join(SKILL_FILE)).expect("read repaired copy"),
+            SKILL_CONTENT
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn install_recreates_a_missing_link_without_rewriting_canonical_skill() {
+        let root = temp_dir("skill-install-relink");
+        install_into_root(&root).expect("initial install");
+        let canonical_file = canonical_skill_file(&root);
+        let original = std::fs::read_to_string(&canonical_file).expect("read canonical");
+        let missing_link = agent_skill_dirs(&root).remove(0);
+        remove_path(&missing_link).expect("remove compatibility link");
+
+        install_into_root(&root).expect("repair missing link");
+        install_into_root(&root).expect("confirm idempotent installation");
+
+        assert_eq!(
+            std::fs::read_to_string(&canonical_file).expect("reread canonical"),
+            original
+        );
+        assert!(std::fs::symlink_metadata(&missing_link).is_ok());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn uninstall_removes_managed_targets_and_preserves_custom_skill_directory() {
+        let root = temp_dir("skill-uninstall-managed");
+        install_into_root(&root).expect("install skill");
+        let link_dirs = agent_skill_dirs(&root);
+        let managed_link = &link_dirs[0];
+        let custom_dir = &link_dirs[1];
+        remove_path(custom_dir).expect("remove managed link");
+        std::fs::create_dir_all(custom_dir).expect("create custom directory");
+        std::fs::write(custom_dir.join("custom.txt"), "preserve\n").expect("write custom skill");
+
+        uninstall_from_root(&root).expect("uninstall managed skill");
+
+        assert!(std::fs::symlink_metadata(managed_link).is_err());
+        assert!(!canonical_skill_dir(&root).exists());
+        assert_eq!(
+            std::fs::read_to_string(custom_dir.join("custom.txt")).expect("read custom skill"),
+            "preserve\n"
+        );
+    }
+
+    #[test]
+    fn uninstall_preserves_non_file_canonical_entry() {
+        let root = temp_dir("skill-uninstall-canonical-dir");
+        let canonical_file = canonical_skill_file(&root);
+        std::fs::create_dir_all(&canonical_file).expect("create directory at canonical file path");
+        std::fs::write(canonical_file.join("keep.txt"), "preserve\n")
+            .expect("write preserved entry");
+
+        uninstall_from_root(&root).expect("ignore non-file canonical entry");
+
+        assert_eq!(
+            std::fs::read_to_string(canonical_file.join("keep.txt")).expect("read preserved entry"),
+            "preserve\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_propagates_canonical_metadata_permission_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_dir("skill-uninstall-permission-error");
+        let canonical_dir = canonical_skill_dir(&root);
+        std::fs::create_dir_all(&canonical_dir).expect("create canonical directory");
+        std::fs::set_permissions(&canonical_dir, std::fs::Permissions::from_mode(0o000))
+            .expect("deny canonical directory access");
+
+        let error = uninstall_from_root(&root).expect_err("metadata denial should propagate");
+
+        std::fs::set_permissions(&canonical_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restore canonical directory access");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .expect("io error")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
         );
     }
 }

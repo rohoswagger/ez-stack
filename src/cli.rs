@@ -893,13 +893,10 @@ mod tests {
     fn parses_init_yes_flag() {
         let cli = Cli::try_parse_from(["ez", "init", "--yes"]).expect("parse init --yes");
 
-        match cli.command {
-            Commands::Init { yes, trunk } => {
-                assert!(yes);
-                assert!(trunk.is_none());
-            }
-            _ => panic!("expected init command"),
-        }
+        assert!(matches!(
+            cli.command,
+            Commands::Init { yes: true, trunk } if trunk.is_none()
+        ));
     }
 
     #[test]
@@ -915,16 +912,12 @@ mod tests {
         ])
         .expect("parse commit");
 
-        match cli.command {
-            Commands::Commit { message, paths, .. } => {
-                assert_eq!(message, vec!["fix: parser".to_string()]);
-                assert_eq!(
-                    paths,
-                    vec!["src/main.rs".to_string(), "src/lib.rs".to_string()]
-                );
-            }
-            _ => panic!("expected commit command"),
-        }
+        assert!(matches!(
+            cli.command,
+            Commands::Commit { message, paths, .. }
+                if message == vec!["fix: parser".to_string()]
+                    && paths == vec!["src/main.rs".to_string(), "src/lib.rs".to_string()]
+        ));
     }
 
     #[test]
@@ -942,19 +935,17 @@ mod tests {
         ])
         .expect("parse create");
 
-        match cli.command {
+        assert!(matches!(
+            cli.command,
             Commands::Create {
                 from,
                 scope,
                 scope_mode,
                 ..
-            } => {
-                assert_eq!(from.as_deref(), Some("main"));
-                assert_eq!(scope, vec!["src/auth/**".to_string()]);
-                assert_eq!(scope_mode, Some(ScopeMode::Strict));
-            }
-            _ => panic!("expected create command"),
-        }
+            } if from.as_deref() == Some("main")
+                && scope == vec!["src/auth/**".to_string()]
+                && scope_mode == Some(ScopeMode::Strict)
+        ));
     }
 
     #[test]
@@ -962,19 +953,15 @@ mod tests {
         let cli = Cli::try_parse_from(["ez", "create", "feat/auth", "-Am", "feat: add files"])
             .expect("parse create -Am");
 
-        match cli.command {
+        assert!(matches!(
+            cli.command,
             Commands::Create {
                 message,
-                all,
-                all_files,
+                all: false,
+                all_files: true,
                 ..
-            } => {
-                assert_eq!(message.as_deref(), Some("feat: add files"));
-                assert!(!all);
-                assert!(all_files);
-            }
-            _ => panic!("expected create command"),
-        }
+            } if message.as_deref() == Some("feat: add files")
+        ));
     }
 
     #[test]
@@ -982,46 +969,35 @@ mod tests {
         let cli = Cli::try_parse_from(["ez", "commit", "-Am", "feat: add new files"])
             .expect("parse commit -Am");
 
-        match cli.command {
+        assert!(matches!(
+            cli.command,
             Commands::Commit {
                 message,
-                all,
-                all_files,
+                all: false,
+                all_files: true,
                 ..
-            } => {
-                assert_eq!(message, vec!["feat: add new files".to_string()]);
-                assert!(!all);
-                assert!(all_files);
-            }
-            _ => panic!("expected commit command"),
-        }
+            } if message == vec!["feat: add new files".to_string()]
+        ));
     }
 
     #[test]
     fn parses_branch_alias_to_list() {
         let cli = Cli::try_parse_from(["ez", "branch"]).expect("parse branch alias");
-        match cli.command {
-            Commands::List { json } => assert!(!json),
-            _ => panic!("expected list command"),
-        }
+        assert!(matches!(cli.command, Commands::List { json: false }));
     }
 
     #[test]
     fn parses_adopt_defaults_to_worktrees() {
         let cli = Cli::try_parse_from(["ez", "adopt", "--pr", "42"]).expect("parse adopt --pr");
 
-        match cli.command {
+        assert!(matches!(
+            cli.command,
             Commands::Adopt {
-                pr,
+                pr: Some(42),
                 branches,
-                no_worktrees,
-            } => {
-                assert_eq!(pr, Some(42));
-                assert!(branches.is_empty());
-                assert!(!no_worktrees);
-            }
-            _ => panic!("expected adopt command"),
-        }
+                no_worktrees: false,
+            } if branches.is_empty()
+        ));
     }
 
     #[test]
@@ -1029,27 +1005,20 @@ mod tests {
         let cli = Cli::try_parse_from(["ez", "adopt", "--pr", "42", "--no-worktrees"])
             .expect("parse adopt --no-worktrees");
 
-        match cli.command {
+        assert!(matches!(
+            cli.command,
             Commands::Adopt {
-                pr,
+                pr: Some(42),
                 branches,
-                no_worktrees,
-            } => {
-                assert_eq!(pr, Some(42));
-                assert!(branches.is_empty());
-                assert!(no_worktrees);
-            }
-            _ => panic!("expected adopt command"),
-        }
+                no_worktrees: true,
+            } if branches.is_empty()
+        ));
     }
 
     #[test]
     fn adopt_pr_conflicts_with_positional_branches() {
         let result = Cli::try_parse_from(["ez", "adopt", "--pr", "42", "feat/x"]);
-        assert!(
-            result.is_err(),
-            "--pr and positional branches should conflict"
-        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1057,58 +1026,52 @@ mod tests {
         let cli = Cli::try_parse_from(["ez", "push", "-Am", "feat: ship new files"])
             .expect("parse push -Am");
 
-        match cli.command {
+        assert!(matches!(
+            cli.command,
             Commands::Push {
                 message,
-                stage_all,
-                stage_all_files,
-                no_pr,
-                no_draft,
+                stage_all: false,
+                stage_all_files: true,
+                no_pr: false,
+                no_draft: false,
                 remote,
                 repo,
                 fork_repo,
                 ..
-            } => {
-                assert_eq!(message.as_deref(), Some("feat: ship new files"));
-                assert!(!stage_all);
-                assert!(stage_all_files);
-                assert!(!no_pr);
-                assert!(!no_draft);
-                assert!(remote.is_none());
-                assert!(repo.is_none());
-                assert!(fork_repo.is_none());
-            }
-            _ => panic!("expected push command"),
-        }
+            } if message.as_deref() == Some("feat: ship new files")
+                && remote.is_none()
+                && repo.is_none()
+                && fork_repo.is_none()
+        ));
     }
 
     #[test]
     fn parses_push_no_pr_flag() {
         let cli = Cli::try_parse_from(["ez", "push", "--no-pr"]).expect("parse push --no-pr");
 
-        match cli.command {
+        assert!(matches!(
+            cli.command,
             Commands::Push {
-                no_pr, pr, draft, ..
-            } => {
-                assert!(no_pr);
-                assert!(!pr);
-                assert!(!draft);
+                no_pr: true,
+                pr: false,
+                draft: false,
+                ..
             }
-            _ => panic!("expected push command"),
-        }
+        ));
     }
 
     #[test]
     fn parses_push_pr_flag() {
         let cli = Cli::try_parse_from(["ez", "push", "--pr"]).expect("parse push --pr");
 
-        match cli.command {
-            Commands::Push { pr, no_pr, .. } => {
-                assert!(pr);
-                assert!(!no_pr);
+        assert!(matches!(
+            cli.command,
+            Commands::Push {
+                pr: true,
+                no_pr: false,
+                ..
             }
-            _ => panic!("expected push command"),
-        }
+        ));
     }
 
     #[test]
@@ -1127,15 +1090,14 @@ mod tests {
     fn parses_push_no_draft_flag() {
         let cli = Cli::try_parse_from(["ez", "push", "--no-draft"]).expect("parse push --no-draft");
 
-        match cli.command {
+        assert!(matches!(
+            cli.command,
             Commands::Push {
-                no_draft, draft, ..
-            } => {
-                assert!(no_draft);
-                assert!(!draft);
+                no_draft: true,
+                draft: false,
+                ..
             }
-            _ => panic!("expected push command"),
-        }
+        ));
     }
 
     #[test]
@@ -1143,15 +1105,14 @@ mod tests {
         let cli =
             Cli::try_parse_from(["ez", "submit", "--no-draft"]).expect("parse submit --no-draft");
 
-        match cli.command {
+        assert!(matches!(
+            cli.command,
             Commands::Submit {
-                no_draft, draft, ..
-            } => {
-                assert!(no_draft);
-                assert!(!draft);
+                no_draft: true,
+                draft: false,
+                ..
             }
-            _ => panic!("expected submit command"),
-        }
+        ));
     }
 
     #[test]
@@ -1168,19 +1129,17 @@ mod tests {
         ])
         .expect("parse push fork target overrides");
 
-        match cli.command {
+        assert!(matches!(
+            cli.command,
             Commands::Push {
                 remote,
                 repo,
                 fork_repo,
                 ..
-            } => {
-                assert_eq!(remote.as_deref(), Some("fork"));
-                assert_eq!(repo.as_deref(), Some("upstream-owner/project"));
-                assert_eq!(fork_repo.as_deref(), Some("fork-owner/project"));
-            }
-            _ => panic!("expected push command"),
-        }
+            } if remote.as_deref() == Some("fork")
+                && repo.as_deref() == Some("upstream-owner/project")
+                && fork_repo.as_deref() == Some("fork-owner/project")
+        ));
     }
 
     #[test]
@@ -1197,19 +1156,17 @@ mod tests {
         ])
         .expect("parse submit fork target overrides");
 
-        match cli.command {
+        assert!(matches!(
+            cli.command,
             Commands::Submit {
                 remote,
                 repo,
                 fork_repo,
                 ..
-            } => {
-                assert_eq!(remote.as_deref(), Some("fork"));
-                assert_eq!(repo.as_deref(), Some("upstream-owner/project"));
-                assert_eq!(fork_repo.as_deref(), Some("fork-owner/project"));
-            }
-            _ => panic!("expected submit command"),
-        }
+            } if remote.as_deref() == Some("fork")
+                && repo.as_deref() == Some("upstream-owner/project")
+                && fork_repo.as_deref() == Some("fork-owner/project")
+        ));
     }
 
     #[test]
@@ -1218,16 +1175,16 @@ mod tests {
             Cli::try_parse_from(["ez", "worktree", "delete", "feat/auth", "--yes", "--force"])
                 .expect("parse worktree delete");
 
-        match cli.command {
+        assert!(matches!(
+            cli.command,
             Commands::Worktree(WorktreeArgs {
-                command: WorktreeCommands::Delete { name, force, yes },
-            }) => {
-                assert_eq!(name, "feat/auth");
-                assert!(force);
-                assert!(yes);
-            }
-            _ => panic!("expected worktree delete command"),
-        }
+                command: WorktreeCommands::Delete {
+                    name,
+                    force: true,
+                    yes: true,
+                },
+            }) if name == "feat/auth"
+        ));
     }
 
     #[test]
@@ -1243,21 +1200,17 @@ mod tests {
         ])
         .expect("parse worktree ensure");
 
-        match cli.command {
+        assert!(matches!(
+            cli.command,
             Commands::Worktree(WorktreeArgs {
                 command:
                     WorktreeCommands::Ensure {
                         branches,
-                        dry_run,
-                        json,
+                        dry_run: true,
+                        json: true,
                     },
-            }) => {
-                assert_eq!(branches, vec!["feat/api", "feat/ui"]);
-                assert!(dry_run);
-                assert!(json);
-            }
-            _ => panic!("expected worktree ensure command"),
-        }
+            }) if branches == vec!["feat/api".to_string(), "feat/ui".to_string()]
+        ));
     }
 
     #[test]
@@ -1265,61 +1218,61 @@ mod tests {
         let cli = Cli::try_parse_from(["ez", "merge", "--yes", "--stack", "--method", "rebase"])
             .expect("parse merge");
 
-        match cli.command {
-            Commands::Merge { method, yes, stack } => {
-                assert_eq!(method, "rebase");
-                assert!(yes);
-                assert!(stack);
-            }
-            _ => panic!("expected merge command"),
-        }
+        assert!(matches!(
+            cli.command,
+            Commands::Merge {
+                method,
+                yes: true,
+                stack: true,
+            } if method == "rebase"
+        ));
     }
 
     #[test]
     fn parses_fold_defaults_to_current_branch() {
         let cli = Cli::try_parse_from(["ez", "fold"]).expect("parse fold");
 
-        match cli.command {
-            Commands::Fold { branch, yes } => {
-                assert!(branch.is_none());
-                assert!(!yes);
-            }
-            _ => panic!("expected fold command"),
-        }
+        assert!(matches!(
+            cli.command,
+            Commands::Fold {
+                branch,
+                yes: false,
+            } if branch.is_none()
+        ));
     }
 
     #[test]
     fn parses_fold_branch_and_yes_flag() {
         let cli = Cli::try_parse_from(["ez", "fold", "feat/child", "--yes"]).expect("parse fold");
 
-        match cli.command {
-            Commands::Fold { branch, yes } => {
-                assert_eq!(branch.as_deref(), Some("feat/child"));
-                assert!(yes);
-            }
-            _ => panic!("expected fold command"),
-        }
+        assert!(matches!(
+            cli.command,
+            Commands::Fold {
+                branch,
+                yes: true,
+            } if branch.as_deref() == Some("feat/child")
+        ));
     }
 
     #[test]
     fn parses_up_down_optional_branch() {
         let up = Cli::try_parse_from(["ez", "up", "feat/child"]).expect("parse up");
-        match up.command {
-            Commands::Up { branch } => assert_eq!(branch.as_deref(), Some("feat/child")),
-            _ => panic!("expected up"),
-        }
+        assert!(matches!(
+            up.command,
+            Commands::Up { branch } if branch.as_deref() == Some("feat/child")
+        ));
 
         let up_bare = Cli::try_parse_from(["ez", "up"]).expect("parse up bare");
-        match up_bare.command {
-            Commands::Up { branch } => assert!(branch.is_none()),
-            _ => panic!("expected up"),
-        }
+        assert!(matches!(
+            up_bare.command,
+            Commands::Up { branch } if branch.is_none()
+        ));
 
         let down = Cli::try_parse_from(["ez", "down", "main"]).expect("parse down");
-        match down.command {
-            Commands::Down { branch } => assert_eq!(branch.as_deref(), Some("main")),
-            _ => panic!("expected down"),
-        }
+        assert!(matches!(
+            down.command,
+            Commands::Down { branch } if branch.as_deref() == Some("main")
+        ));
     }
 
     #[test]
@@ -1327,16 +1280,13 @@ mod tests {
         let cli = Cli::try_parse_from(["ez", "switch", "feat/base", "--no-cd-required"])
             .expect("parse switch --no-cd-required");
 
-        match cli.command {
+        assert!(matches!(
+            cli.command,
             Commands::Switch {
                 name,
-                no_cd_required,
-            } => {
-                assert_eq!(name.as_deref(), Some("feat/base"));
-                assert!(no_cd_required);
-            }
-            _ => panic!("expected switch command"),
-        }
+                no_cd_required: true,
+            } if name.as_deref() == Some("feat/base")
+        ));
     }
 
     #[test]
@@ -1344,13 +1294,13 @@ mod tests {
         let cli = Cli::try_parse_from(["ez", "status", "--json", "--native-stack"])
             .expect("parse status --native-stack");
 
-        match cli.command {
-            Commands::Status { json, native_stack } => {
-                assert!(json);
-                assert!(native_stack);
+        assert!(matches!(
+            cli.command,
+            Commands::Status {
+                json: true,
+                native_stack: true,
             }
-            _ => panic!("expected status command"),
-        }
+        ));
     }
 
     #[test]
@@ -1358,13 +1308,13 @@ mod tests {
         let cli = Cli::try_parse_from(["ez", "log", "--json", "--native-stack"])
             .expect("parse log --native-stack");
 
-        match cli.command {
-            Commands::Log { json, native_stack } => {
-                assert!(json);
-                assert!(native_stack);
+        assert!(matches!(
+            cli.command,
+            Commands::Log {
+                json: true,
+                native_stack: true,
             }
-            _ => panic!("expected log command"),
-        }
+        ));
     }
 
     #[test]
@@ -1372,13 +1322,10 @@ mod tests {
         let cli = Cli::try_parse_from(["ez", "move", "--onto"])
             .expect("parse move with missing onto value");
 
-        match cli.command {
-            Commands::Move { onto, force } => {
-                assert_eq!(onto.as_deref(), Some(""));
-                assert!(!force);
-            }
-            _ => panic!("expected move command"),
-        }
+        assert!(matches!(
+            cli.command,
+            Commands::Move { onto, force: false } if onto.as_deref() == Some("")
+        ));
     }
 
     #[test]
@@ -1398,23 +1345,24 @@ mod tests {
         ])
         .expect("parse worktree exec");
 
-        match cli.command {
-            Commands::Worktree(args) => match args.command {
-                WorktreeCommands::Exec {
-                    branches,
-                    keep_going,
-                    json,
-                    command,
-                } => {
-                    assert_eq!(branches, vec!["feat/api", "feat/ui"]);
-                    assert!(keep_going);
-                    assert!(json);
-                    assert_eq!(command, vec!["cargo", "test", "--all-features"]);
-                }
-                _ => panic!("expected worktree exec command"),
-            },
-            _ => panic!("expected worktree command"),
-        }
+        assert!(matches!(
+            cli.command,
+            Commands::Worktree(WorktreeArgs {
+                command:
+                    WorktreeCommands::Exec {
+                        branches,
+                        keep_going: true,
+                        json: true,
+                        command,
+                    },
+            }) if branches == vec!["feat/api".to_string(), "feat/ui".to_string()]
+                && command
+                    == vec![
+                        "cargo".to_string(),
+                        "test".to_string(),
+                        "--all-features".to_string(),
+                    ]
+        ));
     }
 
     #[test]
@@ -1432,25 +1380,19 @@ mod tests {
             "--json",
         ])
         .expect("parse worktree claim");
-        match claim.command {
+        assert!(matches!(
+            claim.command,
             Commands::Worktree(WorktreeArgs {
                 command:
                     WorktreeCommands::Claim {
                         branch,
                         owner,
                         ttl,
-                        break_stale,
-                        json,
+                        break_stale: true,
+                        json: true,
                     },
-            }) => {
-                assert_eq!(branch.as_deref(), Some("feat/auth"));
-                assert_eq!(owner, "agent-a");
-                assert_eq!(ttl, "2h");
-                assert!(break_stale);
-                assert!(json);
-            }
-            _ => panic!("expected worktree claim command"),
-        }
+            }) if branch.as_deref() == Some("feat/auth") && owner == "agent-a" && ttl == "2h"
+        ));
 
         let release = Cli::try_parse_from([
             "ez",
@@ -1461,23 +1403,18 @@ mod tests {
             "--json",
         ])
         .expect("parse worktree release");
-        match release.command {
+        assert!(matches!(
+            release.command,
             Commands::Worktree(WorktreeArgs {
                 command:
                     WorktreeCommands::Release {
                         branch,
-                        owner,
-                        force,
-                        json,
+                        owner: None,
+                        force: true,
+                        json: true,
                     },
-            }) => {
-                assert_eq!(branch.as_deref(), Some("feat/auth"));
-                assert_eq!(owner, None);
-                assert!(force);
-                assert!(json);
-            }
-            _ => panic!("expected worktree release command"),
-        }
+            }) if branch.as_deref() == Some("feat/auth")
+        ));
 
         let leases =
             Cli::try_parse_from(["ez", "worktree", "leases", "--json"]).expect("parse leases");
