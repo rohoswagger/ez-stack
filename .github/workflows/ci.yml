@@ -48,3 +48,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
+
+  coverage:
+    name: Coverage ratchet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+      # Raise all three floors with each coverage increment until they reach 100%.
+      - run: >-
+          cargo llvm-cov
+          --all-features
+          --workspace
+          --no-fail-fast
+          --fail-under-lines 79
+          --fail-under-functions 83
+          --fail-under-regions 79

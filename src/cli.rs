@@ -705,6 +705,29 @@ Examples:
         #[arg(long)]
         json: bool,
     },
+
+    /// Execute one command in each selected stack worktree, parent-first
+    #[command(after_help = "\
+Examples:
+  ez worktree exec -- cargo test
+  ez worktree exec feat/auth -- npm test
+  ez worktree exec --keep-going --json -- sh -lc 'make check'")]
+    Exec {
+        /// Managed branches to run in (defaults to the whole stack)
+        branches: Vec<String>,
+
+        /// Continue through the remaining worktrees after a command fails
+        #[arg(long)]
+        keep_going: bool,
+
+        /// Capture command output and print a deterministic JSON report
+        #[arg(long)]
+        json: bool,
+
+        /// Command and arguments to execute directly (use `sh -lc` for shell syntax)
+        #[arg(last = true, required = true, num_args = 1.., allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
 }
 
 #[derive(Args)]
@@ -1110,6 +1133,42 @@ mod tests {
         match cli.command {
             Commands::Move { onto } => assert_eq!(onto.as_deref(), Some("")),
             _ => panic!("expected move command"),
+        }
+    }
+
+    #[test]
+    fn parses_worktree_exec_selection_and_command_argv() {
+        let cli = Cli::try_parse_from([
+            "ez",
+            "worktree",
+            "exec",
+            "feat/api",
+            "feat/ui",
+            "--keep-going",
+            "--json",
+            "--",
+            "cargo",
+            "test",
+            "--all-features",
+        ])
+        .expect("parse worktree exec");
+
+        match cli.command {
+            Commands::Worktree(args) => match args.command {
+                WorktreeCommands::Exec {
+                    branches,
+                    keep_going,
+                    json,
+                    command,
+                } => {
+                    assert_eq!(branches, vec!["feat/api", "feat/ui"]);
+                    assert!(keep_going);
+                    assert!(json);
+                    assert_eq!(command, vec!["cargo", "test", "--all-features"]);
+                }
+                _ => panic!("expected worktree exec command"),
+            },
+            _ => panic!("expected worktree command"),
         }
     }
 }

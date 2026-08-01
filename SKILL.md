@@ -142,6 +142,8 @@ ez adopt --pr 42      # adopt its native stack/PR chain + provision each worktre
 ez adopt --pr 42 --no-worktrees  # reconstruct metadata only
 ez worktree ensure    # provision missing worktrees for every managed layer
 ez worktree ensure --dry-run --json  # inspect the deterministic fleet plan
+ez worktree exec -- cargo test  # test every layer in its own worktree, parent-first
+ez worktree exec feat/base feat/child --json -- npm test
 ez adopt feat/base    # adopt a local or remote branch without requiring a PR
 ez adopt feat/base feat/child  # adopt an explicit bottom-to-top branch chain
 ```
@@ -161,6 +163,16 @@ worktrees without touching dirty state, creates only missing canonical
 worktrees, preflights all paths before mutation, and rolls back worktrees
 created earlier in the invocation if a later add fails. It is local/offline and
 does not mutate branches, remotes, GitHub, or stack metadata.
+
+Use `ez worktree exec [branch...] -- <command> [args...]` to operate on the
+stack as a workspace fleet. Missing selected worktrees are materialized first,
+existing worktrees are reused even when dirty, and commands run sequentially
+in parent-first order. Execution stops on the first failure unless
+`--keep-going` is set. `--json` captures a per-branch status, exit code,
+stdout, stderr, and duration; the overall process preserves the first failing
+child exit code. Child commands receive `EZ_BRANCH`, `EZ_WORKTREE`, `EZ_PORT`,
+`EZ_STACK_INDEX`, and `EZ_STACK_SIZE`. The argv is executed directly; use
+`sh -lc` explicitly for shell syntax.
 
 ### Finish
 ```bash
@@ -203,4 +215,4 @@ Check `redundant_commits > 0` after sync/restack — means commits were auto-dro
 
 ## Advanced Commands
 
-See [reference.md](reference.md) for the full command reference: `ez adopt`, `ez worktree ensure`, `ez commit`, `ez amend`, `ez diff`, `ez status`, `ez restack`, `ez log`, `ez move`, `ez fold`, `ez merge`, `ez switch`, `ez pr-edit`, `ez draft`/`ez ready`, `ez pr-link`, `ez config`, `ez update`, `ez setup`, `ez skill install`.
+See [reference.md](reference.md) for the full command reference: `ez adopt`, `ez worktree ensure`, `ez worktree exec`, `ez commit`, `ez amend`, `ez diff`, `ez status`, `ez restack`, `ez log`, `ez move`, `ez fold`, `ez merge`, `ez switch`, `ez pr-edit`, `ez draft`/`ez ready`, `ez pr-link`, `ez config`, `ez update`, `ez setup`, `ez skill install`.

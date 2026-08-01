@@ -82,6 +82,9 @@ Preferred workflow:
 | Ensure every managed layer has a worktree | `ez worktree ensure` |
 | Ensure selected layers have worktrees | `ez worktree ensure <branch...>` |
 | Preview the deterministic fleet plan | `ez worktree ensure --dry-run --json` |
+| Run a command in every managed worktree | `ez worktree exec -- <command> [args...]` |
+| Run in selected layers, parent-first | `ez worktree exec <branch...> -- <command> [args...]` |
+| Attempt all layers and report each result | `ez worktree exec --keep-going --json -- <command> [args...]` |
 | Push entire stack | `ez submit` |
 
 ## Setup and Maintenance
@@ -109,6 +112,7 @@ Every mutating command emits JSON to stderr:
 | push | `pr_number`, `pr_url`, `created` |
 | create | `branch`, `parent`, `worktree` |
 | worktree ensure | `dry_run`, `entries`, `created_count`, `reused_count`, `would_create_count` |
+| worktree exec | `command`, `keep_going`, `attempted_count`, `succeeded_count`, `failed_count`, `skipped_count`, `stopped_early` |
 | delete | `branch`, `worktree`, `dev_port`, `killed_pids`, `reparented_children` |
 | fold | `branch`, `into`, `before_parent`, `after_parent`, `removed_worktree`, `reparented_children`, `remote_preserved` |
 | rebase conflict | `action: "conflict"`, `branch`, `parent`, `conflicting_files`, `git_stderr`, `next_command` |

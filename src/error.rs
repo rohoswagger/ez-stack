@@ -63,6 +63,9 @@ pub enum EzError {
     #[error("gh CLI error: {0}\n  → Check authentication: `gh auth status`")]
     GhError(String),
 
+    #[error("{count} stack worktree command(s) failed")]
+    WorktreeExecFailed { count: usize, exit_code: i32 },
+
     #[error("{0}")]
     UserMessage(String),
 }

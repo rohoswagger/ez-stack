@@ -26,6 +26,7 @@ fn exit_code_for(e: &anyhow::Error) -> i32 {
             EzError::GhError(_) => 2,
             EzError::RebaseConflict(_) | EzError::RestackIncomplete { .. } => 3,
             EzError::StaleRemoteRef(_) => 4,
+            EzError::WorktreeExecFailed { exit_code, .. } => *exit_code,
             EzError::OnTrunk
             | EzError::BranchNotInStack(_)
             | EzError::AlreadyAtTop
@@ -251,6 +252,12 @@ fn run(cli: Cli) -> Result<()> {
                 dry_run,
                 json,
             } => cmd::worktree::ensure(&branches, dry_run, json),
+            WorktreeCommands::Exec {
+                branches,
+                keep_going,
+                json,
+                command,
+            } => cmd::worktree::exec(&branches, &command, keep_going, json),
         },
     }
 }
@@ -269,6 +276,16 @@ mod tests {
         assert_eq!(
             exit_code_for(&EzError::StaleRemoteRef("x".into()).into()),
             4
+        );
+        assert_eq!(
+            exit_code_for(
+                &EzError::WorktreeExecFailed {
+                    count: 2,
+                    exit_code: 7,
+                }
+                .into()
+            ),
+            7
         );
         assert_eq!(exit_code_for(&EzError::OnTrunk.into()), 5);
         assert_eq!(exit_code_for(&EzError::GhError("x".into()).into()), 2);
