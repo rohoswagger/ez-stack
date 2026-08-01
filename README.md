@@ -113,6 +113,8 @@ ez sync                          # cleans up, restacks remaining branches
 
 `ez submit` pushes every branch in one atomic `--force-with-lease` operation before creating or updating PRs. When GitHub native stacked PRs are enabled, it links 2+ PRs into a native stack; if that preview API is unavailable, the ordinary base-chained PRs still succeed.
 
+`ez sync` reconciles those native GitHub stacks after it fetches trunk, removes merged worktree layers, and restacks the surviving branches. Ez's local model is deliberately richer than GitHub's: independent linear components are linked separately, PR-less local layers split native chains, and branching worktree graphs are reported and left untouched rather than flattened into a false linear order. Native-stack API errors are non-destructive—the local Git/worktree sync remains successful and emits a structured receipt describing the skipped GitHub action.
+
 ## Scope Guard
 
 Keep an agent focused on the files a branch is supposed to touch:
@@ -185,7 +187,7 @@ Intended workflow:
 
 | Command | Description |
 |---------|-------------|
-| `ez sync` | Fetch trunk, clean merged branches, restack |
+| `ez sync` | Fetch trunk, clean merged branches/worktrees, restack, and reconcile representable GitHub native stacks |
 | `ez sync --autostash` | Stash before sync, restore after |
 | `ez sync --dry-run` | Preview what sync would do |
 | `ez restack` | Fetch trunk, refresh it locally, and rebase stale branches onto their latest parent tips |

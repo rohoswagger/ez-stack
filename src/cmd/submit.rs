@@ -104,12 +104,22 @@ pub fn run(
 
     match github::ensure_native_stack(&pr_numbers) {
         Ok(outcome) => {
-            report_native_stack_outcome(&outcome);
-            ui::receipt(&native_stack_receipt_value(&outcome));
+            crate::cmd::native_stack::report_outcome(&outcome);
+            ui::receipt(&crate::cmd::native_stack::receipt_value(
+                "submit",
+                &branches_to_submit,
+                &pr_numbers,
+                &outcome,
+            ));
         }
         Err(err) => {
             ui::warn(&format!("GitHub native stack update skipped: {err}"));
-            ui::receipt(&native_stack_error_receipt_value(&err.to_string()));
+            ui::receipt(&crate::cmd::native_stack::error_receipt_value(
+                "submit",
+                &branches_to_submit,
+                &pr_numbers,
+                &err.to_string(),
+            ));
         }
     }
 
@@ -120,63 +130,6 @@ pub fn run(
     }
 
     Ok(())
-}
-
-fn report_native_stack_outcome(outcome: &github::NativeStackOutcome) {
-    match outcome {
-        github::NativeStackOutcome::NotNeeded => {}
-        github::NativeStackOutcome::Created { number } => {
-            ui::info(&format!("Linked PRs into GitHub native stack #{number}"));
-        }
-        github::NativeStackOutcome::Extended { number, added } => {
-            ui::info(&format!(
-                "Extended GitHub native stack #{number} with {added} PR(s)"
-            ));
-        }
-        github::NativeStackOutcome::Unchanged { number } => {
-            ui::info(&format!("GitHub native stack #{number} is up to date"));
-        }
-        github::NativeStackOutcome::Unavailable => {
-            ui::info("GitHub native stacks unavailable; ordinary PR chain succeeded");
-        }
-    }
-}
-
-fn native_stack_receipt_value(outcome: &github::NativeStackOutcome) -> serde_json::Value {
-    match outcome {
-        github::NativeStackOutcome::NotNeeded => serde_json::json!({
-            "cmd": "submit",
-            "native_stack_action": "not_needed",
-        }),
-        github::NativeStackOutcome::Created { number } => serde_json::json!({
-            "cmd": "submit",
-            "native_stack_action": "created",
-            "native_stack_number": number,
-        }),
-        github::NativeStackOutcome::Extended { number, added } => serde_json::json!({
-            "cmd": "submit",
-            "native_stack_action": "extended",
-            "native_stack_number": number,
-            "native_stack_added": added,
-        }),
-        github::NativeStackOutcome::Unchanged { number } => serde_json::json!({
-            "cmd": "submit",
-            "native_stack_action": "unchanged",
-            "native_stack_number": number,
-        }),
-        github::NativeStackOutcome::Unavailable => serde_json::json!({
-            "cmd": "submit",
-            "native_stack_action": "unavailable",
-        }),
-    }
-}
-
-fn native_stack_error_receipt_value(error: &str) -> serde_json::Value {
-    serde_json::json!({
-        "cmd": "submit",
-        "native_stack_action": "error",
-        "native_stack_error": error,
-    })
 }
 
 #[cfg(test)]
@@ -209,22 +162,6 @@ mod tests {
     fn branches_to_submit_handles_trunk_only_path() {
         let path = vec!["main".to_string()];
         assert!(branches_to_submit(&path, "main").is_empty());
-    }
-
-    #[test]
-    fn native_stack_receipt_records_created_stack_number() {
-        let value = native_stack_receipt_value(&github::NativeStackOutcome::Created { number: 88 });
-
-        assert_eq!(value["native_stack_action"], "created");
-        assert_eq!(value["native_stack_number"], 88);
-    }
-
-    #[test]
-    fn native_stack_receipt_records_unavailable_without_number() {
-        let value = native_stack_receipt_value(&github::NativeStackOutcome::Unavailable);
-
-        assert_eq!(value["native_stack_action"], "unavailable");
-        assert!(value.get("native_stack_number").is_none());
     }
 
     #[test]
