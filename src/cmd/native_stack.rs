@@ -489,32 +489,34 @@ pub(crate) fn summary(inspection: &NativeStackInspection) -> String {
 }
 
 pub(crate) fn report_outcome(outcome: &github::NativeStackOutcome) {
+    if let Some(message) = format_outcome(outcome) {
+        ui::info(&message);
+    }
+}
+
+fn format_outcome(outcome: &github::NativeStackOutcome) -> Option<String> {
     match outcome {
-        github::NativeStackOutcome::NotNeeded => {}
+        github::NativeStackOutcome::NotNeeded => None,
         github::NativeStackOutcome::Created { number } => {
-            ui::info(&format!("Linked PRs into GitHub native stack #{number}"));
+            Some(format!("Linked PRs into GitHub native stack #{number}"))
         }
-        github::NativeStackOutcome::Extended { number, added } => {
-            ui::info(&format!(
-                "Extended GitHub native stack #{number} with {added} PR(s)"
-            ));
-        }
+        github::NativeStackOutcome::Extended { number, added } => Some(format!(
+            "Extended GitHub native stack #{number} with {added} PR(s)"
+        )),
         github::NativeStackOutcome::Unchanged { number } => {
-            ui::info(&format!("GitHub native stack #{number} is up to date"));
+            Some(format!("GitHub native stack #{number} is up to date"))
         }
         github::NativeStackOutcome::Repaired {
             previous_number,
             number,
-        } => {
-            ui::info(&format!(
-                "Repaired GitHub native stack #{previous_number} as #{number}"
-            ));
-        }
+        } => Some(format!(
+            "Repaired GitHub native stack #{previous_number} as #{number}"
+        )),
         github::NativeStackOutcome::Unavailable => {
-            ui::info("GitHub native stacks unavailable; ordinary PR chain succeeded");
+            Some("GitHub native stacks unavailable; ordinary PR chain succeeded".to_string())
         }
         github::NativeStackOutcome::NotApplicable { reason } => {
-            ui::info(&format!("GitHub native stacks not applicable: {reason}"));
+            Some(format!("GitHub native stacks not applicable: {reason}"))
         }
     }
 }
@@ -593,6 +595,7 @@ pub(crate) fn error_receipt_value(
 mod tests {
     use super::*;
     use crate::stack::StackState;
+    use crate::test_support::{PathGuard, install_fake_bin, take_env_lock};
     use std::cell::RefCell;
 
     fn branch_with_pr(state: &mut StackState, name: &str, parent: &str, pr_number: Option<u64>) {
@@ -700,24 +703,45 @@ mod tests {
     }
 
     #[test]
-    fn report_outcome_accepts_every_user_visible_variant() {
-        for outcome in [
-            github::NativeStackOutcome::NotNeeded,
-            github::NativeStackOutcome::Created { number: 88 },
-            github::NativeStackOutcome::Extended {
-                number: 88,
-                added: 2,
-            },
-            github::NativeStackOutcome::Unchanged { number: 88 },
-            github::NativeStackOutcome::Repaired {
-                previous_number: 88,
-                number: 89,
-            },
-            github::NativeStackOutcome::Unavailable,
-            github::NativeStackOutcome::NotApplicable {
-                reason: "fork workflow".to_string(),
-            },
-        ] {
+    fn format_outcome_covers_every_user_visible_variant_exactly() {
+        let cases = [
+            (github::NativeStackOutcome::NotNeeded, None),
+            (
+                github::NativeStackOutcome::Created { number: 88 },
+                Some("Linked PRs into GitHub native stack #88"),
+            ),
+            (
+                github::NativeStackOutcome::Extended {
+                    number: 88,
+                    added: 2,
+                },
+                Some("Extended GitHub native stack #88 with 2 PR(s)"),
+            ),
+            (
+                github::NativeStackOutcome::Unchanged { number: 88 },
+                Some("GitHub native stack #88 is up to date"),
+            ),
+            (
+                github::NativeStackOutcome::Repaired {
+                    previous_number: 88,
+                    number: 89,
+                },
+                Some("Repaired GitHub native stack #88 as #89"),
+            ),
+            (
+                github::NativeStackOutcome::Unavailable,
+                Some("GitHub native stacks unavailable; ordinary PR chain succeeded"),
+            ),
+            (
+                github::NativeStackOutcome::NotApplicable {
+                    reason: "fork workflow".to_string(),
+                },
+                Some("GitHub native stacks not applicable: fork workflow"),
+            ),
+        ];
+
+        for (outcome, expected) in cases {
+            assert_eq!(format_outcome(&outcome).as_deref(), expected);
             report_outcome(&outcome);
         }
     }
@@ -880,6 +904,10 @@ mod tests {
 
     #[test]
     fn inspect_branch_in_fork_workflow_never_calls_native_stack_lookup() {
+        let _env = take_env_lock();
+        let fake_bin = install_failing_gh("fork-inspect-branch-no-gh");
+        let _path = PathGuard::install(&fake_bin);
+
         let mut state = StackState::new("main".to_string());
         state.upstream_remote = Some("upstream".to_string());
         branch_with_pr(&mut state, "feat/a", "main", Some(101));
@@ -908,6 +936,10 @@ mod tests {
 
     #[test]
     fn inspect_branch_in_fork_workflow_reports_linear_chain_context() {
+        let _env = take_env_lock();
+        let fake_bin = install_failing_gh("fork-inspect-branch-linear-no-gh");
+        let _path = PathGuard::install(&fake_bin);
+
         let mut state = StackState::new("main".to_string());
         state.remote = "fork".to_string();
         state.repo = Some("upstream/project".to_string());
@@ -939,6 +971,10 @@ mod tests {
 
     #[test]
     fn inspect_all_in_fork_workflow_classifies_each_local_shape_without_lookup() {
+        let _env = take_env_lock();
+        let fake_bin = install_failing_gh("fork-inspect-all-no-gh");
+        let _path = PathGuard::install(&fake_bin);
+
         let mut state = StackState::new("main".to_string());
         state.repo = Some("upstream/project".to_string());
         state.fork_repo = Some("fork/project".to_string());
@@ -979,6 +1015,14 @@ mod tests {
         assert_eq!(inspections["feat/local"].state, "not_applicable");
         assert_eq!(inspections["feat/local"].local.branches, vec!["feat/local"]);
         assert!(inspections["feat/local"].local.pull_requests.is_empty());
+    }
+
+    fn install_failing_gh(prefix: &str) -> std::path::PathBuf {
+        install_fake_bin(
+            prefix,
+            "gh",
+            "#!/bin/sh\nprintf 'unexpected gh invocation: %s\\n' \"$*\" >&2\nexit 97\n",
+        )
     }
 
     #[test]
