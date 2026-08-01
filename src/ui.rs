@@ -164,6 +164,7 @@ mod tests {
             pr_badge(12, "CLOSED", false),
             pr_badge(12, "MERGED", false),
             pr_badge(12, "OPEN", true),
+            pr_badge(12, "UNKNOWN", false),
         ] {
             assert!(badge.contains("#12"));
         }

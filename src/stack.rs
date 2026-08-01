@@ -469,6 +469,17 @@ mod tests {
     }
 
     #[test]
+    fn stack_navigation_stops_safely_at_cycles_and_unknown_branches() {
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/a", "feat/b", "aaa", None, None);
+        state.add_branch("feat/b", "feat/a", "bbb", None, None);
+
+        assert_eq!(state.path_to_trunk("feat/a"), vec!["feat/a", "feat/b"]);
+        assert_eq!(state.stack_top("feat/a"), "feat/b");
+        assert_eq!(state.stack_bottom("missing"), "missing");
+    }
+
+    #[test]
     fn children_and_scope_mode_helpers_work() {
         let state = sample_state();
         assert_eq!(
