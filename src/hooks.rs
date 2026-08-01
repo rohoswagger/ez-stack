@@ -100,19 +100,19 @@ pub fn list_hooks(event: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{CwdGuard, init_git_repo, take_env_lock, temp_dir, write_file};
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!(
-            "ez-hooks-{}-{}-{}",
-            name,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&base).expect("create temp dir");
-        base
+    fn create_linked_worktree(repo: &Path, branch: &str) -> PathBuf {
+        let worktree = temp_dir("linked-worktree");
+        let status = std::process::Command::new("git")
+            .args(["worktree", "add", "-b", branch])
+            .arg(&worktree)
+            .arg("HEAD")
+            .current_dir(repo)
+            .status()
+            .expect("create linked worktree");
+        assert!(status.success(), "git worktree add failed");
+        worktree
     }
 
     #[test]
@@ -148,5 +148,138 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn list_hook_names_returns_empty_when_directory_is_missing() {
+        let dir = temp_dir("missing-list").join("does-not-exist");
+
+        assert_eq!(list_hook_names(&dir), Vec::<String>::new());
+    }
+
+    #[test]
+    fn get_hook_returns_default_hook_from_main_worktree() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("hooks-main-default");
+        write_file(&repo, ".ez/hooks/post-create/default.md", "main default\n");
+        let _cwd = CwdGuard::enter(&repo);
+
+        assert_eq!(
+            get_hook("post-create", None).as_deref(),
+            Some("main default\n")
+        );
+    }
+
+    #[test]
+    fn get_hook_returns_named_hook_from_linked_worktree_main_root() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("hooks-linked-named");
+        write_file(
+            &repo,
+            ".ez/hooks/post-create/setup-node.md",
+            "linked named\n",
+        );
+        let worktree = create_linked_worktree(&repo, "feat/hooks");
+        let _cwd = CwdGuard::enter(&worktree);
+
+        assert_eq!(
+            get_hook("post-create", Some("setup-node")).as_deref(),
+            Some("linked named\n")
+        );
+    }
+
+    #[test]
+    fn get_hook_returns_none_when_hook_file_is_missing() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("hooks-missing-file");
+        let _cwd = CwdGuard::enter(&repo);
+
+        assert_eq!(get_hook("post-create", None), None);
+    }
+
+    #[test]
+    fn get_hook_returns_empty_content_when_hook_file_is_empty() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("hooks-empty-file");
+        write_file(&repo, ".ez/hooks/post-create/default.md", "");
+        let _cwd = CwdGuard::enter(&repo);
+
+        assert_eq!(get_hook("post-create", None).as_deref(), Some(""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn get_hook_returns_none_when_hook_file_is_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = take_env_lock();
+        let repo = init_git_repo("hooks-unreadable-file");
+        write_file(&repo, ".ez/hooks/post-create/default.md", "secret\n");
+        let hook = repo.join(".ez/hooks/post-create/default.md");
+        let mut perms = std::fs::metadata(&hook).expect("metadata").permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&hook, perms).expect("chmod unreadable");
+        let _cwd = CwdGuard::enter(&repo);
+
+        assert_eq!(get_hook("post-create", None), None);
+    }
+
+    #[test]
+    fn emit_hook_returns_false_when_hook_file_is_missing() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("hooks-emit-missing");
+        let _cwd = CwdGuard::enter(&repo);
+
+        assert!(!emit_hook("post-create", None));
+    }
+
+    #[test]
+    fn emit_hook_returns_false_when_hook_file_is_empty() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("hooks-emit-empty");
+        write_file(&repo, ".ez/hooks/post-create/default.md", "\n\t\n");
+        let _cwd = CwdGuard::enter(&repo);
+
+        assert!(!emit_hook("post-create", None));
+    }
+
+    #[test]
+    fn emit_hook_returns_true_for_default_hook() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("hooks-emit-default");
+        write_file(&repo, ".ez/hooks/post-create/default.md", "run setup\n");
+        let _cwd = CwdGuard::enter(&repo);
+
+        assert!(emit_hook("post-create", None));
+    }
+
+    #[test]
+    fn emit_hook_returns_true_for_named_hook() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("hooks-emit-named");
+        write_file(
+            &repo,
+            ".ez/hooks/post-create/setup-python.md",
+            "run python\n",
+        );
+        let _cwd = CwdGuard::enter(&repo);
+
+        assert!(emit_hook("post-create", Some("setup-python")));
+    }
+
+    #[test]
+    fn list_hooks_returns_sorted_markdown_stems_from_main_worktree() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("hooks-list-real");
+        write_file(&repo, ".ez/hooks/post-create/z-last.md", "");
+        write_file(&repo, ".ez/hooks/post-create/a-first.md", "");
+        write_file(&repo, ".ez/hooks/post-create/readme.txt", "");
+        let worktree = create_linked_worktree(&repo, "feat/list-hooks");
+        let _cwd = CwdGuard::enter(&worktree);
+
+        assert_eq!(
+            list_hooks("post-create"),
+            vec!["a-first".to_string(), "z-last".to_string()]
+        );
     }
 }
