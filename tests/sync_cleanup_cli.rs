@@ -653,6 +653,52 @@ fn sync_autostash_restores_tracked_and_untracked_changes_after_restack_conflict(
 }
 
 #[test]
+fn sync_autostash_warns_and_keeps_stash_when_pop_conflicts_after_trunk_update() {
+    let repo = init_repo(
+        "sync-cleanup-autostash-pop-conflict",
+        "main",
+        serde_json::json!({}),
+    );
+    commit_file(&repo.path, "user.txt", "clean\n", "add user file");
+    run(&repo.path, "git", &["push", "origin", "main"]);
+    let remote_main = remote_main_change(
+        &repo,
+        "user.txt",
+        "upstream user edit\n",
+        "conflicting upstream user change",
+    );
+    write_file(&repo.path, "user.txt", "dirty user edit\n");
+
+    let output = run_ez(
+        &repo,
+        &repo.path,
+        &["sync", "--autostash"],
+        open_base_graphql(),
+    );
+
+    assert!(
+        output.status.success(),
+        "stash pop conflicts should warn after successful sync rather than failing the sync command:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Stashed uncommitted changes"), "{stderr}");
+    assert!(stderr.contains("Failed to pop autostash"), "{stderr}");
+    assert_eq!(git_output(&repo.path, &["rev-parse", "main"]), remote_main);
+    let conflicted_file =
+        std::fs::read_to_string(repo.path.join("user.txt")).expect("read conflicted user file");
+    assert!(
+        conflicted_file.contains("<<<<<<< Updated upstream"),
+        "{conflicted_file}"
+    );
+    assert!(
+        !git_output(&repo.path, &["stash", "list"]).is_empty(),
+        "failed stash pop should leave the autostash recoverable"
+    );
+}
+
+#[test]
 fn sync_refuses_to_overwrite_dirty_trunk_when_remote_advances() {
     let repo = init_repo(
         "sync-cleanup-dirty-trunk-advance",
