@@ -1207,6 +1207,44 @@ exit 2
     }
 
     #[test]
+    fn get_all_pr_statuses_paginates_configured_repo_until_short_page() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-all-pr-pagination",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "api" ] && [ "$2" = 'repos/owner/repo/pulls?state=all&per_page=100&page=1' ]; then
+  printf '['
+  i=0
+  while [ "$i" -lt 100 ]; do
+    if [ "$i" -gt 0 ]; then printf ','; fi
+    printf '{"number":%s,"html_url":"https://github.com/owner/repo/pull/%s","state":"open","title":"PR %s","draft":false,"merged_at":null,"base":{"ref":"main"},"head":{"ref":"feat/page1-%s"}}' "$i" "$i" "$i" "$i"
+    i=$((i + 1))
+  done
+  printf ']'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = 'repos/owner/repo/pulls?state=all&per_page=100&page=2' ]; then
+  printf '[{"number":200,"html_url":"https://github.com/owner/repo/pull/200","state":"closed","title":"Page 2","draft":true,"merged_at":"2026-01-01T00:00:00Z","base":{"ref":"develop"},"head":{"ref":"feat/page2"}}]'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let statuses = get_all_pr_statuses(Some("owner/repo"));
+
+        assert_eq!(statuses.len(), 101);
+        assert_eq!(statuses.get("feat/page1-0").expect("page 1").number, 0);
+        let page2 = statuses.get("feat/page2").expect("page 2");
+        assert_eq!(page2.number, 200);
+        assert_eq!(page2.base, "develop");
+        assert!(page2.is_draft);
+        assert!(page2.merged);
+    }
+
+    #[test]
     fn gh_wrappers_work_against_fake_cli() {
         let _guard = take_env_lock();
         let fake_dir = install_fake_gh("wrappers");
@@ -1405,6 +1443,107 @@ exit 1
         assert_eq!(map.get("feat/merged").expect("pr").number, 42);
         let log = std::fs::read_to_string(log_path).expect("graphql log");
         assert!(log.contains("\t-F\towner=upstream\t-F\tname=repo\t-f\tquery="));
+    }
+
+    #[test]
+    fn numbered_pr_graphql_helpers_filter_by_stored_head_ref() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-numbered-pr-helpers",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  case "$*" in
+    *"num=77"*)
+      printf '%s' '{"data":{"repository":{"pullRequest":{"number":77,"url":"https://github.com/org/repo/pull/77","state":"OPEN","title":"Exact","baseRefName":"main","headRefName":"feat/exact","isDraft":false,"mergedAt":null}}}}'
+      exit 0
+      ;;
+    *"num=404"*)
+      printf '%s' '{"data":{"repository":{"pullRequest":null}}}'
+      exit 0
+      ;;
+    *)
+      printf '%s' '{"data":{"repository":{"b0":{"number":10,"url":"https://github.com/org/repo/pull/10","state":"OPEN","title":"Match","baseRefName":"main","headRefName":"feat/match","isDraft":false,"mergedAt":null},"b1":{"number":11,"url":"https://github.com/org/repo/pull/11","state":"OPEN","title":"Mismatch","baseRefName":"main","headRefName":"other/head","isDraft":false,"mergedAt":null},"b2":{"url":"https://github.com/org/repo/pull/12","state":"OPEN","title":"Malformed","baseRefName":"main","headRefName":"feat/malformed","isDraft":false,"mergedAt":null}}}}'
+      exit 0
+      ;;
+  esac
+fi
+exit 2
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let statuses = get_pr_statuses_by_number(
+            "missing-remote",
+            Some("org/repo"),
+            &[
+                ("feat/match", 10),
+                ("feat/expected", 11),
+                ("feat/malformed", 12),
+            ],
+        );
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses.get("feat/match").expect("matching pr").number, 10);
+        assert!(!statuses.contains_key("feat/expected"));
+        assert!(!statuses.contains_key("feat/malformed"));
+
+        let (head, pr) =
+            get_pr_by_number("missing-remote", Some("org/repo"), 77).expect("exact pr");
+        assert_eq!(head, "feat/exact");
+        assert_eq!(pr.number, 77);
+        assert!(get_pr_by_number("missing-remote", Some("org/repo"), 404).is_none());
+    }
+
+    #[test]
+    fn ci_status_helpers_map_terminal_running_and_malformed_outputs() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-ci-status-helpers",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "api" ] && [ "$2" = 'repos/owner/repo/actions/runs?per_page=50' ]; then
+  printf 'feat/success\tcompleted\tsuccess\n'
+  printf 'feat/failure\tcompleted\tfailure\n'
+  printf 'feat/running\tin_progress\t\n'
+  printf 'feat/queued\tqueued\t\n'
+  printf 'feat/waiting\twaiting\t\n'
+  printf 'feat/unknown\tstartup\t\n'
+  printf 'broken-line\n'
+  printf 'feat/success\tcompleted\tfailure\n'
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  case "$4" in
+    feat/success) printf '{"status":"completed","conclusion":"success"}' ;;
+    feat/failure) printf '{"status":"completed","conclusion":"failure"}' ;;
+    feat/running) printf '{"status":"queued","conclusion":null}' ;;
+    feat/unknown) printf '{"status":"startup","conclusion":null}' ;;
+    feat/bad-json) printf '{not-json' ;;
+    feat/null) printf 'null' ;;
+  esac
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        assert!(get_all_ci_statuses(Some("bad/repo/extra")).is_empty());
+        let statuses = get_all_ci_statuses(Some("owner/repo"));
+        assert_eq!(statuses.get("feat/success").expect("success"), "✓");
+        assert_eq!(statuses.get("feat/failure").expect("failure"), "✗");
+        assert_eq!(statuses.get("feat/running").expect("running"), "⏳");
+        assert_eq!(statuses.get("feat/queued").expect("queued"), "⏳");
+        assert_eq!(statuses.get("feat/waiting").expect("waiting"), "⏳");
+        assert!(!statuses.contains_key("feat/unknown"));
+        assert_eq!(statuses.len(), 5);
+
+        assert_eq!(get_ci_status("feat/success", Some("owner/repo")), "✓");
+        assert_eq!(get_ci_status("feat/failure", Some("owner/repo")), "✗");
+        assert_eq!(get_ci_status("feat/running", Some("owner/repo")), "⏳");
+        assert_eq!(get_ci_status("feat/unknown", Some("owner/repo")), "");
+        assert_eq!(get_ci_status("feat/bad-json", Some("owner/repo")), "");
+        assert_eq!(get_ci_status("feat/null", Some("owner/repo")), "");
     }
 
     #[test]
