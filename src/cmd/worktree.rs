@@ -1357,6 +1357,73 @@ mod tests {
     }
 
     #[test]
+    fn human_result_emitters_cover_claimed_idempotent_and_release_variants() {
+        let lease = Lease::new("agent-a", "feat/base", 10, 60).expect("lease");
+        let lease_view = lease.view(20);
+
+        emit_claim_result(
+            ClaimResult {
+                cmd: "worktree.claim".to_string(),
+                branch: "feat/base".to_string(),
+                path: "/tmp/base".to_string(),
+                claimed: true,
+                lease: lease_view.clone(),
+            },
+            false,
+        )
+        .expect("claimed human result");
+        emit_claim_result(
+            ClaimResult {
+                cmd: "worktree.claim".to_string(),
+                branch: "feat/base".to_string(),
+                path: "/tmp/base".to_string(),
+                claimed: false,
+                lease: lease_view,
+            },
+            false,
+        )
+        .expect("idempotent human result");
+        emit_release_result(
+            ReleaseResult {
+                cmd: "worktree.release".to_string(),
+                branch: "feat/base".to_string(),
+                path: "/tmp/base".to_string(),
+                released: true,
+            },
+            false,
+        )
+        .expect("released human result");
+        emit_release_result(
+            ReleaseResult {
+                cmd: "worktree.release".to_string(),
+                branch: "feat/base".to_string(),
+                path: "/tmp/base".to_string(),
+                released: false,
+            },
+            false,
+        )
+        .expect("already available human result");
+    }
+
+    #[test]
+    fn linked_worktree_claim_target_rejects_trunk_and_unmanaged_before_worktree_lookup() {
+        let _lock = take_env_lock();
+        let repo = init_git_repo("fleet-linked-target-validation");
+        let _cwd = CwdGuard::enter(&repo);
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/base", "main", "m", None, None);
+        state.save().expect("save stack");
+
+        let trunk = linked_worktree_for(Some("main")).expect_err("trunk must be rejected");
+        assert!(trunk.to_string().contains("trunk"));
+        assert!(trunk.to_string().contains("cannot be claimed"));
+
+        let unmanaged =
+            linked_worktree_for(Some("feat/unknown")).expect_err("unmanaged must be rejected");
+        assert!(unmanaged.to_string().contains("not tracked by ez"));
+    }
+
+    #[test]
     fn registered_worktree_guard_reports_missing_and_wrong_owner_paths() {
         let _lock = take_env_lock();
         let fixture = FleetRepo::new("fleet-registered-guard");
@@ -1765,6 +1832,127 @@ mod tests {
                         && worktree.branch.as_deref() == Some("feat/base")
                         && worktree.locked_reason.is_none()
                 })
+        );
+    }
+
+    #[test]
+    fn rollback_reports_registered_branch_mismatch_without_removing_replacement() {
+        let _lock = take_env_lock();
+        let fixture = FleetRepo::new("fleet-rollback-branch-mismatch");
+        let _cwd = CwdGuard::enter(&fixture.repo);
+        let base_path = git::worktree_path("feat/base").expect("base path");
+        let mut calls = 0;
+
+        let error = ensure_with_adder(&[], false, |path, branch, lock_reason| {
+            calls += 1;
+            if calls == 2 {
+                git::worktree_unlock(&base_path).expect("unlock first worktree");
+                git::worktree_remove(&base_path).expect("remove first worktree");
+                git::worktree_add(&base_path, "feat/child").expect("install replacement child");
+                bail!("injected add failure after branch replacement");
+            }
+            add_owned_worktree(path, branch, lock_reason)
+        })
+        .expect_err("branch mismatch must make rollback incomplete");
+
+        assert!(error.to_string().contains("rollback was incomplete"));
+        assert!(
+            error
+                .to_string()
+                .contains("expected `feat/base`, found `feat/child`")
+        );
+        assert!(
+            git::worktree_list()
+                .expect("worktree list")
+                .iter()
+                .any(|worktree| {
+                    worktree.path == base_path && worktree.branch.as_deref() == Some("feat/child")
+                })
+        );
+    }
+
+    #[test]
+    fn rollback_reports_missing_registered_worktree_before_removal() {
+        let _lock = take_env_lock();
+        let fixture = FleetRepo::new("fleet-rollback-missing-path");
+        let _cwd = CwdGuard::enter(&fixture.repo);
+        let base_path = git::worktree_path("feat/base").expect("base path");
+        let hidden_base_path = format!("{base_path}.hidden");
+        let mut calls = 0;
+
+        let error = ensure_with_adder(&[], false, |path, branch, lock_reason| {
+            calls += 1;
+            if calls == 2 {
+                std::fs::rename(&base_path, &hidden_base_path).expect("hide owned worktree");
+                bail!("injected add failure after hiding registered path");
+            }
+            add_owned_worktree(path, branch, lock_reason)
+        })
+        .expect_err("missing registered worktree must make rollback incomplete");
+        std::fs::rename(&hidden_base_path, &base_path).expect("restore hidden worktree");
+
+        assert!(error.to_string().contains("rollback was incomplete"));
+        assert!(error.to_string().contains("inspect `feat/base` worktree"));
+    }
+
+    #[test]
+    fn rollback_reports_git_state_lookup_failure_before_removal_or_unlock() {
+        let _lock = take_env_lock();
+        let fixture = FleetRepo::new("fleet-rollback-git-state-failure");
+        let _cwd = CwdGuard::enter(&fixture.repo);
+        let base_path = git::worktree_path("feat/base").expect("base path");
+        add_owned_worktree(&base_path, "feat/base", "expected-lock").expect("add locked base");
+        let git_dir = fixture.repo.join(".git");
+        let hidden_git_dir = fixture.repo.join(".git-hidden-during-rollback");
+
+        std::fs::rename(&git_dir, &hidden_git_dir).expect("hide git dir");
+        let errors = rollback_created_worktrees(&[OwnedWorktree {
+            branch: "feat/base".to_string(),
+            path: base_path,
+            lock_reason: "expected-lock".to_string(),
+        }]);
+        std::fs::rename(&hidden_git_dir, &git_dir).expect("restore git dir");
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("verify `feat/base` worktree"));
+    }
+
+    #[test]
+    fn unlock_created_worktrees_reports_git_state_lookup_failure() {
+        let _lock = take_env_lock();
+        let fixture = FleetRepo::new("fleet-unlock-git-state-failure");
+        let _cwd = CwdGuard::enter(&fixture.repo);
+        let base_path = git::worktree_path("feat/base").expect("base path");
+        add_owned_worktree(&base_path, "feat/base", "expected-lock").expect("add locked base");
+        let git_dir = fixture.repo.join(".git");
+        let hidden_git_dir = fixture.repo.join(".git-hidden-during-unlock");
+
+        std::fs::rename(&git_dir, &hidden_git_dir).expect("hide git dir");
+        let errors = unlock_created_worktrees(&[OwnedWorktree {
+            branch: "feat/base".to_string(),
+            path: base_path,
+            lock_reason: "expected-lock".to_string(),
+        }]);
+        std::fs::rename(&hidden_git_dir, &git_dir).expect("restore git dir");
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("verify `feat/base` worktree"));
+    }
+
+    #[test]
+    fn path_occupation_reports_inspection_errors() {
+        let root = temp_dir("fleet-path-occupied-error");
+        let file_parent = root.join("not-a-directory");
+        std::fs::write(&file_parent, "file\n").expect("write file parent");
+
+        let error = path_is_occupied(&file_parent.join("child"))
+            .expect_err("not-a-directory lookup must be surfaced");
+
+        assert!(error.to_string().contains("inspect path"));
+        assert!(
+            error
+                .to_string()
+                .contains(file_parent.join("child").to_string_lossy().as_ref())
         );
     }
 
