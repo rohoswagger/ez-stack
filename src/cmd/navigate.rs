@@ -271,6 +271,38 @@ mod tests {
     }
 
     #[test]
+    fn child_picker_labels_include_pr_badges_and_linked_worktree_suffixes() {
+        let state = fork_state();
+        let children = state.children_of("main");
+        let wt_map = HashMap::from([
+            ("line-a".to_string(), "/repo/.worktrees/line-a".to_string()),
+            ("line-b".to_string(), "/repo/line-b".to_string()),
+        ]);
+
+        let labels = child_picker_labels(&state, &children, &wt_map);
+
+        assert_eq!(labels.len(), 2);
+        assert!(labels[0].contains("line-a"), "{labels:?}");
+        assert!(labels[0].contains("#10"), "{labels:?}");
+        assert!(labels[0].contains("[wt: line-a]"), "{labels:?}");
+        assert!(labels[1].contains("line-b"), "{labels:?}");
+        assert!(labels[1].contains("#20"), "{labels:?}");
+        assert!(!labels[1].contains("[wt:"), "{labels:?}");
+    }
+
+    #[test]
+    fn child_picker_labels_omit_pr_badges_for_prless_children() {
+        let state = sample_state();
+        let children = state.children_of("feat/a");
+
+        let labels = child_picker_labels(&state, &children, &HashMap::new());
+
+        assert_eq!(labels.len(), 1);
+        assert!(labels[0].contains("feat/b"), "{labels:?}");
+        assert!(!labels[0].contains('#'), "{labels:?}");
+    }
+
+    #[test]
     fn resolve_explicit_child_by_pr() {
         let state = fork_state();
         let children = state.children_of("main");
