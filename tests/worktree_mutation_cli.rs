@@ -399,7 +399,7 @@ fn stdout_text(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn save_stack_state(repo: &TempRepo, state: &Value) {
+fn save_stack_state_for_move_test(repo: &TempRepo, state: &Value) {
     let common_dir = stdout_text(&run(&repo.path, "git", &["rev-parse", "--git-common-dir"]));
     let common_dir = PathBuf::from(common_dir);
     let common_dir = if common_dir.is_absolute() {
@@ -414,10 +414,10 @@ fn save_stack_state(repo: &TempRepo, state: &Value) {
     .expect("write stack state");
 }
 
-fn set_pr_number(repo: &TempRepo, branch: &str, pr_number: u64) {
+fn set_pr_number_for_move_test(repo: &TempRepo, branch: &str, pr_number: u64) {
     let mut state = repo.stack_state();
     state["branches"][branch]["pr_number"] = Value::from(pr_number);
-    save_stack_state(repo, &state);
+    save_stack_state_for_move_test(repo, &state);
 }
 
 fn commit_file(dir: &Path, file: &str, contents: &str, message: &str) {
@@ -732,7 +732,7 @@ fn move_warns_when_pr_base_update_fails_but_persists_local_move() {
     commit_file(&base_worktree, "base.txt", "base\n", "base");
     let topic_worktree = repo.create_worktree("feat/topic", "feat/base");
     commit_file(&topic_worktree, "topic.txt", "topic\n", "topic");
-    set_pr_number(&repo, "feat/topic", 123);
+    set_pr_number_for_move_test(&repo, "feat/topic", 123);
     let gh_log = repo.path.join("gh.log");
 
     let output = run_ez_with_fake_gh(
