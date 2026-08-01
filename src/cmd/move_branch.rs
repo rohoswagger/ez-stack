@@ -54,10 +54,17 @@ pub fn run(onto: Option<&str>) -> Result<()> {
     let pr_number = meta.pr_number;
 
     let new_parent_head = git::rev_parse(onto)?;
+    let (old_base, derived) =
+        crate::cmd::restack::effective_old_base(&current, &old_parent, &old_parent_head);
+    if derived {
+        ui::info(&format!(
+            "Recorded base for `{current}` is stale — deriving its replay range from git instead"
+        ));
+    }
 
     // Rebase current branch onto the new parent.
     let sp = ui::spinner(&format!("Rebasing `{current}` onto `{onto}`..."));
-    let outcome = git::rebase_onto(&new_parent_head, &old_parent_head, &current)?;
+    let outcome = git::rebase_onto(&new_parent_head, &old_base, &current)?;
     sp.finish_and_clear();
 
     if let git::RebaseOutcome::Conflict(conflict) = outcome {

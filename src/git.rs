@@ -389,11 +389,25 @@ fn rebase_onto_impl(
     old_base: &str,
     branch: Option<&str>,
 ) -> Result<RebaseOutcome> {
+    if rebase_in_progress_impl(scope) {
+        let location = scope.unwrap_or("the current worktree");
+        bail!(EzError::UserMessage(format!(
+            "a rebase is already in progress in `{location}`\n  → Finish or abort that rebase before retrying"
+        )));
+    }
+
     let mut args: Vec<&str> = Vec::new();
     if let Some(dir) = scope {
         args.extend(["-C", dir]);
     }
-    args.extend(["rebase", "--onto", new_base, old_base]);
+    args.extend([
+        "-c",
+        "rebase.autoStash=false",
+        "rebase",
+        "--onto",
+        new_base,
+        old_base,
+    ]);
     if let Some(branch_name) = branch {
         args.push(branch_name);
     }
@@ -413,8 +427,9 @@ fn rebase_onto_impl(
         let _ = run_git(&abort_args);
         Ok(RebaseOutcome::Conflict(parse_rebase_conflict(&stderr)))
     } else {
-        // Some other rebase failure — try to abort and report
-        let _ = run_git(&abort_args);
+        if rebase_in_progress_impl(scope) && !reports_existing_rebase(&stderr) {
+            let _ = run_git(&abort_args);
+        }
         bail!(EzError::GitError(stderr));
     }
 }
@@ -436,7 +451,14 @@ pub fn rebase_onto_for_branch(
     current_root: &str,
 ) -> Result<RebaseOutcome> {
     if let Some(wt_path) = branch_checked_out_elsewhere(branch, current_root)? {
-        rebase_onto_at(&wt_path, new_base, old_base)
+        verify_worktree_branch_at(&wt_path, branch)?;
+        match rebase_onto_at(&wt_path, new_base, old_base) {
+            Ok(outcome) => {
+                verify_worktree_branch_at(&wt_path, branch)?;
+                Ok(outcome)
+            }
+            Err(error) => Err(error),
+        }
     } else {
         rebase_onto(new_base, old_base, branch)
     }
@@ -501,6 +523,13 @@ fn parse_rebase_conflict(stderr: &str) -> RebaseConflict {
     }
 }
 
+fn reports_existing_rebase(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("already a rebase-")
+        || stderr.contains("another rebase")
+        || stderr.contains("rebase already in progress")
+}
+
 fn parse_conflicting_files(stderr: &str) -> Vec<String> {
     let mut files = BTreeSet::new();
 
@@ -533,10 +562,18 @@ fn parse_conflicting_files(stderr: &str) -> Vec<String> {
 }
 
 fn rebase_impl(scope: Option<&str>, upstream: &str, branch: Option<&str>) -> Result<bool> {
+    if rebase_in_progress_impl(scope) {
+        let location = scope.unwrap_or("the current worktree");
+        bail!(EzError::UserMessage(format!(
+            "a rebase is already in progress in `{location}`\n  → Finish or abort that rebase before retrying"
+        )));
+    }
+
     let mut args: Vec<&str> = Vec::new();
     if let Some(dir) = scope {
         args.extend(["-C", dir]);
     }
+    args.extend(["-c", "rebase.autoStash=false"]);
     args.push("rebase");
     args.push(upstream);
     if let Some(branch_name) = branch {
@@ -553,13 +590,14 @@ fn rebase_impl(scope: Option<&str>, upstream: &str, branch: Option<&str>) -> Res
 
     if success {
         Ok(true)
-    } else {
+    } else if stderr.contains("CONFLICT") || stderr.contains("conflict") {
         let _ = run_git(&abort_args);
-        if stderr.contains("CONFLICT") || stderr.contains("conflict") {
-            Ok(false)
-        } else {
-            bail!(EzError::GitError(stderr));
+        Ok(false)
+    } else {
+        if rebase_in_progress_impl(scope) && !reports_existing_rebase(&stderr) {
+            let _ = run_git(&abort_args);
         }
+        bail!(EzError::GitError(stderr));
     }
 }
 
@@ -577,7 +615,14 @@ pub fn rebase_at(dir: &str, upstream: &str) -> Result<bool> {
 /// Rebase `branch` onto `upstream`, running the rebase in its worktree when checked out elsewhere.
 pub fn rebase_for_branch(upstream: &str, branch: &str, current_root: &str) -> Result<bool> {
     if let Some(wt_path) = branch_checked_out_elsewhere(branch, current_root)? {
-        rebase_at(&wt_path, upstream)
+        verify_worktree_branch_at(&wt_path, branch)?;
+        match rebase_at(&wt_path, upstream) {
+            Ok(outcome) => {
+                verify_worktree_branch_at(&wt_path, branch)?;
+                Ok(outcome)
+            }
+            Err(error) => Err(error),
+        }
     } else {
         rebase(upstream, branch)
     }
@@ -939,6 +984,22 @@ pub fn branch_checked_out_elsewhere(branch: &str, current_root: &str) -> Result<
     Ok(None)
 }
 
+fn verify_worktree_branch_at(path: &str, expected_branch: &str) -> Result<()> {
+    let actual_branch = run_git(&["-C", path, "branch", "--show-current"])?;
+    if actual_branch == expected_branch {
+        return Ok(());
+    }
+
+    let actual = if actual_branch.is_empty() {
+        "detached HEAD".to_string()
+    } else {
+        format!("`{actual_branch}`")
+    };
+    bail!(EzError::UserMessage(format!(
+        "worktree ownership changed at `{path}`: expected `{expected_branch}`, found {actual}\n  → Retry after the worktree is attached to `{expected_branch}`"
+    )));
+}
+
 /// Update a local branch to the latest fetched remote-tracking ref without requiring checkout.
 ///
 /// Returns `Ok(true)` when the branch moved, `Ok(false)` when it was already up to date.
@@ -1201,7 +1262,9 @@ exit 0
         rebase_onto_at("/repo/.worktrees/feat-a", "main", "old-base").expect("rebase at");
         assert_eq!(
             std::fs::read_to_string(log_path).expect("log"),
-            "-C /repo/.worktrees/feat-a rebase --onto main old-base\n"
+            "-C /repo/.worktrees/feat-a rev-parse --git-path rebase-merge\n\
+-C /repo/.worktrees/feat-a rev-parse --git-path rebase-apply\n\
+-C /repo/.worktrees/feat-a -c rebase.autoStash=false rebase --onto main old-base\n"
         );
     }
 
@@ -1215,7 +1278,7 @@ exit 0
             "git",
             &format!(
                 r#"#!/bin/sh
-if [ "$1" = "rebase" ] && [ "$2" = "--onto" ]; then
+if [ "$1" = "-c" ] && [ "$2" = "rebase.autoStash=false" ] && [ "$3" = "rebase" ] && [ "$4" = "--onto" ]; then
   echo "CONFLICT (content): Merge conflict in src/lib.rs" >&2
   exit 1
 fi
@@ -1242,6 +1305,52 @@ exit 0
             std::fs::read_to_string(log_path).expect("abort log"),
             "abort\n"
         );
+    }
+
+    #[test]
+    fn rebase_onto_does_not_abort_state_that_won_the_preflight_race() {
+        let _guard = take_env_lock();
+        let fixture_dir = crate::test_support::temp_dir("git-rebase-race");
+        let state_dir = fixture_dir.join("rebase-merge");
+        let abort_log = fixture_dir.join("abort.log");
+        let fake_dir = install_fake_bin(
+            "git-rebase-race-bin",
+            "git",
+            &format!(
+                r#"#!/bin/sh
+if [ "$1" = "rev-parse" ] && [ "$2" = "--git-path" ] && [ "$3" = "rebase-merge" ]; then
+  echo "{}"
+  exit 0
+fi
+if [ "$1" = "rev-parse" ] && [ "$2" = "--git-path" ] && [ "$3" = "rebase-apply" ]; then
+  echo "{}/rebase-apply"
+  exit 0
+fi
+if [ "$1" = "-c" ] && [ "$2" = "rebase.autoStash=false" ] && [ "$3" = "rebase" ]; then
+  mkdir -p "{}"
+  echo "fatal: It seems that there is already a rebase-merge directory, and I wonder if you are in the middle of another rebase." >&2
+  exit 1
+fi
+if [ "$1" = "rebase" ] && [ "$2" = "--abort" ]; then
+  echo abort >> "{}"
+  exit 0
+fi
+exit 0
+"#,
+                state_dir.display(),
+                fixture_dir.display(),
+                state_dir.display(),
+                abort_log.display(),
+            ),
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let error = rebase_onto("main", "old-base", "feature")
+            .expect_err("racing rebase state should fail");
+
+        assert!(error.to_string().contains("another rebase"));
+        assert!(state_dir.exists(), "concurrent rebase state must survive");
+        assert!(!abort_log.exists(), "ez must not abort the racing rebase");
     }
 
     #[test]
@@ -1444,6 +1553,23 @@ exit 0
         assert_eq!(
             branch_checked_out_elsewhere("feat/test", &repo_canonical).expect("checked elsewhere"),
             Some(wt_path.clone())
+        );
+        verify_worktree_branch_at(&wt_path, "feat/test").expect("verified worktree owner");
+
+        create_branch_at("feat/other", "main").expect("create alternate branch");
+        run_cmd(
+            std::path::Path::new(&wt_path),
+            "git",
+            &["checkout", "feat/other"],
+        );
+        let mismatch = verify_worktree_branch_at(&wt_path, "feat/test")
+            .expect_err("worktree owner change must be detected");
+        assert!(mismatch.to_string().contains("expected `feat/test`"));
+        assert!(mismatch.to_string().contains("found `feat/other`"));
+        run_cmd(
+            std::path::Path::new(&wt_path),
+            "git",
+            &["checkout", "feat/test"],
         );
 
         worktree_remove_force(&wt_path).expect("remove worktree");
