@@ -728,6 +728,113 @@ fn move_rejects_self_and_descendant_targets_without_mutating_state() {
 }
 
 #[test]
+fn move_rejects_missing_target_trunk_current_and_unmanaged_current_without_mutating_state() {
+    let repo = TempRepo::new();
+    let base_worktree = repo.create_worktree("feat/base", "main");
+    commit_file(&base_worktree, "base.txt", "base\n", "base");
+    let state_before = repo.stack_state();
+    let base_before = branch_tip(&repo.path, "feat/base");
+    let main_before = branch_tip(&repo.path, "main");
+
+    let missing_onto = run_ez_raw(&base_worktree, &["move"]);
+
+    assert!(!missing_onto.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_onto.stderr)
+            .contains("Missing target branch for `ez move --onto`"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&missing_onto.stderr)
+    );
+    assert_eq!(repo.stack_state(), state_before);
+    assert_eq!(branch_tip(&repo.path, "feat/base"), base_before);
+
+    let trunk_current = run_ez_raw(&repo.path, &["move", "--onto", "main"]);
+
+    assert!(!trunk_current.status.success());
+    assert!(
+        String::from_utf8_lossy(&trunk_current.stderr).contains("currently on trunk branch"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&trunk_current.stderr)
+    );
+    assert_eq!(branch_tip(&repo.path, "main"), main_before);
+    assert_eq!(repo.stack_state(), state_before);
+
+    run(&repo.path, "git", &["switch", "-c", "scratch"]);
+    let unmanaged_current = run_ez_raw(&repo.path, &["move", "--onto", "main"]);
+
+    assert!(!unmanaged_current.status.success());
+    assert!(
+        String::from_utf8_lossy(&unmanaged_current.stderr)
+            .contains("branch `scratch` is not tracked by ez"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&unmanaged_current.stderr)
+    );
+    assert_eq!(branch_tip(&repo.path, "feat/base"), base_before);
+    assert_eq!(repo.stack_state(), state_before);
+}
+
+#[test]
+fn move_rejects_unknown_target_without_mutating_state() {
+    let repo = TempRepo::new();
+    let base_worktree = repo.create_worktree("feat/base", "main");
+    commit_file(&base_worktree, "base.txt", "base\n", "base");
+    let state_before = repo.stack_state();
+    let base_before = branch_tip(&repo.path, "feat/base");
+
+    let output = run_ez_raw(&base_worktree, &["move", "--onto", "scratch"]);
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Target branch `scratch` is not trunk or a managed branch"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(branch_tip(&repo.path, "feat/base"), base_before);
+    assert_eq!(repo.stack_state(), state_before);
+}
+
+#[test]
+fn move_onto_branch_that_already_contains_patch_aligns_without_rebase() {
+    let repo = TempRepo::new();
+    let source_worktree = repo.create_worktree("feat/source", "main");
+    commit_file(
+        &source_worktree,
+        "shared.txt",
+        "same patch\n",
+        "source patch",
+    );
+    let target_worktree = repo.create_worktree("feat/target", "main");
+    commit_file(
+        &target_worktree,
+        "shared.txt",
+        "same patch\n",
+        "target already has patch",
+    );
+    let target_tip = branch_tip(&repo.path, "feat/target");
+
+    let output = run_ez_raw(&source_worktree, &["move", "--onto", "feat/target"]);
+
+    assert!(
+        output.status.success(),
+        "redundant move should succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#""method":"already_applied""#),
+        "move should report already-applied alignment:\n{stderr}"
+    );
+    assert_eq!(branch_tip(&repo.path, "feat/source"), target_tip);
+    let state = repo.stack_state();
+    assert_eq!(state["branches"]["feat/source"]["parent"], "feat/target");
+    assert_eq!(state["branches"]["feat/source"]["parent_head"], target_tip);
+    assert_eq!(current_branch(&source_worktree), "feat/source");
+    assert_eq!(status_porcelain(&source_worktree), "");
+}
+
+#[test]
 fn move_warns_when_pr_base_update_fails_but_persists_local_move() {
     let repo = TempRepo::new();
     let base_worktree = repo.create_worktree("feat/base", "main");
