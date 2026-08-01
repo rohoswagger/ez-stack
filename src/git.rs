@@ -243,6 +243,11 @@ pub fn cherry(upstream: &str, branch: &str) -> Result<String> {
     run_git(&["cherry", upstream, branch])
 }
 
+/// Run `git cherry <upstream> <branch> <limit>` to inspect only commits after `limit`.
+pub fn cherry_from(upstream: &str, branch: &str, limit: &str) -> Result<String> {
+    run_git(&["cherry", upstream, branch, limit])
+}
+
 /// Stage all tracked modified/deleted files. Uses `git add -u` (NOT `git add -A`)
 /// so untracked files are never accidentally staged by the -a flag.
 pub fn add_all() -> Result<()> {
@@ -660,6 +665,56 @@ pub fn reset_keep_at(dir: &str, target: &str) -> Result<()> {
     Ok(())
 }
 
+/// Move a branch to `target` without detaching or dirtying its owning worktree.
+///
+/// Checked-out branches move through `reset --keep` in their owning worktree so
+/// git preserves compatible local edits and refuses destructive moves. Branches
+/// not checked out anywhere move through an expected-old `update-ref`.
+pub fn align_branch_to_target(
+    branch: &str,
+    target: &str,
+    expected_old: &str,
+    current_root: &str,
+) -> Result<()> {
+    let current_tip = rev_parse(branch)?;
+    if current_tip != expected_old {
+        bail!(EzError::StaleRemoteRef(branch.to_string()));
+    }
+
+    let current_branch = current_branch().unwrap_or_default();
+    if current_branch == branch {
+        verify_worktree_branch_at(current_root, branch)?;
+        reset_keep_at(current_root, target)?;
+        verify_worktree_branch_at(current_root, branch)?;
+        if rev_parse(branch)? != target {
+            bail!(EzError::GitError(format!(
+                "`{branch}` did not align to expected target `{target}`"
+            )));
+        }
+        return Ok(());
+    }
+
+    if let Some(wt_path) = branch_checked_out_elsewhere(branch, current_root)? {
+        verify_worktree_branch_at(&wt_path, branch)?;
+        reset_keep_at(&wt_path, target)?;
+        verify_worktree_branch_at(&wt_path, branch)?;
+        if rev_parse(branch)? != target {
+            bail!(EzError::GitError(format!(
+                "`{branch}` did not align to expected target `{target}`"
+            )));
+        }
+        return Ok(());
+    }
+
+    compare_and_swap_local_branch_ref(branch, target, expected_old)?;
+    if rev_parse(branch)? != target {
+        bail!(EzError::GitError(format!(
+            "`{branch}` did not align to expected target `{target}`"
+        )));
+    }
+    Ok(())
+}
+
 pub fn push(remote: &str, branch: &str, force: bool) -> Result<()> {
     let mut args = vec!["push", remote, branch];
     if force {
@@ -726,6 +781,12 @@ pub fn merge_base(a: &str, b: &str) -> Result<String> {
 /// (i.e. `git rev-list --count base..tip`). Returns 0 on parse or git error.
 pub fn rev_list_count(base: &str, tip: &str) -> Result<u64> {
     let out = run_git(&["rev-list", "--count", &format!("{base}..{tip}")])?;
+    Ok(out.trim().parse().unwrap_or(0))
+}
+
+/// Count merge commits reachable from `tip` that are not reachable from `base`.
+pub fn rev_list_merge_count(base: &str, tip: &str) -> Result<u64> {
+    let out = run_git(&["rev-list", "--merges", "--count", &format!("{base}..{tip}")])?;
     Ok(out.trim().parse().unwrap_or(0))
 }
 

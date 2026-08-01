@@ -109,7 +109,7 @@ pub fn run(
             if state.is_managed(&current) {
                 let children = state.children_of(&current);
                 if !children.is_empty() {
-                    crate::cmd::restack::run()?;
+                    crate::cmd::restack::run(false)?;
                 }
             }
         }

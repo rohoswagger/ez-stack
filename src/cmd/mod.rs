@@ -21,6 +21,7 @@ pub mod parent;
 pub mod pr_edit;
 pub mod pr_link;
 pub mod pr_view;
+pub mod preflight;
 pub mod push;
 pub mod rebase_conflict;
 pub mod restack;

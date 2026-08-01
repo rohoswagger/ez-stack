@@ -393,6 +393,31 @@ fn restack_force_allows_merge_commit_linearization() {
 }
 
 #[test]
+fn restack_preflights_child_that_only_becomes_stale_after_parent_moves() {
+    let repo = init_repo("restack-transitive-preflight");
+    add_branch(&repo, "feat/base", "main", "base.txt", 101);
+    add_branch(&repo, "feat/child", "feat/base", "child.txt", 102);
+    let child_merge_tip = add_merge_commit_on_branch(&repo, "feat/child");
+    let base_tip = git_output(&repo.path, &["rev-parse", "feat/base"]);
+    let state_before = stack_state(&repo);
+    advance_main(&repo, "main-before-transitive-preflight.txt");
+
+    let output = run_ez(&repo, &repo.path, &["restack"]);
+
+    assert_preflight_blocked(&output, "restack");
+    assert_eq!(
+        git_output(&repo.path, &["rev-parse", "feat/base"]),
+        base_tip,
+        "command-level preflight must block before rewriting the parent"
+    );
+    assert_eq!(
+        git_output(&repo.path, &["rev-parse", "feat/child"]),
+        child_merge_tip
+    );
+    assert_eq!(stack_state(&repo), state_before);
+}
+
+#[test]
 fn move_preflights_descendants_before_rewriting_current_branch_or_pr_base() {
     let repo = init_repo("move-descendant-preflight");
     add_branch(&repo, "feat/base", "main", "base.txt", 101);

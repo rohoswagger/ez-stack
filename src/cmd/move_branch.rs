@@ -7,7 +7,7 @@ use crate::github;
 use crate::stack::StackState;
 use crate::ui;
 
-pub fn run(onto: Option<&str>) -> Result<()> {
+pub fn run(onto: Option<&str>, force: bool) -> Result<()> {
     let mut state = StackState::load()?;
     let Some(onto) = onto.filter(|value| !value.trim().is_empty()) else {
         bail!(EzError::UserMessage(missing_onto_message(&state)));
@@ -54,6 +54,8 @@ pub fn run(onto: Option<&str>) -> Result<()> {
     let pr_number = meta.pr_number;
 
     let new_parent_head = git::rev_parse(onto)?;
+    let candidates = crate::cmd::preflight::move_candidates(&state, &current, onto)?;
+    let preflight = crate::cmd::preflight::run("move", force, &candidates)?;
     let (old_base, derived) =
         crate::cmd::restack::effective_old_base(&current, &old_parent, &old_parent_head);
     if derived {
@@ -62,20 +64,42 @@ pub fn run(onto: Option<&str>) -> Result<()> {
         ));
     }
 
-    // Rebase current branch onto the new parent.
-    let sp = ui::spinner(&format!("Rebasing `{current}` onto `{onto}`..."));
-    let outcome = git::rebase_onto(&new_parent_head, &old_base, &current)?;
-    sp.finish_and_clear();
-
-    if let git::RebaseOutcome::Conflict(conflict) = outcome {
-        rebase_conflict::report(
-            "move",
+    let current_preflight = preflight
+        .branches
+        .iter()
+        .find(|branch| branch.branch == current);
+    if current_preflight.is_some_and(|branch| branch.all_redundant()) {
+        let branch_preflight = current_preflight.expect("checked is_some");
+        git::align_branch_to_target(
             &current,
-            onto,
-            &conflict,
-            &format!("ez move --onto {onto}"),
-        );
-        bail!(EzError::RebaseConflict(current.clone()));
+            &new_parent_head,
+            &branch_preflight.branch_tip,
+            &git::repo_root()?,
+        )?;
+        ui::receipt(&serde_json::json!({
+            "cmd": "move",
+            "branch": current,
+            "action": "restacked",
+            "method": "already_applied",
+            "parent": onto,
+            "redundant_commits": branch_preflight.cherry.redundant,
+        }));
+    } else {
+        // Rebase current branch onto the new parent.
+        let sp = ui::spinner(&format!("Rebasing `{current}` onto `{onto}`..."));
+        let outcome = git::rebase_onto(&new_parent_head, &old_base, &current)?;
+        sp.finish_and_clear();
+
+        if let git::RebaseOutcome::Conflict(conflict) = outcome {
+            rebase_conflict::report(
+                "move",
+                &current,
+                onto,
+                &conflict,
+                &format!("ez move --onto {onto}"),
+            );
+            bail!(EzError::RebaseConflict(current.clone()));
+        }
     }
 
     // Update branch metadata.
@@ -98,12 +122,13 @@ pub fn run(onto: Option<&str>) -> Result<()> {
     // Restack the whole subtree onto the moved branch — descendants beyond direct
     // children also need to follow, or they're left detached from the stack.
     let current_root = git::repo_root()?;
-    let restacked = crate::cmd::restack::cascade_restack(
+    let restacked = crate::cmd::restack::cascade_restack_with_options(
         &mut state,
         &current,
         &current_root,
         &current,
         "move",
+        crate::cmd::restack::RestackOptions { force },
     )?;
 
     // Checkout the current branch again (rebase may have left us on a descendant).
