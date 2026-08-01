@@ -1488,4 +1488,146 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn parses_operator_utility_commands() {
+        let shell_init = Cli::try_parse_from(["ez", "shell-init"]).expect("parse shell-init");
+        assert!(matches!(shell_init.command, Commands::ShellInit));
+
+        let setup = Cli::try_parse_from(["ez", "setup", "--yes"]).expect("parse setup");
+        assert!(matches!(setup.command, Commands::Setup { yes: true }));
+
+        let update = Cli::try_parse_from(["ez", "update", "--check"]).expect("parse update");
+        assert!(matches!(
+            update.command,
+            Commands::Update {
+                version: None,
+                check: true
+            }
+        ));
+
+        let parent = Cli::try_parse_from(["ez", "parent"]).expect("parse parent");
+        assert!(matches!(parent.command, Commands::Parent));
+
+        let pr = Cli::try_parse_from(["ez", "pr"]).expect("parse pr");
+        assert!(matches!(pr.command, Commands::Pr));
+
+        let pr_link = Cli::try_parse_from(["ez", "pr-link"]).expect("parse pr-link");
+        assert!(matches!(pr_link.command, Commands::PrLink));
+
+        let draft = Cli::try_parse_from(["ez", "draft"]).expect("parse draft");
+        assert!(matches!(draft.command, Commands::Draft));
+
+        let ready = Cli::try_parse_from(["ez", "ready"]).expect("parse ready");
+        assert!(matches!(ready.command, Commands::Ready));
+    }
+
+    #[test]
+    fn parses_diff_track_delete_pr_edit_scope_and_skill_commands() {
+        let diff = Cli::try_parse_from(["ez", "diff", "--stat", "--name-only"]).expect("diff");
+        assert!(matches!(
+            diff.command,
+            Commands::Diff {
+                stat: true,
+                name_only: true
+            }
+        ));
+
+        let track =
+            Cli::try_parse_from(["ez", "track", "feat/a", "--parent", "main"]).expect("track");
+        assert!(matches!(
+            track.command,
+            Commands::Track { branch, parent }
+                if branch.as_deref() == Some("feat/a") && parent.as_deref() == Some("main")
+        ));
+
+        let delete =
+            Cli::try_parse_from(["ez", "delete", "feat/a", "--force", "--yes"]).expect("delete");
+        assert!(matches!(
+            delete.command,
+            Commands::Delete {
+                branch,
+                force: true,
+                yes: true
+            } if branch.as_deref() == Some("feat/a")
+        ));
+
+        let pr_edit = Cli::try_parse_from([
+            "ez",
+            "pr-edit",
+            "--title",
+            "new title",
+            "--body-file",
+            "body.md",
+        ])
+        .expect("pr-edit");
+        assert!(matches!(
+            pr_edit.command,
+            Commands::PrEdit {
+                title,
+                body,
+                body_file
+            } if title.as_deref() == Some("new title")
+                && body.is_none()
+                && body_file.as_deref() == Some("body.md")
+        ));
+
+        let scope_add = Cli::try_parse_from(["ez", "scope", "add", "--mode", "strict", "src/**"])
+            .expect("scope add");
+        assert!(matches!(
+            scope_add.command,
+            Commands::Scope(ScopeArgs {
+                command: ScopeCommands::Add {
+                    mode: Some(ScopeMode::Strict),
+                    patterns
+                }
+            }) if patterns == vec!["src/**".to_string()]
+        ));
+
+        let scope_clear = Cli::try_parse_from(["ez", "scope", "clear"]).expect("scope clear");
+        assert!(matches!(
+            scope_clear.command,
+            Commands::Scope(ScopeArgs {
+                command: ScopeCommands::Clear
+            })
+        ));
+
+        let skill_install = Cli::try_parse_from(["ez", "skill", "install"]).expect("skill install");
+        assert!(matches!(
+            skill_install.command,
+            Commands::Skill(SkillArgs {
+                command: SkillCommands::Install
+            })
+        ));
+
+        let skill_uninstall =
+            Cli::try_parse_from(["ez", "skill", "uninstall"]).expect("skill uninstall");
+        assert!(matches!(
+            skill_uninstall.command,
+            Commands::Skill(SkillArgs {
+                command: SkillCommands::Uninstall
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_worktree_create_and_plain_list_commands() {
+        let create =
+            Cli::try_parse_from(["ez", "worktree", "create", "feat/new", "--from", "main"])
+                .expect("worktree create");
+        assert!(matches!(
+            create.command,
+            Commands::Worktree(WorktreeArgs {
+                command: WorktreeCommands::Create { name, from }
+            }) if name == "feat/new" && from.as_deref() == Some("main")
+        ));
+
+        let list = Cli::try_parse_from(["ez", "worktree", "list"]).expect("worktree list");
+        assert!(matches!(
+            list.command,
+            Commands::Worktree(WorktreeArgs {
+                command: WorktreeCommands::List
+            })
+        ));
+    }
 }

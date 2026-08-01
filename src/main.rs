@@ -324,4 +324,38 @@ mod tests {
         assert_eq!(exit_code_for(&EzError::UnstagedChanges.into()), 6);
         assert_eq!(exit_code_for(&anyhow::anyhow!("generic")), 1);
     }
+
+    #[test]
+    fn user_state_errors_map_to_usage_exit_code() {
+        assert_eq!(
+            exit_code_for(&EzError::BranchNotInStack("feat/x".into()).into()),
+            5
+        );
+        assert_eq!(exit_code_for(&EzError::AlreadyAtTop.into()), 5);
+        assert_eq!(exit_code_for(&EzError::AlreadyAtBottom.into()), 5);
+        assert_eq!(
+            exit_code_for(&EzError::BranchAlreadyExists("feat/x".into()).into()),
+            5
+        );
+        assert_eq!(exit_code_for(&EzError::AlreadyInitialized.into()), 5);
+        assert_eq!(exit_code_for(&EzError::NotInitialized.into()), 5);
+        assert_eq!(
+            exit_code_for(&EzError::UserMessage("explain".into()).into()),
+            5
+        );
+    }
+
+    #[test]
+    fn incomplete_restack_maps_to_conflict_exit_code() {
+        assert_eq!(
+            exit_code_for(
+                &EzError::RestackIncomplete {
+                    count: 2,
+                    branches: "feat/a, feat/b".into(),
+                }
+                .into()
+            ),
+            3
+        );
+    }
 }
