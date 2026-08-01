@@ -188,6 +188,15 @@ fn configure_fork_state(repo: &ForkRepo) {
     write_stack_state(&repo.path, &state);
 }
 
+fn configure_same_repo_state(repo: &ForkRepo) {
+    let mut state = stack_state(&repo.path);
+    state["remote"] = Value::from("fork");
+    state["repo"] = Value::from("owner/project");
+    state["upstream_remote"] = Value::Null;
+    state["fork_repo"] = Value::Null;
+    write_stack_state(&repo.path, &state);
+}
+
 fn add_feature(repo: &ForkRepo) {
     run_ez(
         &repo.path,
@@ -478,6 +487,107 @@ fi
         "{stderr}"
     );
     assert!(stderr.contains("fork"), "{stderr}");
+}
+
+#[test]
+fn submit_creates_a_github_native_stack_for_same_repo_prs() {
+    let repo = init_repo(
+        "native-submit-create",
+        r#"
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  exit 1
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  case "$*" in
+    *"--head feat/base"*) printf 'https://github.com/owner/project/pull/61\n' ;;
+    *"--head feat/top"*) printf 'https://github.com/owner/project/pull/62\n' ;;
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/owner/project/stacks?pull_request=61" ]; then
+  printf '[]\n'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "POST" ] && [ "$4" = "repos/owner/project/stacks" ]; then
+  payload=$(cat)
+  [ "$payload" = '{"pull_requests":[61,62]}' ] || exit 1
+  printf '{"number":91}\n'
+  exit 0
+fi
+"#,
+    );
+    configure_same_repo_state(&repo);
+    add_two_branch_stack(&repo);
+
+    let output = run_ez_with_fake_gh(&repo, &repo.path, &["submit"]);
+
+    assert!(
+        output.status.success(),
+        "submit failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = std::fs::read_to_string(&repo.gh_log).expect("read gh log");
+    assert!(
+        log.contains("repos/owner/project/stacks?pull_request=61"),
+        "{log}"
+    );
+    assert!(log.contains("-X POST repos/owner/project/stacks"), "{log}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#""native_stack_action":"created""#),
+        "{stderr}"
+    );
+    assert!(stderr.contains(r#""native_stack_number":91"#), "{stderr}");
+}
+
+#[test]
+fn submit_keeps_created_prs_when_native_stack_reconciliation_fails() {
+    let repo = init_repo(
+        "native-submit-error",
+        r#"
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  exit 1
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  case "$*" in
+    *"--head feat/base"*) printf 'https://github.com/owner/project/pull/71\n' ;;
+    *"--head feat/top"*) printf 'https://github.com/owner/project/pull/72\n' ;;
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/owner/project/stacks?pull_request=71" ]; then
+  printf 'simulated native stack outage\n' >&2
+  exit 1
+fi
+"#,
+    );
+    configure_same_repo_state(&repo);
+    add_two_branch_stack(&repo);
+
+    let output = run_ez_with_fake_gh(&repo, &repo.path, &["submit"]);
+
+    assert!(
+        output.status.success(),
+        "submit should preserve its successful PR work:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = stack_state(&repo.path);
+    assert_eq!(state["branches"]["feat/base"]["pr_number"], 71);
+    assert_eq!(state["branches"]["feat/top"]["pr_number"], 72);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("GitHub native stack update skipped"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("simulated native stack outage"), "{stderr}");
+    assert!(
+        stderr.contains(r#""native_stack_action":"error""#),
+        "{stderr}"
+    );
 }
 
 #[test]
