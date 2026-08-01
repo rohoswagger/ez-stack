@@ -695,6 +695,10 @@ fn run_sync_inner(force: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{
+        CwdGuard, PathGuard, init_git_repo, install_fake_bin, take_env_lock,
+    };
+    use std::collections::BTreeSet;
 
     #[test]
     fn run_signatures_compile() {
@@ -787,5 +791,97 @@ mod tests {
         assert_eq!(value["native_stack_action"], "skipped");
         assert_eq!(value["native_stack_reason"], "branching_component");
         assert_eq!(value["native_stack_root"], "feat/a");
+    }
+
+    fn init_sync_finalize_repo(name: &str) -> (std::path::PathBuf, StackState) {
+        let repo = init_git_repo(name);
+        let _cwd = CwdGuard::enter(&repo);
+        let mut state = StackState::new("main".to_string());
+        state.repo = Some("owner/repo".to_string());
+        state.save().expect("save initial state");
+        (repo, state)
+    }
+
+    #[test]
+    fn finalize_sync_reports_everything_up_to_date_without_native_reconcile() {
+        let _guard = take_env_lock();
+        let (repo, state) = init_sync_finalize_repo("sync-finalize-up-to-date");
+        let _cwd = CwdGuard::enter(&repo);
+        let reparented = BTreeSet::new();
+
+        finalize_sync_after_mutations(
+            &state,
+            SyncFinalize {
+                original_branch: "main",
+                shell_cd_path: None,
+                cleaned_current_worktree: false,
+                cleaned: &[],
+                restacked: 0,
+                skipped: 0,
+                reparented_branches: &reparented,
+                reconcile_native: false,
+            },
+        )
+        .expect("finalize should succeed");
+    }
+
+    #[test]
+    fn finalize_sync_reports_success_with_cleaned_and_restacked_counts() {
+        let _guard = take_env_lock();
+        let (repo, state) = init_sync_finalize_repo("sync-finalize-success-counts");
+        let _cwd = CwdGuard::enter(&repo);
+        let cleaned = vec!["feat/merged".to_string()];
+        let reparented = BTreeSet::new();
+
+        finalize_sync_after_mutations(
+            &state,
+            SyncFinalize {
+                original_branch: "main",
+                shell_cd_path: None,
+                cleaned_current_worktree: false,
+                cleaned: &cleaned,
+                restacked: 2,
+                skipped: 0,
+                reparented_branches: &reparented,
+                reconcile_native: false,
+            },
+        )
+        .expect("finalize should succeed");
+    }
+
+    #[test]
+    fn finalize_sync_skips_native_reconcile_when_pr_base_update_fails() {
+        let _guard = take_env_lock();
+        let (repo, mut state) = init_sync_finalize_repo("sync-finalize-pr-base-failure");
+        let _cwd = CwdGuard::enter(&repo);
+        let fake_bin = install_fake_bin(
+            "sync-finalize-pr-base-failure-gh",
+            "gh",
+            "#!/bin/sh\necho simulated gh failure >&2\nexit 1\n",
+        );
+        let _path = PathGuard::install(&fake_bin);
+        let parent_head = git::rev_parse("main").expect("main tip");
+        state.add_branch("feat/child", "main", &parent_head, None, None);
+        state
+            .get_branch_mut("feat/child")
+            .expect("child meta")
+            .pr_number = Some(42);
+        state.save().expect("save child state");
+        let reparented = BTreeSet::from(["feat/child".to_string()]);
+
+        finalize_sync_after_mutations(
+            &state,
+            SyncFinalize {
+                original_branch: "main",
+                shell_cd_path: None,
+                cleaned_current_worktree: false,
+                cleaned: &[],
+                restacked: 1,
+                skipped: 0,
+                reparented_branches: &reparented,
+                reconcile_native: true,
+            },
+        )
+        .expect("PR base failure should only skip native reconciliation");
     }
 }
