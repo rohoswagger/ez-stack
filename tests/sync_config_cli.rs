@@ -132,8 +132,7 @@ exit 97
 
 fn init_repo(prefix: &str) -> TestRepo {
     let path = temp_dir(prefix);
-    let remote = temp_dir(&format!("{prefix}-remote")).join("origin.git");
-    std::fs::create_dir_all(&remote).expect("create remote parent");
+    let remote = temp_dir(&format!("{prefix}-remote"));
     run(&remote, "git", &["init", "--bare", "-b", "main"]);
 
     run(&path, "git", &["init", "-b", "main"]);
@@ -212,6 +211,31 @@ fn add_managed_branch(repo: &TestRepo, branch: &str, parent: &str, pr_number: u6
 
 fn gh_log(repo: &TestRepo) -> String {
     std::fs::read_to_string(&repo.gh_log).unwrap_or_default()
+}
+
+fn advance_remote_main(repo: &TestRepo, prefix: &str) -> String {
+    let writer = temp_dir(prefix);
+    run(
+        &writer,
+        "git",
+        &["clone", repo.remote.to_str().expect("remote path"), "."],
+    );
+    run(&writer, "git", &["config", "user.name", "Test User"]);
+    run(
+        &writer,
+        "git",
+        &["config", "user.email", "test@example.com"],
+    );
+    commit_file(
+        &writer,
+        "remote.txt",
+        "remote-only\n",
+        "remote-only advance",
+    );
+    run(&writer, "git", &["push", "origin", "main"]);
+    let head = git_output(&writer, &["rev-parse", "HEAD"]);
+    std::fs::remove_dir_all(writer).expect("remove remote writer");
+    head
 }
 
 #[test]
@@ -346,6 +370,9 @@ fn sync_dry_run_reports_fork_workflow_preview_without_fetching_or_calling_github
         &repo.path,
         &["config", "set", "fork_repo", "owner/fork"],
     ));
+    let tracking_before = git_output(&repo.path, &["rev-parse", "origin/main"]);
+    let remote_head = advance_remote_main(&repo, "sync-dry-run-fork-writer");
+    assert_ne!(tracking_before, remote_head, "remote must be ahead locally");
 
     let before = std::fs::read_to_string(stack_path(&repo)).expect("state before");
     let output = run_ez(&repo, &repo.path, &["sync", "--dry-run"]);
@@ -378,6 +405,15 @@ fn sync_dry_run_reports_fork_workflow_preview_without_fetching_or_calling_github
         git_output(&repo.path, &["branch", "--show-current"]),
         "main"
     );
+    assert_eq!(
+        git_output(&repo.path, &["rev-parse", "origin/main"]),
+        tracking_before,
+        "dry-run must not fetch the remote-only commit"
+    );
+    assert_eq!(
+        git_output(&repo.remote, &["rev-parse", "main"]),
+        remote_head
+    );
     assert_eq!(gh_log(&repo), "");
 }
 
@@ -386,6 +422,9 @@ fn sync_dry_run_reports_native_stack_chain_without_calling_github() {
     let repo = init_repo("sync-dry-run-native-preview");
     add_managed_branch(&repo, "feat/base", "main", 41);
     add_managed_branch(&repo, "feat/topic", "feat/base", 42);
+    let tracking_before = git_output(&repo.path, &["rev-parse", "origin/main"]);
+    let remote_head = advance_remote_main(&repo, "sync-dry-run-native-writer");
+    assert_ne!(tracking_before, remote_head, "remote must be ahead locally");
 
     let output = run_ez(&repo, &repo.path, &["sync", "--dry-run"]);
 
@@ -396,6 +435,15 @@ fn sync_dry_run_reports_native_stack_chain_without_calling_github() {
             "Would reconcile GitHub native stack for PRs [41, 42] (feat/base -> feat/topic)"
         ),
         "{stderr}"
+    );
+    assert_eq!(
+        git_output(&repo.path, &["rev-parse", "origin/main"]),
+        tracking_before,
+        "dry-run must not fetch the remote-only commit"
+    );
+    assert_eq!(
+        git_output(&repo.remote, &["rev-parse", "main"]),
+        remote_head
     );
     assert_eq!(gh_log(&repo), "");
 }
