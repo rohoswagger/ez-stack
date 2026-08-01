@@ -331,6 +331,111 @@ mod tests {
         );
     }
 
+    #[test]
+    fn relative_path_returns_dot_for_identical_paths() {
+        assert_eq!(
+            relative_path(Path::new("/repo/.agents"), Path::new("/repo/.agents")),
+            PathBuf::from(".")
+        );
+    }
+
+    #[test]
+    fn ez_workflow_skill_detection_requires_front_matter_name_before_close() {
+        assert!(!is_ez_workflow_skill("name: ez-workflow\n"));
+        assert!(!is_ez_workflow_skill("---\n---\nname: ez-workflow\n"));
+        assert!(!is_ez_workflow_skill("---\nname: other-workflow\n---\n"));
+        assert!(is_ez_workflow_skill("---\nname: ez-workflow\n---\n"));
+    }
+
+    #[test]
+    fn remove_path_handles_files_and_directories() {
+        let root = temp_dir("skill-remove-path");
+        let file = root.join("file.txt");
+        std::fs::write(&file, "remove me\n").expect("write file");
+        remove_path(&file).expect("remove file");
+        assert!(!file.exists());
+
+        let dir = root.join("dir");
+        std::fs::create_dir_all(dir.join("nested")).expect("create dir");
+        std::fs::write(dir.join("nested/file.txt"), "remove me too\n").expect("write nested");
+        remove_path(&dir).expect("remove dir");
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn managed_fallback_copy_content_rejects_unmanaged_shapes() {
+        let root = temp_dir("skill-managed-copy-shapes");
+
+        let plain_file = root.join("plain-file");
+        std::fs::write(&plain_file, SKILL_CONTENT).expect("write plain file");
+        assert!(
+            managed_fallback_copy_content(&plain_file)
+                .expect("plain file check")
+                .is_none()
+        );
+
+        let empty_dir = root.join("empty");
+        std::fs::create_dir_all(&empty_dir).expect("create empty dir");
+        assert!(
+            managed_fallback_copy_content(&empty_dir)
+                .expect("empty dir check")
+                .is_none()
+        );
+
+        let wrong_name = root.join("wrong-name");
+        std::fs::create_dir_all(&wrong_name).expect("create wrong-name dir");
+        std::fs::write(wrong_name.join("README.md"), SKILL_CONTENT).expect("write wrong-name file");
+        assert!(
+            managed_fallback_copy_content(&wrong_name)
+                .expect("wrong-name check")
+                .is_none()
+        );
+
+        let extra_entry = root.join("extra-entry");
+        std::fs::create_dir_all(&extra_entry).expect("create extra-entry dir");
+        std::fs::write(extra_entry.join(SKILL_FILE), SKILL_CONTENT).expect("write skill");
+        std::fs::write(extra_entry.join("notes.txt"), "extra\n").expect("write extra");
+        assert!(
+            managed_fallback_copy_content(&extra_entry)
+                .expect("extra-entry check")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn uninstall_is_idempotent_when_nothing_is_installed() {
+        let root = temp_dir("skill-uninstall-missing");
+        uninstall_from_root(&root).expect("uninstall missing skill");
+        assert!(!canonical_skill_dir(&root).exists());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn managed_agent_target_recognizes_relative_symlink_and_fallback_copy() {
+        let root = temp_dir("skill-managed-target");
+        let canonical = canonical_skill_dir(&root);
+        write_skill_file(&canonical).expect("write canonical skill");
+
+        let symlink_target = root.join(".claude/skills").join(SKILL_NAME);
+        ensure_agent_skill_target(&canonical, &symlink_target).expect("create symlink target");
+        assert!(
+            is_managed_agent_skill_target(&canonical, &symlink_target)
+                .expect("symlink target check")
+        );
+
+        let copy_target = root.join(".codex/skills").join(SKILL_NAME);
+        write_skill_file(&copy_target).expect("write fallback copy");
+        assert!(
+            is_managed_agent_skill_target(&canonical, &copy_target).expect("copy target check")
+        );
+
+        std::fs::write(copy_target.join(SKILL_FILE), "---\nname: other\n---\n")
+            .expect("replace with unmanaged copy");
+        assert!(
+            !is_managed_agent_skill_target(&canonical, &copy_target).expect("unmanaged copy check")
+        );
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn install_creates_canonical_skill_and_symlinks() {
