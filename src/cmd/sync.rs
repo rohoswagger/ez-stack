@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use crate::cmd::native_stack::{self, SkippedNativeStackComponent};
 use crate::cmd::restack;
 use crate::git;
 use crate::github;
@@ -59,137 +60,6 @@ fn inside_worktree_path(current_dir: &str, worktree_path: &str) -> bool {
     current == worktree || current.starts_with(&worktree)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NativeStackChain {
-    branches: Vec<String>,
-    pr_numbers: Vec<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SkippedNativeStackComponent {
-    root: String,
-    branches: Vec<String>,
-    reason: &'static str,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct NativeStackPlan {
-    chains: Vec<NativeStackChain>,
-    skipped: Vec<SkippedNativeStackComponent>,
-}
-
-/// Project ez's worktree-aware parent graph onto GitHub's linear stack model.
-///
-/// Each direct child of trunk starts an independent component. Linear components
-/// become one or more contiguous PR chains; a managed branch without a PR splits
-/// the chain. Branching components are intentionally skipped because flattening
-/// them would invent a PR order that does not exist in the local worktree graph.
-fn native_stack_plan(state: &StackState) -> NativeStackPlan {
-    use std::collections::{BTreeSet, HashSet, VecDeque};
-
-    let mut plan = NativeStackPlan::default();
-    let mut visited = HashSet::new();
-    let mut roots = state.children_of(&state.trunk);
-    roots.sort();
-
-    for root in roots {
-        let mut component = Vec::new();
-        let mut queue = VecDeque::from([root.clone()]);
-        let mut branching = false;
-
-        while let Some(branch) = queue.pop_front() {
-            if !visited.insert(branch.clone()) {
-                continue;
-            }
-            component.push(branch.clone());
-            let children = state.children_of(&branch);
-            branching |= children.len() > 1;
-            queue.extend(children);
-        }
-
-        component.sort();
-        if branching {
-            plan.skipped.push(SkippedNativeStackComponent {
-                root,
-                branches: component,
-                reason: "branching_component",
-            });
-            continue;
-        }
-
-        let mut branch = root;
-        let mut segment_branches = Vec::new();
-        let mut segment_prs = Vec::new();
-        loop {
-            let meta = state
-                .branches
-                .get(&branch)
-                .expect("rooted native stack component must contain every branch");
-            if let Some(pr_number) = meta.pr_number {
-                segment_branches.push(branch.clone());
-                segment_prs.push(pr_number);
-            } else {
-                push_native_stack_segment(
-                    &mut plan.chains,
-                    &mut segment_branches,
-                    &mut segment_prs,
-                );
-            }
-
-            let children = state.children_of(&branch);
-            let Some(child) = children.first() else {
-                break;
-            };
-            branch = child.clone();
-        }
-        push_native_stack_segment(&mut plan.chains, &mut segment_branches, &mut segment_prs);
-    }
-
-    let all_branches = state.branches.keys().cloned().collect::<BTreeSet<_>>();
-    let mut remaining = all_branches
-        .into_iter()
-        .filter(|branch| !visited.contains(branch))
-        .collect::<BTreeSet<_>>();
-    while let Some(start) = remaining.first().cloned() {
-        let mut component = BTreeSet::new();
-        let mut queue = VecDeque::from([start.clone()]);
-        while let Some(branch) = queue.pop_front() {
-            if !remaining.remove(&branch) || !component.insert(branch.clone()) {
-                continue;
-            }
-            if let Some(meta) = state.branches.get(&branch)
-                && state.branches.contains_key(&meta.parent)
-            {
-                queue.push_back(meta.parent.clone());
-            }
-            queue.extend(state.children_of(&branch));
-        }
-        plan.skipped.push(SkippedNativeStackComponent {
-            root: start,
-            branches: component.into_iter().collect(),
-            reason: "invalid_parent_graph",
-        });
-    }
-
-    plan
-}
-
-fn push_native_stack_segment(
-    chains: &mut Vec<NativeStackChain>,
-    branches: &mut Vec<String>,
-    pr_numbers: &mut Vec<u64>,
-) {
-    if pr_numbers.len() >= 2 {
-        chains.push(NativeStackChain {
-            branches: std::mem::take(branches),
-            pr_numbers: std::mem::take(pr_numbers),
-        });
-    } else {
-        branches.clear();
-        pr_numbers.clear();
-    }
-}
-
 fn skipped_native_stack_receipt(component: &SkippedNativeStackComponent) -> serde_json::Value {
     serde_json::json!({
         "cmd": "sync",
@@ -201,7 +71,7 @@ fn skipped_native_stack_receipt(component: &SkippedNativeStackComponent) -> serd
 }
 
 fn reconcile_native_stacks(state: &StackState) {
-    let plan = native_stack_plan(state);
+    let plan = native_stack::native_stack_plan(state);
 
     for component in &plan.skipped {
         ui::warn(&format!(
@@ -212,7 +82,8 @@ fn reconcile_native_stacks(state: &StackState) {
         ui::receipt(&skipped_native_stack_receipt(component));
     }
 
-    if plan.chains.is_empty() && plan.skipped.is_empty() {
+    let chains = native_stack::linkable_chains(&plan);
+    if chains.is_empty() && plan.skipped.is_empty() {
         ui::receipt(&crate::cmd::native_stack::receipt_value(
             "sync",
             &[],
@@ -222,7 +93,7 @@ fn reconcile_native_stacks(state: &StackState) {
         return;
     }
 
-    for chain in &plan.chains {
+    for chain in chains {
         match github::reconcile_native_stack_exact(&chain.pr_numbers, "ez sync") {
             Ok(outcome) => {
                 crate::cmd::native_stack::report_outcome(&outcome);
@@ -352,8 +223,8 @@ pub fn run(dry_run: bool, autostash: bool, force: bool) -> Result<()> {
             ui::info("No restacking needed based on current local state");
         }
 
-        let native_plan = native_stack_plan(&state);
-        for chain in &native_plan.chains {
+        let native_plan = native_stack::native_stack_plan(&state);
+        for chain in native_stack::linkable_chains(&native_plan) {
             ui::info(&format!(
                 "Would reconcile GitHub native stack for PRs {:?} ({})",
                 chain.pr_numbers,
@@ -814,89 +685,6 @@ mod tests {
         ));
     }
 
-    fn branch_with_pr(state: &mut StackState, name: &str, parent: &str, pr_number: Option<u64>) {
-        state.add_branch(name, parent, "parent-head", None, None);
-        state.get_branch_mut(name).expect("branch").pr_number = pr_number;
-    }
-
-    #[test]
-    fn native_stack_plan_keeps_independent_linear_components_separate() {
-        let mut state = StackState::new("main".to_string());
-        branch_with_pr(&mut state, "feat/a", "main", Some(101));
-        branch_with_pr(&mut state, "feat/b", "feat/a", Some(102));
-        branch_with_pr(&mut state, "feat/x", "main", Some(201));
-        branch_with_pr(&mut state, "feat/y", "feat/x", Some(202));
-
-        let plan = native_stack_plan(&state);
-
-        assert_eq!(
-            plan.chains
-                .iter()
-                .map(|chain| chain.pr_numbers.clone())
-                .collect::<Vec<_>>(),
-            vec![vec![101, 102], vec![201, 202]]
-        );
-        assert!(plan.skipped.is_empty());
-    }
-
-    #[test]
-    fn native_stack_plan_splits_linear_component_at_missing_prs() {
-        let mut state = StackState::new("main".to_string());
-        branch_with_pr(&mut state, "feat/a", "main", Some(101));
-        branch_with_pr(&mut state, "feat/local-only", "feat/a", None);
-        branch_with_pr(&mut state, "feat/c", "feat/local-only", Some(103));
-        branch_with_pr(&mut state, "feat/d", "feat/c", Some(104));
-
-        let plan = native_stack_plan(&state);
-
-        assert_eq!(plan.chains.len(), 1);
-        assert_eq!(plan.chains[0].branches, vec!["feat/c", "feat/d"]);
-        assert_eq!(plan.chains[0].pr_numbers, vec![103, 104]);
-        assert!(plan.skipped.is_empty());
-    }
-
-    #[test]
-    fn native_stack_plan_skips_branching_component_instead_of_flattening_it() {
-        let mut state = StackState::new("main".to_string());
-        branch_with_pr(&mut state, "feat/a", "main", Some(101));
-        branch_with_pr(&mut state, "feat/b", "feat/a", Some(102));
-        branch_with_pr(&mut state, "feat/c", "feat/a", Some(103));
-
-        let plan = native_stack_plan(&state);
-
-        assert!(plan.chains.is_empty());
-        assert_eq!(plan.skipped.len(), 1);
-        assert_eq!(plan.skipped[0].root, "feat/a");
-        assert_eq!(plan.skipped[0].reason, "branching_component");
-        assert_eq!(plan.skipped[0].branches, vec!["feat/a", "feat/b", "feat/c"]);
-    }
-
-    #[test]
-    fn native_stack_plan_reports_orphans_and_cycles_as_unrepresentable() {
-        let mut state = StackState::new("main".to_string());
-        branch_with_pr(&mut state, "feat/orphan", "missing-parent", Some(301));
-        branch_with_pr(&mut state, "feat/cycle-a", "feat/cycle-b", Some(401));
-        branch_with_pr(&mut state, "feat/cycle-b", "feat/cycle-a", Some(402));
-
-        let plan = native_stack_plan(&state);
-
-        assert!(plan.chains.is_empty());
-        assert_eq!(plan.skipped.len(), 2);
-        assert_eq!(plan.skipped[0].reason, "invalid_parent_graph");
-        assert_eq!(plan.skipped[1].reason, "invalid_parent_graph");
-        assert_eq!(
-            plan.skipped
-                .iter()
-                .flat_map(|component| component.branches.clone())
-                .collect::<std::collections::BTreeSet<_>>(),
-            std::collections::BTreeSet::from([
-                "feat/cycle-a".to_string(),
-                "feat/cycle-b".to_string(),
-                "feat/orphan".to_string(),
-            ])
-        );
-    }
-
     #[test]
     fn skipped_native_stack_receipt_explains_branching_component() {
         let value = skipped_native_stack_receipt(&SkippedNativeStackComponent {
@@ -906,6 +694,7 @@ mod tests {
                 "feat/b".to_string(),
                 "feat/c".to_string(),
             ],
+            pr_numbers: vec![101, 102, 103],
             reason: "branching_component",
         });
 

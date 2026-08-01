@@ -207,12 +207,40 @@ Intended workflow:
 |---------|-------------|
 | `ez log` | Visual stack tree with PR status |
 | `ez log --json` | Stack as JSON |
+| `ez log --native-stack` | Include read-only GitHub native stack alignment |
+| `ez log --json --native-stack` | Stack JSON with `native_stack` objects |
 | `ez status` | Branch info + working tree state |
 | `ez status --json` | Branch info as JSON |
+| `ez status --native-stack` | Include read-only GitHub native stack alignment for the current branch |
+| `ez status --json --native-stack` | Status JSON with a `native_stack` object |
 | `ez diff` | Diff vs parent (what the PR reviewer sees) |
 | `ez diff --stat` | Diffstat summary |
 | `ez diff --name-only` | Changed file names |
 | `ez parent` | Print parent branch name to stdout |
+
+Default `ez status`, `ez status --json`, `ez log`, and `ez log --json` output is
+unchanged. Add `--native-stack` only when you want a read-only comparison between
+ez's local worktree/PR topology and GitHub's public-preview native stack API
+(`X-GitHub-Api-Version: 2026-03-10`):
+
+```bash
+ez status --native-stack
+ez status --json --native-stack
+ez log --json --native-stack
+```
+
+The inspection never mutates stack metadata, refs, remotes, worktrees, or cached
+GitHub state. `ez log --native-stack` makes one stack API request per contiguous
+local PR segment. JSON adds `native_stack.provider`, `preview`, `state`,
+`local.branches`, and ordered `local.pull_requests`. When GitHub returns a stack,
+`github` includes `number`, `base_ref`, `open`, 1-based `position`, `size`, and
+ordered `pull_requests`.
+
+States are `in_sync`, `diverged`, `not_linked`, `unavailable` (public-preview
+404), `unrepresentable` (branching or invalid local graph), `not_applicable`,
+and `error`. This is the worktree-native moat: the local graph stays
+authoritative, GitHub native stacks remain the collaboration/merge layer, and
+divergence is reported instead of flattened or cached.
 
 ### PRs
 

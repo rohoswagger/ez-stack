@@ -329,22 +329,34 @@ Examples:
     #[command(after_help = "\
 Examples:
   ez log
-  ez log --json")]
+  ez log --json
+  ez log --native-stack
+  ez log --json --native-stack")]
     Log {
         /// Output stack as JSON to stdout
         #[arg(long)]
         json: bool,
+
+        /// Compare local PR/worktree topology with GitHub's native stack API
+        #[arg(long)]
+        native_stack: bool,
     },
 
     /// Show current branch info and stack position
     #[command(after_help = "\
 Examples:
   ez status
-  ez status --json")]
+  ez status --json
+  ez status --native-stack
+  ez status --json --native-stack")]
     Status {
         /// Output status as JSON to stdout
         #[arg(long)]
         json: bool,
+
+        /// Compare local PR/worktree topology with GitHub's native stack API
+        #[arg(long)]
+        native_stack: bool,
     },
 
     /// List all local branches, including untracked ones, with PRs, worktree paths, and working tree state
@@ -1205,6 +1217,34 @@ mod tests {
                 assert!(no_cd_required);
             }
             _ => panic!("expected switch command"),
+        }
+    }
+
+    #[test]
+    fn parses_status_native_stack_flag() {
+        let cli = Cli::try_parse_from(["ez", "status", "--json", "--native-stack"])
+            .expect("parse status --native-stack");
+
+        match cli.command {
+            Commands::Status { json, native_stack } => {
+                assert!(json);
+                assert!(native_stack);
+            }
+            _ => panic!("expected status command"),
+        }
+    }
+
+    #[test]
+    fn parses_log_native_stack_flag() {
+        let cli = Cli::try_parse_from(["ez", "log", "--json", "--native-stack"])
+            .expect("parse log --native-stack");
+
+        match cli.command {
+            Commands::Log { json, native_stack } => {
+                assert!(json);
+                assert!(native_stack);
+            }
+            _ => panic!("expected log command"),
         }
     }
 

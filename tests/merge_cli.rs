@@ -327,7 +327,9 @@ fn merge_yes_from_target_linked_worktree_removes_branch_without_primary_checkout
     let puts = merge_async_put_lines(&repo.gh_log);
     assert_eq!(
         puts,
-        vec!["api -X PUT repos/org/repo/pulls/42/merge-async --input -"]
+        vec![
+            "api -X PUT repos/org/repo/pulls/42/merge-async --input - -H X-GitHub-Api-Version: 2026-03-10"
+        ]
     );
 }
 
@@ -366,12 +368,17 @@ fn merge_stack_yes_uses_native_top_pr_once_and_removes_all_target_worktrees() {
     let puts = merge_async_put_lines(&repo.gh_log);
     assert_eq!(
         puts,
-        vec!["api -X PUT repos/org/repo/pulls/102/merge-async --input -"]
+        vec![
+            "api -X PUT repos/org/repo/pulls/102/merge-async --input - -H X-GitHub-Api-Version: 2026-03-10"
+        ]
+    );
+    let log = std::fs::read_to_string(&repo.gh_log).expect("read gh log");
+    assert!(
+        !log.contains("pulls/101/merge-async"),
+        "bottom PR should not be merged separately: {log}"
     );
     assert!(
-        !std::fs::read_to_string(&repo.gh_log)
-            .expect("read gh log")
-            .contains("pulls/101/merge-async"),
-        "bottom PR should not be merged separately"
+        !log.contains("pulls/101/merge-async --input - -H X-GitHub-Api-Version: 2026-03-10"),
+        "bottom PR should not be merged separately with API version header: {log}"
     );
 }
