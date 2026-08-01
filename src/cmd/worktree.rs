@@ -1677,6 +1677,46 @@ mod tests {
     }
 
     #[test]
+    fn rollback_refuses_to_remove_dirty_worktree_owned_by_this_ensure() {
+        let _lock = take_env_lock();
+        let fixture = FleetRepo::new("fleet-rollback-dirty");
+        let _cwd = CwdGuard::enter(&fixture.repo);
+        let base_path = git::worktree_path("feat/base").expect("base path");
+        let mut calls = 0;
+
+        let error = ensure_with_adder(&[], false, |path, branch, lock_reason| {
+            calls += 1;
+            if calls == 2 {
+                write_file(Path::new(&base_path), "dirty.txt", "keep\n");
+                bail!("injected add failure after dirty owned worktree")
+            }
+            add_owned_worktree(path, branch, lock_reason)
+        })
+        .expect_err("dirty owned worktree must make rollback incomplete");
+
+        assert!(error.to_string().contains("rollback was incomplete"));
+        assert!(error.to_string().contains("refuse to remove dirty"));
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&base_path).join("dirty.txt"))
+                .expect("dirty file contents"),
+            "keep\n"
+        );
+        assert!(
+            git::worktree_list()
+                .expect("worktree list")
+                .iter()
+                .any(|worktree| {
+                    worktree.path == base_path
+                        && worktree.branch.as_deref() == Some("feat/base")
+                        && worktree
+                            .locked_reason
+                            .as_deref()
+                            .is_some_and(|reason| reason.starts_with("ez-worktree-ensure:"))
+                })
+        );
+    }
+
+    #[test]
     fn failing_add_never_claims_an_unlocked_same_branch_worktree_as_its_own() {
         let _lock = take_env_lock();
         let fixture = FleetRepo::new("fleet-current-owner-race");
