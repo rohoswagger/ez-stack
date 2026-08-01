@@ -16,8 +16,18 @@ enum AgentInstallStatus {
     PreservedExisting,
 }
 
-fn repo_root() -> Result<PathBuf> {
-    Ok(PathBuf::from(crate::git::repo_root()?))
+fn user_home_dir() -> Result<PathBuf> {
+    for key in ["HOME", "USERPROFILE"] {
+        if let Some(value) = std::env::var_os(key) {
+            if !value.is_empty() {
+                return Ok(PathBuf::from(value));
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "could not determine user home directory; set HOME or USERPROFILE before running `ez skill install`"
+    )
 }
 
 fn canonical_skill_dir(root: &Path) -> PathBuf {
@@ -100,6 +110,45 @@ fn try_symlink_or_copy(link_dir: &Path, expected_target: &Path) -> Result<AgentI
     }
 }
 
+fn is_ez_workflow_skill(content: &str) -> bool {
+    let mut lines = content.lines();
+    if lines.next() != Some("---") {
+        return false;
+    }
+
+    for line in lines {
+        if line == "---" {
+            return false;
+        }
+        if line.trim() == "name: ez-workflow" {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn managed_fallback_copy_content(dir: &Path) -> Result<Option<String>> {
+    let metadata = std::fs::symlink_metadata(dir)?;
+    if !metadata.is_dir() {
+        return Ok(None);
+    }
+
+    let mut entries = std::fs::read_dir(dir)?;
+    let Some(entry) = entries.next().transpose()? else {
+        return Ok(None);
+    };
+    if entries.next().transpose()?.is_some()
+        || entry.file_name() != SKILL_FILE
+        || !entry.file_type()?.is_file()
+    {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(entry.path())?;
+    Ok(is_ez_workflow_skill(&content).then_some(content))
+}
+
 fn ensure_agent_skill_target(target_dir: &Path, link_dir: &Path) -> Result<AgentInstallStatus> {
     let parent = link_dir
         .parent()
@@ -115,6 +164,14 @@ fn ensure_agent_skill_target(target_dir: &Path, link_dir: &Path) -> Result<Agent
             }
             remove_path(link_dir)?;
             return try_symlink_or_copy(link_dir, &expected_target);
+        }
+
+        if let Some(existing) = managed_fallback_copy_content(link_dir)? {
+            if existing == SKILL_CONTENT {
+                return Ok(AgentInstallStatus::Unchanged);
+            }
+            write_skill_file(link_dir)?;
+            return Ok(AgentInstallStatus::Copied);
         }
         return Ok(AgentInstallStatus::PreservedExisting);
     }
@@ -178,39 +235,64 @@ fn install_into_root(root: &Path) -> Result<PathBuf> {
 }
 
 pub fn install() -> Result<()> {
-    let root = repo_root()?;
+    let root = user_home_dir()?;
     install_into_root(&root)?;
     Ok(())
 }
 
+fn is_managed_agent_skill_target(target_dir: &Path, link_dir: &Path) -> Result<bool> {
+    let metadata = std::fs::symlink_metadata(link_dir)?;
+    if metadata.file_type().is_symlink() {
+        let parent = link_dir
+            .parent()
+            .context("skill symlink path must have a parent directory")?;
+        return Ok(std::fs::read_link(link_dir)? == relative_path(parent, target_dir));
+    }
+
+    Ok(managed_fallback_copy_content(link_dir)?.is_some())
+}
+
 fn uninstall_from_root(root: &Path) -> Result<()> {
     let canonical_dir = canonical_skill_dir(root);
+    let canonical_file = canonical_skill_file(root);
 
     let mut removed = false;
     for link_dir in agent_skill_dirs(root) {
-        if std::fs::symlink_metadata(&link_dir).is_ok() {
+        if std::fs::symlink_metadata(&link_dir).is_ok()
+            && is_managed_agent_skill_target(&canonical_dir, &link_dir)?
+        {
             remove_path(&link_dir)?;
             removed = true;
         }
     }
 
-    if canonical_dir.exists() {
-        std::fs::remove_dir_all(&canonical_dir)?;
-        removed = true;
+    match std::fs::symlink_metadata(&canonical_file) {
+        Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_file() => {
+            std::fs::remove_file(&canonical_file)?;
+            removed = true;
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    if let Ok(metadata) = std::fs::symlink_metadata(&canonical_dir) {
+        if metadata.is_dir() && std::fs::read_dir(&canonical_dir)?.next().is_none() {
+            std::fs::remove_dir(&canonical_dir)?;
+        }
     }
 
     if !removed {
-        ui::info("ez-workflow skill is not installed in this repo");
+        ui::info("ez-workflow skill is not installed for this user");
         return Ok(());
     }
 
     ui::success("Uninstalled ez-workflow skill");
-    ui::hint("Remove .agents/skills/ez-workflow/ from version control if committed");
     Ok(())
 }
 
 pub fn uninstall() -> Result<()> {
-    let root = repo_root()?;
+    let root = user_home_dir()?;
     uninstall_from_root(&root)
 }
 
