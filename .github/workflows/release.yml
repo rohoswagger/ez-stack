@@ -9,8 +9,16 @@ permissions:
   contents: write
 
 jobs:
+  canary:
+    name: GitHub Canary
+    uses: ./.github/workflows/github-canary.yml
+    permissions:
+      contents: write
+      pull-requests: write
+
   build:
     name: Build ${{ matrix.target }}
+    needs: canary
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
