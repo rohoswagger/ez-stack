@@ -1036,6 +1036,8 @@ fn move_rejects_self_and_descendant_targets_without_mutating_state() {
     assert_eq!(repo.stack_state(), state_before);
     assert_eq!(current_branch(&base_worktree), "feat/base");
     assert_eq!(current_branch(&child_worktree), "feat/child");
+    assert_eq!(branch_tip(&repo.path, "feat/base"), base_before);
+    assert_eq!(branch_tip(&repo.path, "feat/child"), child_before);
 }
 
 #[test]
