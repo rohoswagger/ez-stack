@@ -411,6 +411,17 @@ fn display_lock_reason(reason: &str) -> String {
     }
 }
 
+pub(crate) fn guard_branch_worktree(branch: &str, operation: &str) -> Result<()> {
+    let worktrees = git::worktree_list()?;
+    let worktree = worktrees
+        .iter()
+        .find(|worktree| worktree.branch.as_deref() == Some(branch));
+    let Some(worktree) = worktree else {
+        return Ok(());
+    };
+    guard_registered_worktree(branch, &worktree.path, operation)
+}
+
 pub(crate) fn guard_registered_worktree(branch: &str, path: &str, operation: &str) -> Result<()> {
     let worktrees = git::worktree_list()?;
     let worktree = worktrees.iter().find(|worktree| worktree.path == path);
@@ -594,6 +605,13 @@ pub fn exec(branches: &[String], command: &[String], keep_going: bool, json: boo
             "the stack has no managed branches to execute in\n  → Run `ez create <name>` first"
                 .to_string()
         ));
+    }
+    for fleet_entry in &fleet.entries {
+        guard_registered_worktree(
+            &fleet_entry.branch,
+            &fleet_entry.path,
+            "run fleet command in",
+        )?;
     }
 
     let fleet_size = fleet.entries.len();

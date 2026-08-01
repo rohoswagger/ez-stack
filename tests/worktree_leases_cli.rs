@@ -61,6 +61,10 @@ impl TempRepo {
         };
         std::fs::read(common_dir.join("ez/stack.json")).expect("read stack state")
     }
+
+    fn stack_state_json(&self) -> Value {
+        serde_json::from_slice(&self.stack_state_bytes()).expect("stack state JSON")
+    }
 }
 
 impl Drop for TempRepo {
@@ -483,6 +487,125 @@ fn fold_refuses_to_advance_a_leased_parent_worktree() {
     assert!(parent_worktree.exists());
     assert!(child_worktree.exists());
     assert_eq!(repo.stack_state_bytes(), state_before);
+}
+
+#[test]
+fn restack_refuses_to_rewrite_an_actively_leased_worktree() {
+    let repo = TempRepo::new();
+    let parent = "feat/restack-parent";
+    let child = "feat/restack-child";
+    let parent_worktree = repo.create_worktree(parent);
+    commit_file(&parent_worktree, "parent.txt", "parent\n", "parent");
+    run_ez(
+        &repo.path,
+        &["create", child, "--from", parent, "--no-worktree"],
+    );
+    let child_worktree = PathBuf::from(
+        stdout_json(&run_ez(
+            &repo.path,
+            &["worktree", "ensure", child, "--json"],
+        ))["entries"][0]["path"]
+            .as_str()
+            .expect("child worktree path"),
+    );
+    commit_file(&child_worktree, "child.txt", "child\n", "child");
+    run_ez(
+        &repo.path,
+        &["worktree", "claim", child, "--owner", "agent-a"],
+    );
+    commit_file(
+        &parent_worktree,
+        "parent2.txt",
+        "parent2\n",
+        "advance parent",
+    );
+    let state_before = repo.stack_state_json();
+    let child_tip_before = stdout_text(&run(&repo.path, "git", &["rev-parse", child]));
+
+    let output = run_ez_raw(&repo.path, &["restack"]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        stdout_text(&run(&repo.path, "git", &["rev-parse", child])),
+        child_tip_before
+    );
+    assert_eq!(repo.stack_state_json(), state_before);
+    assert!(worktree_porcelain(&repo.path).contains("ez-lease:"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("agent-a"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("active lease"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("ez worktree release feat/restack-child --owner agent-a"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(r#""action":"restack_failed""#),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(r#""reason":"worktree_guard""#),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn fleet_exec_preflights_all_leases_before_running_any_command() {
+    let repo = TempRepo::new();
+    let parent = "feat/fleet-parent";
+    let child = "feat/fleet-child";
+    let parent_worktree = repo.create_worktree(parent);
+    commit_file(&parent_worktree, "parent.txt", "parent\n", "parent");
+    run_ez(
+        &repo.path,
+        &["create", child, "--from", parent, "--no-worktree"],
+    );
+    let child_worktree = PathBuf::from(
+        stdout_json(&run_ez(
+            &repo.path,
+            &["worktree", "ensure", child, "--json"],
+        ))["entries"][0]["path"]
+            .as_str()
+            .expect("child worktree path"),
+    );
+    run_ez(
+        &repo.path,
+        &["worktree", "claim", child, "--owner", "agent-b"],
+    );
+    let parent_marker = parent_worktree.join("lease-exec-marker");
+    let child_marker = child_worktree.join("lease-exec-marker");
+
+    let output = run_ez_raw(
+        &repo.path,
+        &[
+            "worktree",
+            "exec",
+            "--",
+            "sh",
+            "-c",
+            "printf marker > lease-exec-marker",
+        ],
+    );
+
+    assert!(!output.status.success());
+    assert!(
+        !parent_marker.exists(),
+        "fleet exec must not run in earlier worktrees after a later lease blocks"
+    );
+    assert!(
+        !child_marker.exists(),
+        "fleet exec must not run in the leased worktree"
+    );
+    assert!(worktree_porcelain(&repo.path).contains("ez-lease:"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(child), "unexpected stderr: {stderr}");
+    assert!(stderr.contains("agent-b"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("ez worktree release feat/fleet-child --owner agent-b"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 struct ChildGuard(Child);
