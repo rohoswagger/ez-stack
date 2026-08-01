@@ -2331,6 +2331,635 @@ exit 0
     }
 
     #[test]
+    fn rebase_refuses_to_start_when_current_worktree_already_has_rebase_state() {
+        let _guard = take_env_lock();
+        let fixture_dir = temp_dir("git-rebase-existing-state");
+        let state_dir = fixture_dir.join("rebase-merge");
+        std::fs::create_dir_all(&state_dir).expect("create rebase state");
+        let log_path = fixture_dir.join("calls.log");
+        let fake_dir = install_fake_bin(
+            "git-rebase-existing-state-bin",
+            "git",
+            &format!(
+                r#"#!/bin/sh
+echo "$@" >> "{}"
+if [ "$1" = "rev-parse" ] && [ "$2" = "--git-path" ] && [ "$3" = "rebase-merge" ]; then
+  echo "{}"
+  exit 0
+fi
+exit 0
+"#,
+                log_path.display(),
+                state_dir.display()
+            ),
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let error = rebase("origin/main", "feat/rebase").expect_err("existing rebase blocks");
+
+        assert!(
+            error
+                .to_string()
+                .contains("a rebase is already in progress")
+        );
+        assert_eq!(
+            std::fs::read_to_string(log_path).expect("call log"),
+            "rev-parse --git-path rebase-merge\n"
+        );
+    }
+
+    #[test]
+    fn rebase_at_aborts_and_returns_false_when_git_reports_conflict() {
+        let _guard = take_env_lock();
+        let log_dir = temp_dir("git-rebase-at-conflict");
+        let log_path = log_dir.join("calls.log");
+        let fake_dir = install_fake_bin(
+            "git-rebase-at-conflict-bin",
+            "git",
+            &format!(
+                r#"#!/bin/sh
+echo "$@" >> "{}"
+if [ "$1" = "-C" ] && [ "$3" = "-c" ] && [ "$4" = "rebase.autoStash=false" ] && [ "$5" = "rebase" ]; then
+  echo "CONFLICT (content): Merge conflict in app.rs" >&2
+  exit 1
+fi
+exit 0
+"#,
+                log_path.display()
+            ),
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let clean = rebase_at("/repo/feat", "origin/main").expect("conflict is handled");
+
+        assert!(!clean);
+        assert_eq!(
+            std::fs::read_to_string(log_path).expect("call log"),
+            "-C /repo/feat rev-parse --git-path rebase-merge\n\
+-C /repo/feat rev-parse --git-path rebase-apply\n\
+-C /repo/feat -c rebase.autoStash=false rebase origin/main\n\
+-C /repo/feat rebase --abort\n"
+        );
+    }
+
+    #[test]
+    fn rebase_for_branch_uses_linked_worktree_when_branch_is_checked_out_elsewhere() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-rebase-linked-worktree");
+        let _cwd = CwdGuard::enter(&repo);
+        create_branch_at("feat/rebase-linked", "main").expect("create branch");
+        let wt_path = worktree_path("feat/rebase-linked").expect("worktree path");
+        worktree_add(&wt_path, "feat/rebase-linked").expect("worktree add");
+        write_file(&repo, "main.txt", "main change\n");
+        add_all_including_untracked().expect("stage main");
+        commit("advance main").expect("commit main");
+
+        let clean = rebase_for_branch(
+            "main",
+            "feat/rebase-linked",
+            &repo_root().expect("current root"),
+        )
+        .expect("rebase linked worktree branch");
+
+        assert!(clean);
+        assert_eq!(
+            rev_parse_at(&wt_path, "HEAD").expect("linked head"),
+            rev_parse("main").expect("main")
+        );
+        assert_eq!(
+            run_git(&["-C", &wt_path, "branch", "--show-current"]).expect("linked branch"),
+            "feat/rebase-linked"
+        );
+    }
+
+    #[test]
+    fn reset_wrappers_pass_expected_git_arguments() {
+        let _guard = take_env_lock();
+        let log_dir = temp_dir("git-reset-wrappers");
+        let log_path = log_dir.join("calls.log");
+        let fake_dir = install_fake_bin(
+            "git-reset-wrappers-bin",
+            "git",
+            &format!(
+                r#"#!/bin/sh
+echo "$@" >> "{}"
+exit 0
+"#,
+                log_path.display()
+            ),
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        hard_reset("origin/main").expect("hard reset");
+        hard_reset_at("/repo/wt", "origin/feat").expect("hard reset at");
+        reset_keep_at("/repo/wt", "origin/feat").expect("reset keep");
+
+        assert_eq!(
+            std::fs::read_to_string(log_path).expect("call log"),
+            "reset --hard origin/main\n\
+-C /repo/wt reset --hard origin/feat\n\
+-C /repo/wt reset --keep origin/feat\n"
+        );
+    }
+
+    #[test]
+    fn streaming_fetch_uses_stdout_or_command_name_when_stderr_is_empty() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "git-fetch-stdout-failure-bin",
+            "git",
+            r#"#!/bin/sh
+if [ "$1" = "fetch" ] && [ "$3" = "origin" ]; then
+  echo "stdout-only failure"
+  exit 1
+fi
+exit 1
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let stdout_error = fetch("origin").expect_err("stdout-only failure");
+        assert!(stdout_error.to_string().contains("stdout-only failure"));
+
+        let empty_error = fetch("upstream").expect_err("empty output failure");
+        assert!(
+            empty_error
+                .to_string()
+                .contains("git command failed: git fetch --progress upstream")
+        );
+    }
+
+    #[test]
+    fn commit_and_diff_wrappers_pass_expected_git_arguments() {
+        let _guard = take_env_lock();
+        let log_dir = temp_dir("git-early-wrapper-args");
+        let log_path = log_dir.join("calls.log");
+        let fake_dir = install_fake_bin(
+            "git-early-wrapper-args-bin",
+            "git",
+            &format!(
+                r#"#!/bin/sh
+echo "$@" >> "{}"
+if [ "$1" = "show" ]; then
+  echo " 1 file changed"
+fi
+if [ "$1" = "diff" ]; then
+  echo "diff-output"
+fi
+if [ "$1" = "cherry" ]; then
+  echo "+ abc"
+fi
+exit 0
+"#,
+                log_path.display()
+            ),
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        commit_at("/repo/wt", "msg").expect("commit at");
+        commit_amend(Some("amended")).expect("amend with message");
+        commit_amend(None).expect("amend no edit");
+        assert_eq!(
+            show_stat_head().expect("show stat"),
+            "1 file changed".to_string()
+        );
+        assert_eq!(
+            diff("main..HEAD", true, true).expect("diff"),
+            "diff-output".to_string()
+        );
+        assert_eq!(
+            cherry("main", "feat/a").expect("cherry"),
+            "+ abc".to_string()
+        );
+        assert_eq!(
+            cherry_from("main", "feat/a", "limit").expect("cherry from"),
+            "+ abc".to_string()
+        );
+        add_all_at("/repo/wt").expect("add all at");
+        add_all_including_untracked_at("/repo/wt").expect("add all including at");
+
+        assert_eq!(
+            std::fs::read_to_string(log_path).expect("call log"),
+            "-C /repo/wt commit -m msg\n\
+commit --amend -m amended\n\
+commit --amend --no-edit\n\
+show --stat --no-patch --format= HEAD\n\
+diff --stat --name-only main..HEAD\n\
+cherry main feat/a\n\
+cherry main feat/a limit\n\
+-C /repo/wt add -u\n\
+-C /repo/wt add -A\n"
+        );
+    }
+
+    #[test]
+    fn working_tree_status_checked_reports_git_failure_and_ignores_short_lines() {
+        assert_eq!(parse_working_tree_status("?\n M modified.txt\n"), (0, 1, 0));
+
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "git-status-failure-bin",
+            "git",
+            r#"#!/bin/sh
+if [ "$1" = "-C" ] && [ "$3" = "status" ]; then
+  echo "fatal: not a git repository" >&2
+  exit 1
+fi
+exit 0
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let error = working_tree_status_at_checked("/not/repo").expect_err("status failure");
+
+        assert!(error.to_string().contains("not a git repository"));
+    }
+
+    #[test]
+    fn remote_branch_exists_maps_ls_remote_output_and_failures() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "git-remote-branch-exists-bin",
+            "git",
+            r#"#!/bin/sh
+if [ "$1" = "ls-remote" ] && [ "$4" = "feat/present" ]; then
+  echo "abc refs/heads/feat/present"
+  exit 0
+fi
+if [ "$1" = "ls-remote" ] && [ "$4" = "feat/absent" ]; then
+  exit 0
+fi
+exit 1
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        assert!(remote_branch_exists("origin", "feat/present"));
+        assert!(!remote_branch_exists("origin", "feat/absent"));
+        assert!(!remote_branch_exists("origin", "feat/error"));
+    }
+
+    #[test]
+    fn push_uses_plain_and_force_with_lease_forms() {
+        let _guard = take_env_lock();
+        let log_dir = temp_dir("git-push-forms");
+        let log_path = log_dir.join("calls.log");
+        let fake_dir = install_fake_bin(
+            "git-push-forms-bin",
+            "git",
+            &format!(
+                r#"#!/bin/sh
+echo "$@" >> "{}"
+exit 0
+"#,
+                log_path.display()
+            ),
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        push("origin", "feat/plain", false).expect("plain push");
+        push("origin", "feat/force", true).expect("force push");
+
+        assert_eq!(
+            std::fs::read_to_string(log_path).expect("call log"),
+            "push origin feat/plain\npush origin feat/force --force-with-lease\n"
+        );
+    }
+
+    #[test]
+    fn push_surfaces_non_stale_git_error() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "git-push-generic-error-bin",
+            "git",
+            r#"#!/bin/sh
+if [ "$1" = "push" ]; then
+  echo "fatal: authentication failed" >&2
+  exit 1
+fi
+exit 0
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let error = push("origin", "feat/auth", false).expect_err("generic push failure");
+
+        assert!(
+            matches!(error.downcast_ref::<EzError>(), Some(EzError::GitError(message)) if message.contains("authentication failed")),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn best_effort_fetch_and_delete_remote_branch_swallow_git_failures() {
+        let _guard = take_env_lock();
+        let log_dir = temp_dir("git-best-effort-wrappers");
+        let log_path = log_dir.join("calls.log");
+        let fake_dir = install_fake_bin(
+            "git-best-effort-wrappers-bin",
+            "git",
+            &format!(
+                r#"#!/bin/sh
+echo "$@" >> "{}"
+exit 1
+"#,
+                log_path.display()
+            ),
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        fetch_branch("origin", "feat/missing").expect("fetch branch ignores failure");
+        delete_remote_branch("origin", "feat/missing").expect("delete remote ignores failure");
+
+        assert_eq!(
+            std::fs::read_to_string(log_path).expect("call log"),
+            "fetch origin feat/missing\npush origin --delete feat/missing\n"
+        );
+    }
+
+    #[test]
+    fn fetch_pr_head_fetches_pull_head_into_remote_tracking_ref() {
+        let _guard = take_env_lock();
+        let log_dir = temp_dir("git-fetch-pr-head");
+        let log_path = log_dir.join("calls.log");
+        let fake_dir = install_fake_bin(
+            "git-fetch-pr-head-bin",
+            "git",
+            &format!(
+                r#"#!/bin/sh
+echo "$@" >> "{}"
+exit 0
+"#,
+                log_path.display()
+            ),
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let remote_ref = fetch_pr_head("origin", 42).expect("fetch pr");
+
+        assert_eq!(remote_ref, "origin/pr/42");
+        assert_eq!(
+            std::fs::read_to_string(log_path).expect("call log"),
+            "fetch origin refs/pull/42/head:refs/remotes/origin/pr/42\n"
+        );
+    }
+
+    #[test]
+    fn stash_push_returns_false_when_worktree_is_clean() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-stash-clean");
+        let _cwd = CwdGuard::enter(&repo);
+
+        assert!(!stash_push().expect("clean stash"));
+        assert!(!stash_push_with_untracked("custom autostash").expect("clean custom stash"));
+    }
+
+    #[test]
+    fn stash_push_with_untracked_preserves_untracked_files_in_named_stash() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-stash-untracked");
+        let _cwd = CwdGuard::enter(&repo);
+        write_file(&repo, "tracked.txt", "dirty tracked\n");
+        write_file(&repo, "untracked.txt", "new file\n");
+
+        assert!(stash_push_with_untracked("ez-test-stash").expect("stash dirty tree"));
+
+        assert!(!repo.join("untracked.txt").exists());
+        assert_eq!(
+            run_git(&["stash", "list"]).expect("stash list"),
+            "stash@{0}: On main: ez-test-stash"
+        );
+        stash_pop().expect("pop stash");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("untracked.txt")).expect("untracked restored"),
+            "new file\n"
+        );
+    }
+
+    #[test]
+    fn stash_push_uses_default_autostash_label_for_dirty_tree() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-stash-default-label");
+        let _cwd = CwdGuard::enter(&repo);
+        write_file(&repo, "tracked.txt", "dirty tracked\n");
+
+        assert!(stash_push().expect("stash dirty tree"));
+
+        assert_eq!(
+            run_git(&["stash", "list"]).expect("stash list"),
+            "stash@{0}: On main: ez-autostash"
+        );
+    }
+
+    #[test]
+    fn stash_pop_index_uses_index_preserving_git_command() {
+        let _guard = take_env_lock();
+        let log_dir = temp_dir("git-stash-pop-index");
+        let log_path = log_dir.join("calls.log");
+        let fake_dir = install_fake_bin(
+            "git-stash-pop-index-bin",
+            "git",
+            &format!(
+                r#"#!/bin/sh
+echo "$@" >> "{}"
+exit 0
+"#,
+                log_path.display()
+            ),
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        stash_pop_index().expect("stash pop index");
+
+        assert_eq!(
+            std::fs::read_to_string(log_path).expect("call log"),
+            "stash pop --index\n"
+        );
+    }
+
+    #[test]
+    fn worktree_management_wrappers_pass_expected_git_arguments() {
+        let _guard = take_env_lock();
+        let log_dir = temp_dir("git-worktree-wrapper-args");
+        let log_path = log_dir.join("calls.log");
+        let fake_dir = install_fake_bin(
+            "git-worktree-wrapper-args-bin",
+            "git",
+            &format!(
+                r#"#!/bin/sh
+echo "$@" >> "{}"
+exit 0
+"#,
+                log_path.display()
+            ),
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        worktree_add_locked_no_checkout("/repo/.worktrees/feat", "feat/a", "lease")
+            .expect("add locked no checkout");
+        worktree_checkout("/repo/.worktrees/feat", "feat/a").expect("checkout");
+        worktree_unlock("/repo/.worktrees/feat").expect("unlock");
+        worktree_repair("/repo/.worktrees/feat").expect("repair");
+        worktree_remove("/repo/.worktrees/feat").expect("remove");
+        worktree_remove_force("/repo/.worktrees/feat").expect("remove force");
+        worktree_add("/repo/.worktrees/feat", "feat/a").expect("add");
+        worktree_prune().expect("prune");
+
+        assert_eq!(
+            std::fs::read_to_string(log_path).expect("call log"),
+            "worktree add --no-checkout --lock --reason lease /repo/.worktrees/feat feat/a\n\
+-C /repo/.worktrees/feat checkout --force feat/a\n\
+worktree unlock /repo/.worktrees/feat\n\
+worktree repair /repo/.worktrees/feat\n\
+worktree remove /repo/.worktrees/feat\n\
+worktree remove --force /repo/.worktrees/feat\n\
+worktree add /repo/.worktrees/feat feat/a\n\
+worktree prune\n"
+        );
+    }
+
+    #[test]
+    fn main_worktree_root_errors_when_git_returns_no_worktrees() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "git-empty-worktree-list-bin",
+            "git",
+            r#"#!/bin/sh
+if [ "$1" = "worktree" ] && [ "$2" = "list" ]; then
+  exit 0
+fi
+exit 1
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let error = main_worktree_root().expect_err("empty worktree list");
+
+        assert!(
+            error
+                .to_string()
+                .contains("could not determine main worktree root"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn update_branch_to_latest_remote_returns_false_when_branch_is_not_behind() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-update-remote-noop");
+        let remote = temp_dir("git-update-remote-noop-origin");
+        run_cmd(&remote, "git", &["init", "--bare", "--initial-branch=main"]);
+        let _cwd = CwdGuard::enter(&repo);
+        run_cmd(
+            &repo,
+            "git",
+            &["remote", "add", "origin", remote.to_str().expect("remote")],
+        );
+        run_cmd(&repo, "git", &["push", "-u", "origin", "main"]);
+        fetch("origin").expect("fetch origin");
+
+        let updated =
+            update_branch_to_latest_remote("origin", "main", "main", &repo_root().expect("root"))
+                .expect("already current");
+
+        assert!(!updated);
+    }
+
+    #[test]
+    fn update_branch_to_latest_remote_fast_forwards_current_branch() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-update-remote-current");
+        let remote = temp_dir("git-update-remote-current-origin");
+        run_cmd(&remote, "git", &["init", "--bare", "--initial-branch=main"]);
+        run_cmd(
+            &repo,
+            "git",
+            &["remote", "add", "origin", remote.to_str().expect("remote")],
+        );
+        run_cmd(&repo, "git", &["push", "-u", "origin", "main"]);
+
+        let updater = temp_dir("git-update-remote-current-updater");
+        run_cmd(
+            &std::env::temp_dir(),
+            "git",
+            &[
+                "clone",
+                remote.to_str().expect("remote"),
+                updater.to_str().expect("updater"),
+            ],
+        );
+        run_cmd(&updater, "git", &["config", "user.name", "Test User"]);
+        run_cmd(
+            &updater,
+            "git",
+            &["config", "user.email", "test@example.com"],
+        );
+        write_file(&updater, "remote.txt", "remote\n");
+        run_cmd(&updater, "git", &["add", "remote.txt"]);
+        run_cmd(&updater, "git", &["commit", "-m", "remote advance"]);
+        run_cmd(&updater, "git", &["push", "origin", "main"]);
+
+        let _cwd = CwdGuard::enter(&repo);
+        fetch("origin").expect("fetch origin");
+        let updated =
+            update_branch_to_latest_remote("origin", "main", "main", &repo_root().expect("root"))
+                .expect("fast-forward current branch");
+
+        assert!(updated);
+        assert_eq!(
+            rev_parse("main").expect("main"),
+            rev_parse("origin/main").expect("origin/main")
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("remote.txt")).expect("remote file"),
+            "remote\n"
+        );
+    }
+
+    #[test]
+    fn reset_branch_to_latest_remote_returns_false_when_branch_matches_remote() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-reset-remote-noop");
+        let remote = temp_dir("git-reset-remote-noop-origin");
+        run_cmd(&remote, "git", &["init", "--bare", "--initial-branch=main"]);
+        let _cwd = CwdGuard::enter(&repo);
+        run_cmd(
+            &repo,
+            "git",
+            &["remote", "add", "origin", remote.to_str().expect("remote")],
+        );
+        run_cmd(&repo, "git", &["push", "-u", "origin", "main"]);
+        fetch("origin").expect("fetch origin");
+
+        let updated =
+            reset_branch_to_latest_remote("origin", "main", "main", &repo_root().expect("root"))
+                .expect("already aligned");
+
+        assert!(!updated);
+    }
+
+    #[test]
+    fn verify_worktree_branch_reports_detached_head() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "git-detached-worktree-owner-bin",
+            "git",
+            r#"#!/bin/sh
+if [ "$1" = "-C" ] && [ "$3" = "branch" ] && [ "$4" = "--show-current" ]; then
+  exit 0
+fi
+exit 1
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let error = verify_worktree_branch_at("/repo/detached", "feat/a")
+            .expect_err("detached owner mismatch");
+
+        assert!(error.to_string().contains("found detached HEAD"));
+    }
+
+    #[test]
     fn stash_pop_index_at_falls_back_to_plain_pop_when_index_restore_fails() {
         let _guard = take_env_lock();
         let log_dir = temp_dir("git-stash-pop-index-fallback");
