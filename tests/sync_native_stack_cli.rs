@@ -70,7 +70,7 @@ fn init_linear_sync_repo() -> SyncRepo {
     let path = temp_dir("sync-native-repo");
     let remote = temp_dir("sync-native-remote").join("origin.git");
     std::fs::create_dir_all(&remote).expect("create remote");
-    run(&remote, "git", &["init", "--bare"]);
+    run(&remote, "git", &["init", "--bare", "-b", "main"]);
 
     run(&path, "git", &["init", "-b", "main"]);
     run(&path, "git", &["config", "user.name", "Test User"]);
