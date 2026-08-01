@@ -473,7 +473,8 @@ fn inside_worktree_delete_cancelled(target: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_support::{
-        CwdGuard, PathGuard, init_git_repo, install_fake_bin, run_cmd, take_env_lock, temp_dir,
+        CwdGuard, EnvVarGuard, PathGuard, init_git_repo, install_fake_bin, run_cmd, take_env_lock,
+        temp_dir,
     };
 
     #[test]
@@ -654,10 +655,7 @@ mod tests {
             .expect("which git");
         assert!(real_git.status.success());
         let real_git = String::from_utf8_lossy(&real_git.stdout).trim().to_string();
-        // SAFETY: this test holds the shared environment mutex.
-        unsafe {
-            std::env::set_var("EZ_TEST_REAL_GIT", real_git);
-        }
+        let _real_git = EnvVarGuard::set("EZ_TEST_REAL_GIT", real_git);
         let _path = PathGuard::install(&fake_bin);
 
         let error = quarantine_claimed_worktree(
