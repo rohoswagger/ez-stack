@@ -3,6 +3,7 @@ use anyhow::{Result, bail};
 use crate::cmd::preflight;
 use crate::cmd::rebase_conflict;
 use crate::cmd::track;
+use crate::cmd::worktree;
 use crate::error::EzError;
 use crate::git;
 use crate::stack::StackState;
@@ -222,6 +223,25 @@ pub fn restack_branches_with_options(
             .unwrap_or(stored_parent_head);
 
         if current_parent_tip == stored_parent_head {
+            continue;
+        }
+
+        if let Err(error) = worktree::guard_branch_worktree(branch_name, "restack") {
+            let detail = error.to_string();
+            ui::warn(&format!("Skipped `{branch_name}` — {detail}"));
+            ui::receipt(&serde_json::json!({
+                "cmd": cmd,
+                "branch": branch_name,
+                "action": "restack_failed",
+                "reason": "worktree_guard",
+                "parent": parent,
+                "detail": detail,
+            }));
+            report.failures.push(RestackFailure {
+                branch: branch_name.clone(),
+                parent,
+                kind: RestackFailureKind::Error(detail),
+            });
             continue;
         }
 
