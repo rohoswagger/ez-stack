@@ -385,6 +385,13 @@ fn run_sync_inner(force: bool) -> Result<()> {
             }
             state.remove_branch(branch_name);
             ui::info(&format!("Cleaned up `{branch_name}` (deleted outside ez)"));
+            ui::receipt(&serde_json::json!({
+                "cmd": "sync",
+                "branch": branch_name,
+                "action": "cleaned",
+                "reason": "deleted_outside_ez",
+                "parent": parent,
+            }));
             cleaned.push(branch_name.clone());
             continue;
         }

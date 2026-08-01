@@ -434,6 +434,12 @@ fn sync_reparents_child_and_repairs_pr_base_when_managed_parent_branch_was_delet
     assert!(state["branches"].get("feat/base").is_none());
     assert_eq!(state["branches"]["feat/child"]["parent"], "main");
     assert!(branch_exists(&repo, "feat/child"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(r#""action":"cleaned""#), "{stderr}");
+    assert!(
+        stderr.contains(r#""reason":"deleted_outside_ez""#),
+        "{stderr}"
+    );
     let log = std::fs::read_to_string(&repo.gh_log).expect("gh log");
     assert!(
         log.contains("pr edit 102 --base main"),
@@ -471,6 +477,12 @@ fn sync_reparents_child_to_trunk_when_deleted_parent_record_points_to_missing_pa
     let state = stack_state(&repo);
     assert!(state["branches"].get("feat/base").is_none());
     assert_eq!(state["branches"]["feat/child"]["parent"], "main");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(r#""action":"cleaned""#), "{stderr}");
+    assert!(
+        stderr.contains(r#""reason":"deleted_outside_ez""#),
+        "{stderr}"
+    );
     let log = std::fs::read_to_string(&repo.gh_log).expect("gh log");
     assert!(
         log.contains("pr edit 102 --base main"),
