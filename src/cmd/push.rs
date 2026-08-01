@@ -393,6 +393,28 @@ mod tests {
     }
 
     #[test]
+    fn stack_ancestors_preserves_prless_ancestors_without_urls() {
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/a", "main", "aaa", None, None);
+        state.add_branch("feat/b", "feat/a", "bbb", None, None);
+        state.add_branch("feat/c", "feat/b", "ccc", None, None);
+        state.get_branch_mut("feat/b").expect("b").pr_number = Some(20);
+
+        let ancestors = stack_ancestors(&state, "feat/c", "org/repo");
+
+        assert_eq!(ancestors.len(), 2);
+        assert_eq!(ancestors[0].branch, "feat/a");
+        assert_eq!(ancestors[0].pr_number, None);
+        assert_eq!(ancestors[0].pr_url, None);
+        assert_eq!(ancestors[1].branch, "feat/b");
+        assert_eq!(ancestors[1].pr_number, Some(20));
+        assert_eq!(
+            ancestors[1].pr_url.as_deref(),
+            Some("https://github.com/org/repo/pull/20")
+        );
+    }
+
+    #[test]
     fn stack_ancestors_single_branch_returns_empty() {
         let mut state = StackState::new("main".to_string());
         state.add_branch("feat/a", "main", "aaa", None, None);
@@ -426,6 +448,12 @@ mod tests {
     fn draft_resolution_defaults_to_false() {
         let effective = resolve_draft(false, false, None);
         assert!(!effective, "default should be false");
+    }
+
+    #[test]
+    fn draft_resolution_no_draft_without_draft_disables_config() {
+        let effective = resolve_draft(false, true, Some(true));
+        assert!(!effective, "--no-draft should disable configured draft PRs");
     }
 
     #[test]
