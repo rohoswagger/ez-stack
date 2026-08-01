@@ -321,7 +321,11 @@ fn run_sync_inner(force: bool) -> Result<()> {
 
     // Detect merged PRs and clean up.
     let managed_branches = {
-        let mut order = state.topo_order();
+        let mut order: Vec<String> = state
+            .topo_order()
+            .into_iter()
+            .filter(|branch| state.branches.contains_key(branch))
+            .collect();
         // Also include branches not in topo order (orphaned branches).
         for key in state.branches.keys() {
             if !order.contains(key) {
@@ -361,21 +365,13 @@ fn run_sync_inner(force: bool) -> Result<()> {
     };
 
     for branch_name in &cleanup_candidates {
-        let meta = state.get_branch(branch_name).ok().cloned();
-        let is_managed = meta.is_some();
+        let meta = state.get_branch(branch_name)?.clone();
         let pr_info = pr_statuses.get(branch_name.as_str());
-        let pr_number = meta
-            .as_ref()
-            .and_then(|m| m.pr_number)
-            .or(pr_info.map(|pr| pr.number));
-        let parent = meta.as_ref().map(|m| m.parent.clone());
+        let pr_number = meta.pr_number.or(pr_info.map(|pr| pr.number));
+        let parent = meta.parent;
 
         // Auto-clean branches that no longer exist locally (deleted outside of ez).
         if !git::branch_exists(branch_name) {
-            if !is_managed {
-                continue;
-            }
-            let parent = parent.clone().expect("managed branch should have a parent");
             if git::branch_exists(&parent) {
                 reparented_branches
                     .extend(state.reparent_children_preserving_parent_head(branch_name, &parent)?);
@@ -402,15 +398,14 @@ fn run_sync_inner(force: bool) -> Result<()> {
         // Diff-level check: only for branches WITHOUT a PR.
         // If a PR exists, the PR status is authoritative. An empty diff might just
         // mean someone cherry-picked the changes, not that the PR was merged.
-        let merged_via_diff =
-            if is_managed && pr_info.is_none() && !merged_via_git && pr_number.is_none() {
-                let range = format!("{}...{}", state.trunk, branch_name);
-                git::diff(&range, true, false)
-                    .map(|stat| stat.trim().is_empty())
-                    .unwrap_or(false)
-            } else {
-                false
-            };
+        let merged_via_diff = if pr_info.is_none() && !merged_via_git && pr_number.is_none() {
+            let range = format!("{}...{}", state.trunk, branch_name);
+            git::diff(&range, true, false)
+                .map(|stat| stat.trim().is_empty())
+                .unwrap_or(false)
+        } else {
+            false
+        };
 
         let cleanup_reason = cleanup_reason(pr_info, merged_via_git, merged_via_diff);
 
@@ -531,13 +526,9 @@ fn run_sync_inner(force: bool) -> Result<()> {
             continue;
         }
 
-        if is_managed {
-            let parent_name = parent.clone().expect("managed branch should have a parent");
-            reparented_branches
-                .extend(state.reparent_children_preserving_parent_head(branch_name, &parent_name)?);
-
-            state.remove_branch(branch_name);
-        }
+        reparented_branches
+            .extend(state.reparent_children_preserving_parent_head(branch_name, &parent)?);
+        state.remove_branch(branch_name);
 
         let cleanup_label = if cleanup_reason == "pr_closed" {
             "PR closed"
