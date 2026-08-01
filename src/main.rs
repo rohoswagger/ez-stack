@@ -246,6 +246,11 @@ fn run(cli: Cli) -> Result<()> {
                 cmd::delete::run(Some(&name), force, yes)
             }
             WorktreeCommands::List => cmd::list::run(false),
+            WorktreeCommands::Ensure {
+                branches,
+                dry_run,
+                json,
+            } => cmd::worktree::ensure(&branches, dry_run, json),
         },
     }
 }

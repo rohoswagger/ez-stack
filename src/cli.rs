@@ -686,6 +686,25 @@ Examples:
 
     /// List all worktrees with their name, branch, and path
     List,
+
+    /// Ensure every managed branch has a worktree without moving existing checkouts
+    #[command(after_help = "\
+Examples:
+  ez worktree ensure
+  ez worktree ensure feat/auth feat/api
+  ez worktree ensure --dry-run --json")]
+    Ensure {
+        /// Managed branches to ensure; defaults to every managed non-trunk branch
+        branches: Vec<String>,
+
+        /// Report what would change without creating worktrees
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Print a deterministic JSON report to stdout
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args)]
@@ -988,6 +1007,36 @@ mod tests {
                 assert!(yes);
             }
             _ => panic!("expected worktree delete command"),
+        }
+    }
+
+    #[test]
+    fn parses_worktree_ensure_flags_and_branches() {
+        let cli = Cli::try_parse_from([
+            "ez",
+            "worktree",
+            "ensure",
+            "feat/api",
+            "feat/ui",
+            "--dry-run",
+            "--json",
+        ])
+        .expect("parse worktree ensure");
+
+        match cli.command {
+            Commands::Worktree(WorktreeArgs {
+                command:
+                    WorktreeCommands::Ensure {
+                        branches,
+                        dry_run,
+                        json,
+                    },
+            }) => {
+                assert_eq!(branches, vec!["feat/api", "feat/ui"]);
+                assert!(dry_run);
+                assert!(json);
+            }
+            _ => panic!("expected worktree ensure command"),
         }
     }
 

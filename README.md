@@ -122,6 +122,7 @@ Use `--hook <name>` for project-specific hooks, or `--hook` alone to list availa
 | `ez create <name>` | Create worktree + branch (default). `--from main` for independent work. `--no-worktree` for branch only. |
 | `ez adopt --pr <number>` | Materialize a PR chain or native GitHub stack locally, with one worktree per active layer. `--no-worktrees` for metadata only. |
 | `ez adopt <branch>...` | Adopt an explicit bottom-to-top branch chain without requiring PRs or GitHub auth. Remote-only branches are fetched and materialized into worktrees by default. |
+| `ez worktree ensure [branch...]` | Materialize missing worktrees for the whole managed stack, or selected layers. Reuses existing checkouts wherever they live. |
 | `ez list` | Dashboard for all local branches: PRs, CI, age, ports, and working tree state. `--json` for machine output. |
 | `ez delete [name]` | Delete branch + worktree. Auto-detects worktrees and best-effort stops listeners on the branch dev port. `--yes` for agents. |
 | `ez fold [branch] --yes` | Locally fold one PR-less stack layer into its parent without rewriting commits. Removes the folded local worktree/branch, reparents children, and preserves remotes. |
@@ -221,6 +222,24 @@ default. Remote-only branches are materialized locally. If an existing local
 branch is behind or diverged from its remote, adoption stops before changing
 branches or worktrees. Explicit branch-only adoption does not need GitHub CLI
 auth because it works from git refs instead of PR metadata.
+
+### Materialize a worktree fleet
+
+```bash
+ez worktree ensure                  # every managed non-trunk layer
+ez worktree ensure feat/api feat/ui # selected layers, parent-first
+ez worktree ensure --dry-run --json # deterministic plan for agents
+```
+
+`ez worktree ensure` turns an existing stack into an isolated workspace fleet
+without moving or deleting any checkout. Existing canonical, external, and main
+worktrees are reused—even when dirty—and their staged, modified, and untracked
+counts are reported. Missing worktrees are created at their canonical
+`.worktrees/<branch>` paths. Before changing anything, ez validates every
+selected branch and destination, including path collisions caused by sanitized
+branch names. If a later creation fails, worktrees created earlier in the same
+invocation are rolled back. The command is local/offline and does not change
+stack metadata, branches, remotes, or GitHub state.
 
 ### Fold a local stack layer down
 

@@ -79,6 +79,9 @@ Preferred workflow:
 |--------|---------|
 | Move branch to new parent | `ez move --onto <branch>` |
 | Fold one clean PR-less layer into its parent | `ez fold [branch] --yes` |
+| Ensure every managed layer has a worktree | `ez worktree ensure` |
+| Ensure selected layers have worktrees | `ez worktree ensure <branch...>` |
+| Preview the deterministic fleet plan | `ez worktree ensure --dry-run --json` |
 | Push entire stack | `ez submit` |
 
 ## Setup and Maintenance
@@ -105,6 +108,7 @@ Every mutating command emits JSON to stderr:
 | sync (clean) | `action: "cleaned"`, `reason: "merged"` |
 | push | `pr_number`, `pr_url`, `created` |
 | create | `branch`, `parent`, `worktree` |
+| worktree ensure | `dry_run`, `entries`, `created_count`, `reused_count`, `would_create_count` |
 | delete | `branch`, `worktree`, `dev_port`, `killed_pids`, `reparented_children` |
 | fold | `branch`, `into`, `before_parent`, `after_parent`, `removed_worktree`, `reparented_children`, `remote_preserved` |
 | rebase conflict | `action: "conflict"`, `branch`, `parent`, `conflicting_files`, `git_stderr`, `next_command` |
