@@ -52,6 +52,12 @@ persistent workspace fleet:
   enables `rebase.autoStash`; the affected layer stays attached and retryable.
 - Conflicts are isolated to their owning layer and cleaned up without blocking
   independent siblings from converging.
+- Workspace teardown is commit-like: `ez delete` removes the worktree before
+  stopping verified worktree-owned dev processes, so a failed delete leaves
+  the live environment, dirty edits, branch, and stack metadata intact.
+  The claimed worktree is atomically quarantined before its lock is released,
+  listener process identity is revalidated before signaling, branch-ref failure
+  restores the worktree, and stale directories are never recursively deleted.
 
 That makes a stack more than a list of PRs: it is a set of durable, independently
 usable development environments that ez can operate as one unit.
@@ -290,6 +296,17 @@ duration, and status per branch without polluting stdout, including explicit
 
 Commands are not interpreted by a shell. Pass `sh -lc '<command>'` explicitly
 when pipelines, redirects, globs, or other shell syntax are required.
+
+### Tear down a worktree safely
+
+`ez delete <branch> --yes` claims the exact branch/worktree pair, atomically
+moves it to an invocation-unique quarantine path, removes the linked worktree
+and local branch, then stops only deterministic-port listeners whose working
+directory belonged to that worktree and whose process start identity still
+matches. This prevents a replacement at the original path or a reused PID from
+being destroyed. If removal fails, ez restores the original worktree path; if
+local branch deletion fails, ez recreates the worktree. Dirty, locked, stale, or
+otherwise invalid worktrees leave processes, files, refs, and metadata intact.
 
 ### Fold a local stack layer down
 

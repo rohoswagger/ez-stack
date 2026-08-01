@@ -126,7 +126,7 @@ cargo llvm-cov --all-features --workspace --no-fail-fast --summary-only
 Integration tests create temporary git repos and exercise full command flows. They do not touch GitHub — any `gh` calls are stubbed.
 
 CI enforces monotonically increasing line, function, and region coverage floors.
-The current ratchet is 80% lines, 84% functions, and 80% regions, with 100% as
+The current ratchet is 81% lines, 84% functions, and 81% regions, with 100% as
 the target. Do not lower a floor to make a change pass; add behavior-focused
 tests or simplify unreachable production code, then raise the floor whenever
 the measured whole-workspace result crosses the next integer.

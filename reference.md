@@ -92,6 +92,13 @@ their owning worktrees. ez verifies branch ownership and disables inherited
 `rebase.autoStash`; dirty edits are preserved and reported instead of being
 silently stashed during a fleet mutation.
 
+`delete` claims the exact branch/worktree pair and atomically quarantines its
+path before releasing the ownership lock. It removes the worktree and local
+branch, then stops deterministic-port processes only when both their cwd and
+start identity match the captured worktree process. Removal failure restores
+the original path; branch deletion failure recreates the worktree. Stale
+registered paths are never recursively deleted.
+
 ## Setup and Maintenance
 
 | Intent | Command |

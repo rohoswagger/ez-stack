@@ -970,6 +970,16 @@ pub fn worktree_unlock(path: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn worktree_lock(path: &str, reason: &str) -> Result<()> {
+    run_git(&["worktree", "lock", "--reason", reason, path])?;
+    Ok(())
+}
+
+pub fn worktree_repair(path: &str) -> Result<()> {
+    run_git(&["worktree", "repair", path])?;
+    Ok(())
+}
+
 /// If `branch` is checked out in a worktree OTHER than `current_root`, returns that
 /// worktree's path. Returns Ok(None) if the branch is safe to rebase in this worktree.
 ///
