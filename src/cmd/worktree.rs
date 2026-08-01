@@ -1857,6 +1857,72 @@ mod tests {
     }
 
     #[test]
+    fn successful_add_without_ownership_lock_is_reported_and_not_removed() {
+        let _lock = take_env_lock();
+        let fixture = FleetRepo::new("fleet-add-without-ownership");
+        let _cwd = CwdGuard::enter(&fixture.repo);
+        let base_path = git::worktree_path("feat/base").expect("base path");
+
+        let error = ensure_with_adder(&["feat/base".to_string()], false, |path, branch, _lock| {
+            git::worktree_add(path, branch)
+        })
+        .expect_err("unlocked successful add must not be accepted as ez-owned");
+
+        assert!(error.to_string().contains("without ez ownership lock"));
+        assert!(error.to_string().contains("rollback errors: none"));
+        assert!(
+            git::worktree_list()
+                .expect("worktree list")
+                .iter()
+                .any(|worktree| {
+                    worktree.path == base_path
+                        && worktree.branch.as_deref() == Some("feat/base")
+                        && worktree.locked_reason.is_none()
+                })
+        );
+    }
+
+    struct RenameBack {
+        from: PathBuf,
+        to: PathBuf,
+    }
+
+    impl Drop for RenameBack {
+        fn drop(&mut self) {
+            if self.from.exists() && !self.to.exists() {
+                let _ = std::fs::rename(&self.from, &self.to);
+            }
+        }
+    }
+
+    #[test]
+    fn ownership_verification_failure_reports_rollback_result() {
+        let _lock = take_env_lock();
+        let fixture = FleetRepo::new("fleet-ownership-list-failure");
+        let _cwd = CwdGuard::enter(&fixture.repo);
+        let git_dir = fixture.repo.join(".git");
+        let hidden_git_dir = fixture.repo.join(".git-hidden-during-ownership-check");
+        let mut guard: Option<RenameBack> = None;
+
+        let error = ensure_with_adder(&["feat/base".to_string()], false, |path, branch, lock| {
+            add_owned_worktree(path, branch, lock)?;
+            std::fs::rename(&git_dir, &hidden_git_dir).expect("hide git dir");
+            guard = Some(RenameBack {
+                from: hidden_git_dir.clone(),
+                to: git_dir.clone(),
+            });
+            Ok(())
+        })
+        .expect_err("ownership verification must fail when git state disappears");
+        drop(guard);
+
+        let message = error.to_string();
+        assert!(message.contains("verify ez ownership after creating `feat/base`"));
+        assert!(message.contains("Worktree fleet rollback results:"));
+        assert!(message.contains("verify `feat/base` worktree"));
+    }
+
+    #[test]
     fn failing_add_never_claims_an_unlocked_same_branch_worktree_as_its_own() {
         let _lock = take_env_lock();
         let fixture = FleetRepo::new("fleet-current-owner-race");
