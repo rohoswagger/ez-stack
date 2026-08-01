@@ -238,6 +238,33 @@ Intended workflow:
 | `ez sync --dry-run` | Preview what sync would do |
 | `ez restack` | Fetch trunk, refresh it locally, and rebase stale branches onto their latest parent tips |
 
+#### Sync safety contract
+
+`ez sync` treats `.git/ez/stack.json` as its ownership boundary. It may inspect
+and clean only branches recorded there; an ordinary local Git branch is never a
+cleanup candidate until you explicitly bring it under ez with `ez track` or
+`ez adopt`.
+
+Sync applies changes in a deliberate order: fetch and refresh trunk, clean
+finished managed layers, reparent their surviving children, restack the
+remaining graph, save local state, repair changed PR bases, and finally
+reconcile representable GitHub native stacks. If a restack conflicts, the
+command finishes recovery and state persistence before returning exit code 3,
+so the branch remains retryable.
+
+| Condition | `ez sync` result |
+|-----------|------------------|
+| Managed PR is merged or closed | Remove its clean worktree and local branch, then reparent children and update their PR bases |
+| Managed branch was deleted outside ez | Repair stack state and reparent its children without requiring the missing ref |
+| Linked worktree has uncommitted changes | Keep the worktree, branch, and stack entry; emit `cleanup_skipped` |
+| `--force` with an uncommitted managed worktree | Discard that worktree's changes and complete cleanup |
+| Worktree has an active ez lease or foreign Git lock | Always keep it, including with `--force`; emit `cleanup_skipped` |
+| Sync is invoked inside a worktree that gets cleaned | Print the main worktree path for shell integration to enter safely |
+| `--autostash` and restacking fails | Restore tracked and untracked user changes, preserve retryable state, and return exit code 3 |
+
+Every cleanup, skip, PR-base repair, and native-stack outcome also emits a
+structured receipt on stderr for automation and debugging.
+
 ### Navigation
 
 | Command | Description |
