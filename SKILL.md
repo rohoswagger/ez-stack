@@ -197,7 +197,20 @@ descendant needs restacking.
 ### Sync with other agents' work
 ```bash
 ez sync --autostash   # pulls trunk, cleans merged PRs, restacks your branches
+ez sync --repair-native-stack  # explicitly repair divergent GitHub native stack links
 ```
+
+Default `ez sync` is non-destructive for GitHub native stacks: it reconciles
+representable exact 2+ PR chains when possible, but reports divergent native
+stacks and leaves them untouched. Use `--repair-native-stack` only when the task
+explicitly calls for remote repair; it may dissolve a divergent GitHub native
+stack and recreate it in ez's local PR order. Repair skips fork/cross-repository
+and unrepresentable branching graphs, re-reads on concurrent Stack API conflicts,
+and returns nonzero if GitHub retains a queued/locked divergent stack or if
+recreation fails after a dissolve.
+
+Dry-run remains network-free. `ez sync --dry-run --repair-native-stack` only
+prints which exact PR chains would be repaired and the matching retry command.
 
 ### Adopt branches from another machine or collaborator
 ```bash

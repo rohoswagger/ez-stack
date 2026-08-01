@@ -7,6 +7,9 @@ use std::time::Duration;
 use crate::error::EzError;
 
 const GITHUB_API_VERSION_HEADER: &str = "X-GitHub-Api-Version: 2026-03-10";
+const GITHUB_JSON_ACCEPT_HEADER: &str = "Accept: application/vnd.github+json";
+const MAX_NATIVE_STACK_MUTATION_ATTEMPTS: usize = 3;
+const NATIVE_STACK_RETRY_BACKOFF: Duration = Duration::from_millis(50);
 
 fn run_gh(args: &[&str]) -> Result<String> {
     let output = Command::new("gh")
@@ -78,6 +81,7 @@ pub enum NativeStackOutcome {
     Created { number: u64 },
     Extended { number: u64, added: usize },
     Unchanged { number: u64 },
+    Repaired { previous_number: u64, number: u64 },
     NotApplicable { reason: String },
     Unavailable,
 }
@@ -724,6 +728,20 @@ pub fn reconcile_native_stack_exact(
     reconcile_native_stack(pr_numbers, retry_command, false, repo)
 }
 
+pub fn repair_native_stack_exact(
+    pr_numbers: &[u64],
+    retry_command: &str,
+    repo: Option<&str>,
+) -> Result<NativeStackOutcome> {
+    if pr_numbers.len() < 2 {
+        return Ok(NativeStackOutcome::NotNeeded);
+    }
+    validate_native_stack_length(pr_numbers)?;
+
+    let repo = repo_name(repo)?;
+    repair_native_stack_exact_in_repo(pr_numbers, retry_command, &repo)
+}
+
 fn reconcile_native_stack(
     pr_numbers: &[u64],
     retry_command: &str,
@@ -733,72 +751,59 @@ fn reconcile_native_stack(
     if pr_numbers.len() < 2 {
         return Ok(NativeStackOutcome::NotNeeded);
     }
+    validate_native_stack_length(pr_numbers)?;
 
     let repo = repo_name(repo)?;
-    let bottom = pr_numbers[0];
-    let route = format!("repos/{repo}/stacks?pull_request={bottom}");
-    let existing = match run_gh(&["api", &route, "-H", GITHUB_API_VERSION_HEADER]) {
-        Ok(json) => json,
+    let mut mutation_attempts = 0;
+    let mut existing = match list_native_stack_for_bottom(&repo, pr_numbers[0]) {
+        Ok(stack) => stack,
         Err(err) if is_not_found_gh_error(&err) => return Ok(NativeStackOutcome::Unavailable),
         Err(err) => return Err(err),
     };
 
-    let stacks: Vec<serde_json::Value> = serde_json::from_str(&existing)
-        .with_context(|| "failed to parse GitHub native stack lookup response")?;
+    loop {
+        let Some(stack) = existing.as_ref() else {
+            let number = create_native_stack(&repo, pr_numbers)?;
+            return Ok(NativeStackOutcome::Created { number });
+        };
 
-    let Some(stack) = stacks.first() else {
-        let payload = serde_json::json!({ "pull_requests": pr_numbers }).to_string();
-        let response = run_gh_with_stdin(
-            &[
-                "api",
-                "-X",
-                "POST",
-                &format!("repos/{repo}/stacks"),
-                "--input",
-                "-",
-                "-H",
-                GITHUB_API_VERSION_HEADER,
-            ],
-            &payload,
-        )?;
-        let number = parse_native_stack_number(&response)?;
-        return Ok(NativeStackOutcome::Created { number });
-    };
+        let number = stack.number;
+        let existing_prs = &stack.pull_requests;
 
-    let number = parse_native_stack_info_number(stack)?;
-    let existing_prs = parse_native_stack_pr_numbers(stack)?;
+        if existing_prs == pr_numbers {
+            return Ok(NativeStackOutcome::Unchanged { number });
+        }
+        if is_prefix(existing_prs, pr_numbers) {
+            let delta = &pr_numbers[existing_prs.len()..];
+            match add_native_stack_prs(&repo, number, delta) {
+                Ok(()) => {
+                    return Ok(NativeStackOutcome::Extended {
+                        number,
+                        added: delta.len(),
+                    });
+                }
+                Err(err) if is_conflict_gh_error(&err) || is_not_found_gh_error(&err) => {
+                    mutation_attempts += 1;
+                    if mutation_attempts >= MAX_NATIVE_STACK_MUTATION_ATTEMPTS {
+                        bail!(EzError::GhError(format!(
+                            "could not update GitHub native stack #{number} after {MAX_NATIVE_STACK_MUTATION_ATTEMPTS} attempts due to concurrent changes; retry `{retry_command}`."
+                        )));
+                    }
+                    sleep_before_native_stack_retry(mutation_attempts);
+                    existing = list_native_stack_for_bottom(&repo, pr_numbers[0])?;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        if allow_existing_superset && is_prefix(pr_numbers, existing_prs) {
+            return Ok(NativeStackOutcome::Unchanged { number });
+        }
 
-    if existing_prs == pr_numbers {
-        return Ok(NativeStackOutcome::Unchanged { number });
+        bail!(EzError::GhError(format!(
+            "native stack #{number} diverges from desired PR chain; existing pull_requests={existing_prs:?}, desired pull_requests={pr_numbers:?}. Resolve the GitHub stack manually, then retry `{retry_command}`."
+        )));
     }
-    if is_prefix(&existing_prs, pr_numbers) {
-        let delta = &pr_numbers[existing_prs.len()..];
-        let payload = serde_json::json!({ "pull_requests": delta }).to_string();
-        run_gh_with_stdin(
-            &[
-                "api",
-                "-X",
-                "POST",
-                &format!("repos/{repo}/stacks/{number}/add"),
-                "--input",
-                "-",
-                "-H",
-                GITHUB_API_VERSION_HEADER,
-            ],
-            &payload,
-        )?;
-        return Ok(NativeStackOutcome::Extended {
-            number,
-            added: delta.len(),
-        });
-    }
-    if allow_existing_superset && is_prefix(pr_numbers, &existing_prs) {
-        return Ok(NativeStackOutcome::Unchanged { number });
-    }
-
-    bail!(EzError::GhError(format!(
-        "native stack #{number} diverges from desired PR chain; existing pull_requests={existing_prs:?}, desired pull_requests={pr_numbers:?}. Resolve the GitHub stack manually, then retry `{retry_command}`."
-    )));
 }
 
 pub fn native_stack_for_pr(pr_number: u64, repo: Option<&str>) -> Result<Option<NativeStackInfo>> {
@@ -810,12 +815,12 @@ pub fn native_stack_for_pr(pr_number: u64, repo: Option<&str>) -> Result<Option<
 
 pub fn lookup_native_stack_for_pr(pr_number: u64, repo: Option<&str>) -> Result<NativeStackLookup> {
     let repo = repo_name(repo)?;
-    let route = format!("repos/{repo}/stacks?pull_request={pr_number}");
-    let response = match run_gh(&["api", &route, "-H", GITHUB_API_VERSION_HEADER]) {
-        Ok(json) => json,
-        Err(err) if is_not_found_gh_error(&err) => return Ok(NativeStackLookup::Unavailable),
-        Err(err) => return Err(err),
-    };
+    let response =
+        match run_native_stack_api_get(&format!("repos/{repo}/stacks?pull_request={pr_number}")) {
+            Ok(json) => json,
+            Err(err) if is_not_found_gh_error(&err) => return Ok(NativeStackLookup::Unavailable),
+            Err(err) => return Err(err),
+        };
 
     let stacks: Vec<serde_json::Value> = serde_json::from_str(&response)
         .with_context(|| "failed to parse GitHub native stack lookup response")?;
@@ -831,9 +836,216 @@ pub fn lookup_native_stack_for_pr(pr_number: u64, repo: Option<&str>) -> Result<
     }))
 }
 
+fn repair_native_stack_exact_in_repo(
+    pr_numbers: &[u64],
+    retry_command: &str,
+    repo: &str,
+) -> Result<NativeStackOutcome> {
+    let mut mutation_attempts = 0;
+    let mut existing = match list_native_stack_for_bottom(repo, pr_numbers[0]) {
+        Ok(stack) => stack,
+        Err(err) if is_not_found_gh_error(&err) => return Ok(NativeStackOutcome::Unavailable),
+        Err(err) => return Err(err),
+    };
+
+    loop {
+        let Some(stack) = existing.as_ref() else {
+            let number = create_native_stack(repo, pr_numbers)?;
+            return Ok(NativeStackOutcome::Created { number });
+        };
+
+        if stack.pull_requests == pr_numbers {
+            return Ok(NativeStackOutcome::Unchanged {
+                number: stack.number,
+            });
+        }
+
+        if is_prefix(&stack.pull_requests, pr_numbers) {
+            let delta = &pr_numbers[stack.pull_requests.len()..];
+            match add_native_stack_prs(repo, stack.number, delta) {
+                Ok(()) => {
+                    return Ok(NativeStackOutcome::Extended {
+                        number: stack.number,
+                        added: delta.len(),
+                    });
+                }
+                Err(err) if is_conflict_gh_error(&err) || is_not_found_gh_error(&err) => {
+                    mutation_attempts += 1;
+                    if mutation_attempts >= MAX_NATIVE_STACK_MUTATION_ATTEMPTS {
+                        bail!(EzError::GhError(format!(
+                            "could not repair GitHub native stack after {MAX_NATIVE_STACK_MUTATION_ATTEMPTS} attempts due to concurrent changes; retry `{retry_command}`."
+                        )));
+                    }
+                    sleep_before_native_stack_retry(mutation_attempts);
+                    existing = list_native_stack_for_bottom(repo, pr_numbers[0])?;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        match unstack_native_stack(repo, stack.number) {
+            Ok(NativeUnstackOutcome::Dissolved) => {
+                return create_native_stack_after_dissolve(
+                    repo,
+                    pr_numbers,
+                    stack.number,
+                    retry_command,
+                );
+            }
+            Ok(NativeUnstackOutcome::Retained(retained)) => {
+                if retained.pull_requests == pr_numbers {
+                    return Ok(NativeStackOutcome::Unchanged {
+                        number: retained.number,
+                    });
+                }
+                bail!(EzError::GhError(format!(
+                    "native stack #{} is queued or locked and retained a divergent PR chain; existing pull_requests={:?}, desired pull_requests={pr_numbers:?}. Resolve the retained GitHub stack manually, then retry `{retry_command}`.",
+                    retained.number, retained.pull_requests
+                )));
+            }
+            Err(err) if is_conflict_gh_error(&err) || is_not_found_gh_error(&err) => {
+                mutation_attempts += 1;
+                if mutation_attempts >= MAX_NATIVE_STACK_MUTATION_ATTEMPTS {
+                    bail!(EzError::GhError(format!(
+                        "could not repair GitHub native stack after {MAX_NATIVE_STACK_MUTATION_ATTEMPTS} attempts due to concurrent changes; retry `{retry_command}`."
+                    )));
+                }
+                sleep_before_native_stack_retry(mutation_attempts);
+                existing = list_native_stack_for_bottom(repo, pr_numbers[0])?;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn validate_native_stack_length(pr_numbers: &[u64]) -> Result<()> {
+    if pr_numbers.len() > 100 {
+        bail!(
+            "GitHub native stacks support at most 100 pull requests; desired stack has {}",
+            pr_numbers.len()
+        );
+    }
+    Ok(())
+}
+
+fn run_native_stack_api_get(route: &str) -> Result<String> {
+    run_gh(&[
+        "api",
+        route,
+        "-H",
+        GITHUB_API_VERSION_HEADER,
+        "-H",
+        GITHUB_JSON_ACCEPT_HEADER,
+    ])
+}
+
+fn run_native_stack_api_post(route: &str, payload: &str) -> Result<String> {
+    run_gh_with_stdin(
+        &[
+            "api",
+            "-X",
+            "POST",
+            route,
+            "--input",
+            "-",
+            "-H",
+            GITHUB_API_VERSION_HEADER,
+            "-H",
+            GITHUB_JSON_ACCEPT_HEADER,
+        ],
+        payload,
+    )
+}
+
+fn run_native_stack_api_post_without_body(route: &str) -> Result<String> {
+    run_gh(&[
+        "api",
+        "-X",
+        "POST",
+        route,
+        "-H",
+        GITHUB_API_VERSION_HEADER,
+        "-H",
+        GITHUB_JSON_ACCEPT_HEADER,
+    ])
+}
+
+fn list_native_stack_for_bottom(repo: &str, bottom: u64) -> Result<Option<NativeStackInfo>> {
+    let route = format!("repos/{repo}/stacks?pull_request={bottom}");
+    let response = run_native_stack_api_get(&route)?;
+    let stacks: Vec<serde_json::Value> = serde_json::from_str(&response)
+        .with_context(|| "failed to parse GitHub native stack lookup response")?;
+    stacks.first().map(parse_native_stack_info).transpose()
+}
+
+fn create_native_stack(repo: &str, pr_numbers: &[u64]) -> Result<u64> {
+    let payload = serde_json::json!({ "pull_requests": pr_numbers }).to_string();
+    let response = run_native_stack_api_post(&format!("repos/{repo}/stacks"), &payload)?;
+    parse_native_stack_number(&response)
+}
+
+fn create_native_stack_after_dissolve(
+    repo: &str,
+    pr_numbers: &[u64],
+    previous_number: u64,
+    retry_command: &str,
+) -> Result<NativeStackOutcome> {
+    match create_native_stack(repo, pr_numbers) {
+        Ok(number) => Ok(NativeStackOutcome::Repaired {
+            previous_number,
+            number,
+        }),
+        Err(err) => bail!(EzError::GhError(format!(
+            "previous native stack #{previous_number} was dissolved, but recreating the desired GitHub native stack failed: {err}. Please retry `{retry_command}`."
+        ))),
+    }
+}
+
+fn add_native_stack_prs(repo: &str, number: u64, delta: &[u64]) -> Result<()> {
+    let payload = serde_json::json!({ "pull_requests": delta }).to_string();
+    run_native_stack_api_post(&format!("repos/{repo}/stacks/{number}/add"), &payload)?;
+    Ok(())
+}
+
+enum NativeUnstackOutcome {
+    Dissolved,
+    Retained(NativeStackInfo),
+}
+
+fn unstack_native_stack(repo: &str, number: u64) -> Result<NativeUnstackOutcome> {
+    let response =
+        run_native_stack_api_post_without_body(&format!("repos/{repo}/stacks/{number}/unstack"))?;
+    if response.trim().is_empty() {
+        return Ok(NativeUnstackOutcome::Dissolved);
+    }
+    Ok(NativeUnstackOutcome::Retained(parse_native_stack_info(
+        &serde_json::from_str(&response)
+            .with_context(|| "failed to parse GitHub native stack unstack response")?,
+    )?))
+}
+
+fn sleep_before_native_stack_retry(attempts: usize) {
+    std::thread::sleep(NATIVE_STACK_RETRY_BACKOFF * attempts as u32);
+}
+
 fn is_not_found_gh_error(err: &anyhow::Error) -> bool {
     let message = err.to_string().to_ascii_lowercase();
     message.contains("404") || message.contains("not found")
+}
+
+fn is_conflict_gh_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string().to_ascii_lowercase();
+    message.contains("409") || message.contains("conflict")
+}
+
+fn parse_native_stack_info(stack: &serde_json::Value) -> Result<NativeStackInfo> {
+    Ok(NativeStackInfo {
+        number: parse_native_stack_info_number(stack)?,
+        base_ref: parse_native_stack_base_ref(stack),
+        open: stack["open"].as_bool(),
+        pull_requests: parse_native_stack_pr_numbers(stack)?,
+    })
 }
 
 fn parse_native_stack_info_number(stack: &serde_json::Value) -> Result<u64> {
@@ -1932,6 +2144,497 @@ exit 2
             "unexpected error: {err:#}"
         );
         assert!(!log_path.exists(), "POST should not be called");
+    }
+
+    #[test]
+    fn repair_native_stack_dissolves_and_recreates_divergent_stack() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-repair-recreate",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ]; then
+  printf '%s\n' "$*" >> "$EZ_FAKE_GH_LOG"
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+  echo '[{"number":88,"pull_requests":[{"number":10},{"number":99}]}]'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "POST" ] && [ "$4" = "repos/org/repo/stacks/88/unstack" ]; then
+  cat >/dev/null
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "POST" ] && [ "$4" = "repos/org/repo/stacks" ]; then
+  cat > "$EZ_FAKE_GH_PAYLOAD"
+  echo '{"number":101}'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let log_path = fake_dir.join("calls.log");
+        let payload_path = fake_dir.join("payload.json");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &log_path);
+            std::env::set_var("EZ_FAKE_GH_PAYLOAD", &payload_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let outcome =
+            repair_native_stack_exact(&[10, 20, 30], "ez submit", None).expect("repair stack");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+            std::env::remove_var("EZ_FAKE_GH_PAYLOAD");
+        }
+        assert_eq!(
+            outcome,
+            NativeStackOutcome::Repaired {
+                previous_number: 88,
+                number: 101
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(payload_path).expect("payload"),
+            r#"{"pull_requests":[10,20,30]}"#
+        );
+        let log = std::fs::read_to_string(log_path).expect("calls");
+        assert!(log.contains("repos/org/repo/stacks/88/unstack"));
+        assert!(log.contains("repos/org/repo/stacks"));
+    }
+
+    #[test]
+    fn repair_native_stack_extends_existing_prefix_without_unstacking() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-repair-prefix",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ]; then
+  printf '%s\n' "$*" >> "$EZ_FAKE_GH_LOG"
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+  echo '[{"number":88,"pull_requests":[{"number":10},{"number":20}]}]'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "POST" ] && [ "$4" = "repos/org/repo/stacks/88/add" ]; then
+  cat > "$EZ_FAKE_GH_PAYLOAD"
+  echo '{"number":88}'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$4" = "repos/org/repo/stacks/88/unstack" ]; then
+  echo unstack-called >&2
+  exit 2
+fi
+exit 2
+"#,
+        );
+        let log_path = fake_dir.join("calls.log");
+        let payload_path = fake_dir.join("payload.json");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &log_path);
+            std::env::set_var("EZ_FAKE_GH_PAYLOAD", &payload_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let outcome =
+            repair_native_stack_exact(&[10, 20, 30], "ez submit", None).expect("extend stack");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+            std::env::remove_var("EZ_FAKE_GH_PAYLOAD");
+        }
+        assert_eq!(
+            outcome,
+            NativeStackOutcome::Extended {
+                number: 88,
+                added: 1
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(payload_path).expect("payload"),
+            r#"{"pull_requests":[30]}"#
+        );
+        let log = std::fs::read_to_string(log_path).expect("calls");
+        assert!(log.contains("repos/org/repo/stacks/88/add"));
+        assert!(!log.contains("repos/org/repo/stacks/88/unstack"));
+    }
+
+    #[test]
+    fn repair_native_stack_retained_exact_is_unchanged_without_create() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-repair-retained-exact",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+  echo '[{"number":88,"pull_requests":[{"number":10},{"number":99}]}]'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$4" = "repos/org/repo/stacks/88/unstack" ]; then
+  cat >/dev/null
+  echo '{"number":88,"pull_requests":[{"number":10},{"number":20}]}'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$4" = "repos/org/repo/stacks" ]; then
+  echo create >> "$EZ_FAKE_GH_LOG"
+  exit 2
+fi
+exit 2
+"#,
+        );
+        let log_path = fake_dir.join("posts.log");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &log_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let outcome =
+            repair_native_stack_exact(&[10, 20], "ez submit", None).expect("retained exact");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+        }
+        assert_eq!(outcome, NativeStackOutcome::Unchanged { number: 88 });
+        assert!(!log_path.exists(), "POST should not be called");
+    }
+
+    #[test]
+    fn repair_native_stack_retained_divergent_after_unstack_errors_without_create() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-repair-retained-divergent",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+  count_file="$EZ_FAKE_GH_COUNT"
+  count=0
+  if [ -f "$count_file" ]; then
+    count=$(cat "$count_file")
+  fi
+  count=$((count + 1))
+  echo "$count" > "$count_file"
+  echo '[{"number":88,"pull_requests":[{"number":10},{"number":99}]}]'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$4" = "repos/org/repo/stacks/88/unstack" ]; then
+  cat >/dev/null
+  echo '{"number":88,"pull_requests":[{"number":10},{"number":99}]}'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$4" = "repos/org/repo/stacks" ]; then
+  echo create >> "$EZ_FAKE_GH_LOG"
+  exit 2
+fi
+exit 2
+"#,
+        );
+        let count_path = fake_dir.join("count");
+        let log_path = fake_dir.join("posts.log");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_COUNT", &count_path);
+            std::env::set_var("EZ_FAKE_GH_LOG", &log_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let err = repair_native_stack_exact(&[10, 20], "ez submit", None)
+            .expect_err("retained divergent should fail");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_COUNT");
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+        }
+        assert!(
+            err.to_string().contains("queued or locked"),
+            "unexpected error: {err:#}"
+        );
+        assert!(!log_path.exists(), "create should not be called");
+    }
+
+    #[test]
+    fn repair_native_stack_rereads_after_409_and_succeeds_when_stack_matches() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-repair-409-reread",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+  count_file="$EZ_FAKE_GH_COUNT"
+  count=0
+  if [ -f "$count_file" ]; then
+    count=$(cat "$count_file")
+  fi
+  count=$((count + 1))
+  echo "$count" > "$count_file"
+  if [ "$count" = "1" ]; then
+    echo '[{"number":88,"pull_requests":[{"number":10},{"number":99}]}]'
+  else
+    echo '[{"number":88,"pull_requests":[{"number":10},{"number":20}]}]'
+  fi
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$4" = "repos/org/repo/stacks/88/unstack" ]; then
+  cat >/dev/null
+  echo "HTTP 409: Conflict" >&2
+  exit 1
+fi
+exit 2
+"#,
+        );
+        let count_path = fake_dir.join("count");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_COUNT", &count_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let outcome =
+            repair_native_stack_exact(&[10, 20], "ez submit", None).expect("reread success");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_COUNT");
+        }
+        assert_eq!(outcome, NativeStackOutcome::Unchanged { number: 88 });
+        assert_eq!(std::fs::read_to_string(count_path).expect("count"), "2\n");
+    }
+
+    #[test]
+    fn repair_native_stack_repeated_409_exhausts_bounded_attempts() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-repair-409-exhaust",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+  echo list >> "$EZ_FAKE_GH_LOG"
+  echo '[{"number":88,"pull_requests":[{"number":10},{"number":99}]}]'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$4" = "repos/org/repo/stacks/88/unstack" ]; then
+  cat >/dev/null
+  echo "HTTP 409: Conflict" >&2
+  exit 1
+fi
+exit 2
+"#,
+        );
+        let log_path = fake_dir.join("list.log");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &log_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let err = repair_native_stack_exact(&[10, 20], "ez submit", None)
+            .expect_err("409 should exhaust");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+        }
+        assert!(
+            err.to_string().contains("after 3 attempts"),
+            "unexpected error: {err:#}"
+        );
+        let list_count = std::fs::read_to_string(log_path)
+            .expect("log")
+            .lines()
+            .count();
+        assert_eq!(
+            list_count, 3,
+            "initial list plus rereads before the second and third mutation attempts"
+        );
+    }
+
+    #[test]
+    fn repair_native_stack_mutation_404_restarts_and_repairs() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-repair-404-restart",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+  count_file="$EZ_FAKE_GH_COUNT"
+  count=0
+  if [ -f "$count_file" ]; then
+    count=$(cat "$count_file")
+  fi
+  count=$((count + 1))
+  echo "$count" > "$count_file"
+  if [ "$count" = "1" ]; then
+    echo '[{"number":88,"pull_requests":[{"number":10},{"number":99}]}]'
+  else
+    echo '[{"number":89,"pull_requests":[{"number":10},{"number":99}]}]'
+  fi
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$4" = "repos/org/repo/stacks/88/unstack" ]; then
+  cat >/dev/null
+  echo "HTTP 404: Not Found" >&2
+  exit 1
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$4" = "repos/org/repo/stacks/89/unstack" ]; then
+  cat >/dev/null
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$4" = "repos/org/repo/stacks" ]; then
+  cat >/dev/null
+  echo '{"number":101}'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let count_path = fake_dir.join("count");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_COUNT", &count_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let outcome = repair_native_stack_exact(&[10, 20], "ez submit", None).expect("404 restart");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_COUNT");
+        }
+        assert_eq!(
+            outcome,
+            NativeStackOutcome::Repaired {
+                previous_number: 89,
+                number: 101
+            }
+        );
+    }
+
+    #[test]
+    fn repair_native_stack_rejects_more_than_100_before_repo_discovery() {
+        let _guard = take_env_lock();
+        let empty_dir = temp_dir("ez-native-too-many-no-gh");
+        let _path = PathGuard::install(&empty_dir);
+        let pr_numbers: Vec<u64> = (1..=101).collect();
+
+        let err = repair_native_stack_exact(&pr_numbers, "ez submit", None)
+            .expect_err("too many PRs should fail");
+
+        assert!(
+            err.to_string().contains("at most 100"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn repair_native_stack_sends_rest_stack_headers() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-repair-headers",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ]; then
+  printf '%s\n' "$*" >> "$EZ_FAKE_GH_LOG"
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+  echo '[{"number":88,"pull_requests":[{"number":10},{"number":99}]}]'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$4" = "repos/org/repo/stacks/88/unstack" ]; then
+  cat >/dev/null
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$4" = "repos/org/repo/stacks" ]; then
+  cat >/dev/null
+  echo '{"number":101}'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let log_path = fake_dir.join("calls.log");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &log_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        repair_native_stack_exact(&[10, 20], "ez submit", None).expect("repair");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+        }
+        let log = std::fs::read_to_string(log_path).expect("calls");
+        for line in log.lines() {
+            assert!(
+                line.contains("-H X-GitHub-Api-Version: 2026-03-10")
+                    && line.contains("-H Accept: application/vnd.github+json"),
+                "missing required stack REST headers in: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn repair_native_stack_recreate_failure_mentions_dissolved_stack_and_retry() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-repair-recreate-fail",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+  echo '[{"number":88,"pull_requests":[{"number":10},{"number":99}]}]'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$4" = "repos/org/repo/stacks/88/unstack" ]; then
+  cat >/dev/null
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$4" = "repos/org/repo/stacks" ]; then
+  cat >/dev/null
+  echo "HTTP 500: create failed" >&2
+  exit 1
+fi
+exit 2
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let err = repair_native_stack_exact(&[10, 20], "ez submit --retry", None)
+            .expect_err("create failure");
+
+        assert!(
+            err.to_string()
+                .contains("previous native stack #88 was dissolved")
+                && err.to_string().contains("retry `ez submit --retry`"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]
