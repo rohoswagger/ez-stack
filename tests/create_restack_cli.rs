@@ -95,7 +95,7 @@ fn commit_file(dir: &Path, file: &str, contents: &str, message: &str) -> String 
 fn init_repo(prefix: &str) -> TestRepo {
     let path = temp_dir(prefix);
     let remote = temp_dir(&format!("{prefix}-remote"));
-    run(&remote, "git", &["init", "--bare"]);
+    run(&remote, "git", &["init", "--bare", "-b", "main"]);
 
     run(&path, "git", &["init", "-b", "main"]);
     run(&path, "git", &["config", "user.name", "Test User"]);
