@@ -370,6 +370,21 @@ mod tests {
     }
 
     #[test]
+    fn ttl_parse_errors_have_actionable_messages() {
+        let cases = [
+            (TtlParseError::Empty, "TTL is required"),
+            (TtlParseError::MissingSuffix, "TTL must end with"),
+            (TtlParseError::InvalidNumber, "positive integer"),
+            (TtlParseError::NonPositive, "greater than zero"),
+            (TtlParseError::Overflow, "too large"),
+            (TtlParseError::UnknownSuffix, "suffix must be one of"),
+        ];
+        for (error, expected) in cases {
+            assert!(error.to_string().contains(expected));
+        }
+    }
+
+    #[test]
     fn parse_ttl_reports_number_and_multiplier_overflow() {
         assert_eq!(
             parse_ttl("18446744073709551616s")
@@ -404,6 +419,22 @@ mod tests {
         let second = LeaseMutationGuard::acquire("delete feat/a").expect("guard after release");
         drop(second);
         assert!(repo.join(".git/ez/worktree-lease.lock").exists());
+    }
+
+    #[test]
+    fn mutation_guard_reports_an_unknown_holder_when_locked_metadata_is_malformed() {
+        let _env = take_env_lock();
+        let repo = init_git_repo("lease-mutation-unknown-holder");
+        let _cwd = CwdGuard::enter(&repo);
+        let ez_dir = repo.join(".git/ez");
+        std::fs::create_dir_all(&ez_dir).expect("create ez metadata directory");
+        let lock_path = ez_dir.join("worktree-lease.lock");
+
+        let first = LeaseMutationGuard::acquire("claim feat/a").expect("first guard");
+        std::fs::write(&lock_path, "malformed holder").expect("replace holder metadata");
+        let blocked = LeaseMutationGuard::acquire("delete feat/a").expect_err("lock must block");
+        assert!(blocked.to_string().contains("another ez process"));
+        drop(first);
     }
 
     #[test]
