@@ -438,6 +438,73 @@ fn amend_from_linked_worktree_restacks_linked_descendant() {
 }
 
 #[test]
+fn log_and_parent_report_the_real_nested_worktree_stack() {
+    let (repo, base_worktree, child_worktree) = init_two_branch_stack("core-log-parent");
+
+    let parent = run_ez(&child_worktree, &["parent"]);
+    assert_eq!(stdout_text(&parent), "feat/base");
+
+    let json_output = run_ez(&child_worktree, &["log", "--json"]);
+    let entries: Value = serde_json::from_slice(&json_output.stdout).expect("parse log json");
+    assert_eq!(entries[0]["branch"], "feat/base");
+    assert_eq!(entries[0]["parent"], "main");
+    assert_eq!(entries[0]["depth"], 1);
+    assert_eq!(entries[0]["children"], serde_json::json!(["feat/child"]));
+    assert_eq!(entries[1]["branch"], "feat/child");
+    assert_eq!(entries[1]["parent"], "feat/base");
+    assert_eq!(entries[1]["depth"], 2);
+
+    let human = run_ez(&child_worktree, &["log"]);
+    let stderr = stderr_text(&human);
+    assert!(stderr.contains("feat/base"), "{stderr}");
+    assert!(stderr.contains("feat/child"), "{stderr}");
+    assert!(stderr.contains("[wt: feat-base]"), "{stderr}");
+    assert!(stderr.contains("[wt: feat-child]"), "{stderr}");
+    assert!(stderr.contains("← current"), "{stderr}");
+    assert!(base_worktree.is_dir());
+    assert!(repo.path.is_dir());
+}
+
+#[test]
+fn log_renders_pr_draft_ci_and_url_from_github_responses() {
+    let script = r#"
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '%s\n' '{"number":7,"url":"https://github.com/owner/repo/pull/7","state":"OPEN","title":"Topic","isDraft":true,"mergedAt":null,"baseRefName":"main"}'
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  printf '%s\n' '{"status":"completed","conclusion":"success"}'
+  exit 0
+fi
+"#;
+    let (repo, worktree) = init_single_branch_repo("core-log-pr", script);
+    set_pr_number(&repo.path, "feat/topic", Some(7));
+    let mut state = stack_state(&repo.path);
+    state["repo"] = Value::from("owner/repo");
+    write_stack_state(&repo.path, &state);
+
+    let human = run_ez_with_fake_gh(&repo, &worktree, &["log"]);
+    let stderr = stderr_text(&human);
+    assert!(stderr.contains("#7"), "{stderr}");
+    assert!(stderr.contains("draft"), "{stderr}");
+    assert!(stderr.contains('✓'), "{stderr}");
+    assert!(stderr.contains("[wt: feat-topic]"), "{stderr}");
+
+    let json_output = run_ez_with_fake_gh(&repo, &worktree, &["log", "--json"]);
+    assert_success(&json_output);
+    let entries: Value = serde_json::from_slice(&json_output.stdout).expect("parse log json");
+    assert_eq!(entries[0]["branch"], "feat/topic");
+    assert_eq!(entries[0]["pr_number"], 7);
+    assert_eq!(entries[0]["pr_url"], "https://github.com/owner/repo/pull/7");
+    assert_eq!(entries[0]["pr_state"], "OPEN");
+    assert_eq!(entries[0]["is_draft"], true);
+
+    let calls = gh_log(&repo);
+    assert!(calls.contains("pr view 7"), "{calls}");
+    assert!(calls.contains("run list --branch feat/topic"), "{calls}");
+}
+
+#[test]
 fn push_no_pr_updates_real_bare_remote_without_github_pr_calls() {
     let (repo, worktree) = init_single_branch_repo("core-push-no-pr", "exit 97");
 
