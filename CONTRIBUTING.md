@@ -110,20 +110,28 @@ This replays only the commits unique to `<child>` onto `<new-parent>`, which is 
 ## Running tests
 
 ```bash
-# Unit tests
-cargo test
+# Full local suite: unit tests plus real Git CLI integration tests
+cargo test --all-targets --no-fail-fast
 
 # Run a specific test
 cargo test test_stack_serialization
 
-# Integration tests (requires git and gh)
-cargo test --test integration
+# Native worktree lifecycle and lease tests
+cargo test --test worktree_mutation_cli
+cargo test --test worktree_leases_cli
 
 # Stable-toolchain coverage (requires cargo-llvm-cov)
 cargo llvm-cov --all-features --workspace --no-fail-fast --summary-only
 ```
 
-Integration tests create temporary git repos and exercise full command flows. They do not touch GitHub — any `gh` calls are stubbed.
+Integration tests invoke the compiled `ez` and `git` binaries against disposable
+repositories. They exercise real commits, refs, linked worktrees, dirty files,
+rebases, lock files, bare remotes, concurrent processes, and crash recovery.
+They do not touch GitHub — any `gh` calls are stubbed.
+
+GitHub Actions is not required to run realistic tests. CI repeats the same suite
+on standard Ubuntu and macOS runners to catch portability bugs in Git and
+worktree filesystem behavior.
 
 CI enforces monotonically increasing line, function, and region coverage floors.
 The current ratchet is 81% lines, 84% functions, and 81% regions, with 100% as

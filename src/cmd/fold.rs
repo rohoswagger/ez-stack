@@ -54,6 +54,7 @@ struct FoldSnapshot {
 }
 
 pub fn run(branch: Option<&str>, yes: bool) -> Result<()> {
+    let _lease_guard = crate::worktree_lease::LeaseMutationGuard::acquire("fold worktree branch")?;
     run_with_saver(branch, yes, StackState::save)
 }
 
@@ -132,6 +133,13 @@ where
         .as_deref()
         .is_some_and(|path| path_is_within(&current_dir, Path::new(path)));
     let destination = parent_worktree.clone().unwrap_or_else(|| main_root.clone());
+
+    if let Some(path) = target_worktree.as_deref() {
+        crate::cmd::worktree::guard_registered_worktree(&target, path, "fold")?;
+    }
+    if let Some(path) = parent_worktree.as_deref() {
+        crate::cmd::worktree::guard_registered_worktree(&parent, path, "advance during fold")?;
+    }
 
     let snapshot = FoldSnapshot {
         original_state_path,

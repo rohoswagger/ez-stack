@@ -13,6 +13,7 @@ mod stack_body;
 #[cfg(test)]
 mod test_support;
 mod ui;
+mod worktree_lease;
 
 use anyhow::Result;
 use clap::Parser;
@@ -247,6 +248,20 @@ fn run(cli: Cli) -> Result<()> {
                 cmd::delete::run(Some(&name), force, yes)
             }
             WorktreeCommands::List => cmd::list::run(false),
+            WorktreeCommands::Claim {
+                branch,
+                owner,
+                ttl,
+                break_stale,
+                json,
+            } => cmd::worktree::claim(branch.as_deref(), &owner, &ttl, break_stale, json),
+            WorktreeCommands::Release {
+                branch,
+                owner,
+                force,
+                json,
+            } => cmd::worktree::release(branch.as_deref(), owner.as_deref(), force, json),
+            WorktreeCommands::Leases { json } => cmd::worktree::leases(json),
             WorktreeCommands::Ensure {
                 branches,
                 dry_run,

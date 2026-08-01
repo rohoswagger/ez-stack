@@ -10,10 +10,453 @@ use crate::error::EzError;
 use crate::git;
 use crate::stack::StackState;
 use crate::ui;
+use crate::worktree_lease::{Lease, LeaseMutationGuard, LeaseView, now_unix, parse_ttl};
 
 /// `ez worktree create` is now an alias for `ez create` (worktree is the default).
 pub fn create(name: &str, from: Option<&str>) -> Result<()> {
     crate::cmd::create::run(name, None, false, false, from, false, &[], None, None)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct LeaseEntry {
+    branch: String,
+    path: String,
+    lease: Option<LeaseView>,
+    foreign_lock_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct LeasesResult {
+    cmd: String,
+    entries: Vec<LeaseEntry>,
+    active_count: usize,
+    stale_count: usize,
+    foreign_lock_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ClaimResult {
+    cmd: String,
+    branch: String,
+    path: String,
+    claimed: bool,
+    lease: LeaseView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ReleaseResult {
+    cmd: String,
+    branch: String,
+    path: String,
+    released: bool,
+}
+
+pub fn claim(
+    branch: Option<&str>,
+    owner: &str,
+    ttl: &str,
+    break_stale: bool,
+    json: bool,
+) -> Result<()> {
+    if owner.trim().is_empty() {
+        bail!(EzError::UserMessage(
+            "lease owner cannot be empty\n  → Pass a stable identity with `--owner <name>`"
+                .to_string()
+        ));
+    }
+    let ttl_seconds = parse_ttl(ttl).map_err(|error| {
+        EzError::UserMessage(format!(
+            "invalid lease TTL `{ttl}`: {error}\n  → Use a positive duration such as `30m`, `4h`, or `1d`"
+        ))
+    })?;
+    let _mutation_guard =
+        LeaseMutationGuard::acquire(&format!("claim {}", branch.unwrap_or("<current>")))?;
+    let (target, worktree) = linked_worktree_for(branch)?;
+    let now = now_unix()?;
+    let lease = Lease::new(owner, &target, now, ttl_seconds).map_err(|error| {
+        EzError::UserMessage(format!(
+            "could not create lease: {error}\n  → Use a non-empty owner and a shorter TTL"
+        ))
+    })?;
+    let reason = lease.reason()?;
+    let mut claimed = true;
+
+    if let Some(existing_reason) = worktree.locked_reason.as_deref() {
+        let Some(existing) = parse_matching_lease(existing_reason, &target) else {
+            bail!(EzError::UserMessage(format!(
+                "worktree `{}` is protected by a foreign Git lock: `{}`\n  \
+                 → Preserve that lock or remove it manually with `git worktree unlock {}`",
+                worktree.path,
+                display_lock_reason(existing_reason),
+                worktree.path
+            )));
+        };
+        let existing_view = existing.view(now);
+        if !existing_view.stale {
+            if existing.owner == owner {
+                claimed = false;
+                return emit_claim_result(
+                    ClaimResult {
+                        cmd: "worktree.claim".to_string(),
+                        branch: target,
+                        path: worktree.path,
+                        claimed,
+                        lease: existing_view,
+                    },
+                    json,
+                );
+            }
+            bail!(EzError::UserMessage(format!(
+                "worktree `{}` is actively claimed by `{}` until Unix timestamp {}\n  \
+                 → Coordinate with that owner or wait for the lease to expire",
+                worktree.path, existing.owner, existing.expires_at
+            )));
+        }
+        if !break_stale {
+            bail!(EzError::UserMessage(format!(
+                "worktree `{}` has a stale ez lease owned by `{}`\n  \
+                 → Retry with `--break-stale` to claim it explicitly",
+                worktree.path, existing.owner
+            )));
+        }
+
+        git::worktree_unlock_if_reason(&worktree.path, existing_reason)?;
+        if let Err(error) = git::worktree_lock(&worktree.path, &reason) {
+            let rollback = git::worktree_lock(&worktree.path, existing_reason).err();
+            if let Some(rollback_error) = rollback {
+                bail!(
+                    "could not replace stale worktree lease: {error}\n\
+                     restoring the prior stale lease also failed: {rollback_error}"
+                );
+            }
+            return Err(error).context("replace stale worktree lease");
+        }
+    } else {
+        git::worktree_lock(&worktree.path, &reason)?;
+    }
+
+    if let Err(error) = verify_exact_lock(&worktree.path, &target, Some(&reason)) {
+        release_attempted_lock(&worktree.path, &reason);
+        return Err(error);
+    }
+    emit_claim_result(
+        ClaimResult {
+            cmd: "worktree.claim".to_string(),
+            branch: target,
+            path: worktree.path,
+            claimed,
+            lease: lease.view(now),
+        },
+        json,
+    )
+}
+
+pub fn release(branch: Option<&str>, owner: Option<&str>, force: bool, json: bool) -> Result<()> {
+    if !force && owner.is_none_or(|value| value.trim().is_empty()) {
+        bail!(EzError::UserMessage(
+            "lease owner is required for a normal release\n  \
+             → Pass `--owner <name>`, or use `--force` only for an ez lease you intend to break"
+                .to_string()
+        ));
+    }
+    let _mutation_guard =
+        LeaseMutationGuard::acquire(&format!("release {}", branch.unwrap_or("<current>")))?;
+    let (target, worktree) = linked_worktree_for(branch)?;
+    let Some(reason) = worktree.locked_reason.as_deref() else {
+        return emit_release_result(
+            ReleaseResult {
+                cmd: "worktree.release".to_string(),
+                branch: target,
+                path: worktree.path,
+                released: false,
+            },
+            json,
+        );
+    };
+    let Some(lease) = parse_matching_lease(reason, &target) else {
+        bail!(EzError::UserMessage(format!(
+            "worktree `{}` is protected by a foreign Git lock: `{}`\n  \
+             → `ez worktree release` never removes foreign locks",
+            worktree.path,
+            display_lock_reason(reason)
+        )));
+    };
+    if !force && owner != Some(lease.owner.as_str()) {
+        bail!(EzError::UserMessage(format!(
+            "worktree `{}` is claimed by `{}`, not `{}`\n  \
+             → Ask the owner to release it, or use `--force` if takeover is intentional",
+            worktree.path,
+            lease.owner,
+            owner.unwrap_or_default()
+        )));
+    }
+
+    verify_exact_lock(&worktree.path, &target, Some(reason))?;
+    git::worktree_unlock_if_reason(&worktree.path, reason)?;
+    verify_exact_lock(&worktree.path, &target, None)?;
+    emit_release_result(
+        ReleaseResult {
+            cmd: "worktree.release".to_string(),
+            branch: target,
+            path: worktree.path,
+            released: true,
+        },
+        json,
+    )
+}
+
+pub fn leases(json: bool) -> Result<()> {
+    let state = StackState::load()?;
+    let worktrees = git::worktree_list()?;
+    let main_path = worktrees
+        .first()
+        .map(|worktree| worktree.path.as_str())
+        .ok_or_else(|| anyhow::anyhow!("could not determine main worktree root"))?;
+    let worktrees_by_branch: HashMap<&str, &git::WorktreeInfo> = worktrees
+        .iter()
+        .filter(|worktree| worktree.path != main_path)
+        .filter_map(|worktree| worktree.branch.as_deref().map(|branch| (branch, worktree)))
+        .collect();
+    let now = now_unix()?;
+    let entries = deterministic_topo_order(&state)
+        .into_iter()
+        .filter_map(|branch| {
+            worktrees_by_branch
+                .get(branch.as_str())
+                .map(|worktree| lease_entry(worktree, now))
+        })
+        .collect::<Vec<_>>();
+    let active_count = entries
+        .iter()
+        .filter(|entry| entry.lease.as_ref().is_some_and(|lease| !lease.stale))
+        .count();
+    let stale_count = entries
+        .iter()
+        .filter(|entry| entry.lease.as_ref().is_some_and(|lease| lease.stale))
+        .count();
+    let foreign_lock_count = entries
+        .iter()
+        .filter(|entry| entry.foreign_lock_reason.is_some())
+        .count();
+    let result = LeasesResult {
+        cmd: "worktree.leases".to_string(),
+        entries,
+        active_count,
+        stale_count,
+        foreign_lock_count,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        for entry in &result.entries {
+            let status = match (&entry.lease, &entry.foreign_lock_reason) {
+                (Some(lease), _) if lease.stale => {
+                    format!(
+                        "stale lease: {} (expired {})",
+                        lease.owner, lease.expires_at
+                    )
+                }
+                (Some(lease), _) => {
+                    format!("claimed: {} (expires {})", lease.owner, lease.expires_at)
+                }
+                (None, Some(reason)) => format!("foreign lock: {reason}"),
+                (None, None) => "available".to_string(),
+            };
+            eprintln!("{:<30} {:<18} {}", entry.branch, status, entry.path);
+        }
+    }
+    ui::receipt(&serde_json::to_value(&result)?);
+    Ok(())
+}
+
+fn emit_claim_result(result: ClaimResult, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else if result.claimed {
+        ui::success(&format!(
+            "Claimed `{}` worktree for `{}` until Unix timestamp {}",
+            result.branch, result.lease.owner, result.lease.expires_at
+        ));
+    } else {
+        ui::success(&format!(
+            "`{}` is already claimed by `{}` until Unix timestamp {}",
+            result.branch, result.lease.owner, result.lease.expires_at
+        ));
+    }
+    ui::receipt(&serde_json::to_value(&result)?);
+    Ok(())
+}
+
+fn emit_release_result(result: ReleaseResult, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else if result.released {
+        ui::success(&format!("Released `{}` worktree", result.branch));
+    } else {
+        ui::info(&format!(
+            "`{}` worktree is already available",
+            result.branch
+        ));
+    }
+    ui::receipt(&serde_json::to_value(&result)?);
+    Ok(())
+}
+
+fn linked_worktree_for(branch: Option<&str>) -> Result<(String, git::WorktreeInfo)> {
+    let state = StackState::load()?;
+    let target = branch
+        .map(str::to_string)
+        .map(Ok)
+        .unwrap_or_else(git::current_branch)?;
+    if state.is_trunk(&target) {
+        bail!(EzError::UserMessage(format!(
+            "`{target}` is trunk and cannot be claimed as an agent workspace\n  \
+             → Claim a managed stack layer in a linked worktree"
+        )));
+    }
+    if !state.is_managed(&target) {
+        bail!(EzError::BranchNotInStack(target));
+    }
+
+    let worktrees = git::worktree_list()?;
+    let main_path = worktrees
+        .first()
+        .map(|worktree| worktree.path.as_str())
+        .ok_or_else(|| anyhow::anyhow!("could not determine main worktree root"))?;
+    let Some(worktree) = worktrees
+        .iter()
+        .find(|worktree| worktree.branch.as_deref() == Some(target.as_str()))
+        .cloned()
+    else {
+        bail!(EzError::UserMessage(format!(
+            "`{target}` has no linked worktree to claim\n  \
+             → Run `ez worktree ensure {target}` first"
+        )));
+    };
+    if worktree.path == main_path {
+        bail!(EzError::UserMessage(format!(
+            "`{target}` is checked out in the main worktree, which is not claimable\n  \
+             → Switch main back to trunk, then run `ez worktree ensure {target}`"
+        )));
+    }
+    Ok((target, worktree))
+}
+
+fn verify_exact_lock(path: &str, branch: &str, expected_reason: Option<&str>) -> Result<()> {
+    let worktrees = git::worktree_list()?;
+    let Some(worktree) = worktrees.iter().find(|worktree| worktree.path == path) else {
+        bail!("worktree `{path}` disappeared while updating its lease");
+    };
+    if worktree.branch.as_deref() != Some(branch) {
+        bail!(
+            "worktree ownership changed at `{path}`: expected `{branch}`, found `{}`",
+            worktree.branch.as_deref().unwrap_or("<detached HEAD>")
+        );
+    }
+    if worktree.locked_reason.as_deref() != expected_reason {
+        bail!(
+            "worktree lock changed at `{path}`: expected `{}`, found `{}`",
+            expected_reason.unwrap_or("<unlocked>"),
+            worktree
+                .locked_reason
+                .as_deref()
+                .map(display_lock_reason)
+                .unwrap_or_else(|| "<unlocked>".to_string())
+        );
+    }
+    Ok(())
+}
+
+fn release_attempted_lock(path: &str, attempted_reason: &str) {
+    let still_ours = git::worktree_list().is_ok_and(|worktrees| {
+        worktrees.iter().any(|worktree| {
+            worktree.path == path && worktree.locked_reason.as_deref() == Some(attempted_reason)
+        })
+    });
+    if still_ours {
+        let _ = git::worktree_unlock_if_reason(path, attempted_reason);
+    }
+}
+
+fn lease_entry(worktree: &git::WorktreeInfo, now: u64) -> LeaseEntry {
+    let branch = worktree.branch.clone().unwrap_or_default();
+    let lease = worktree
+        .locked_reason
+        .as_deref()
+        .and_then(|reason| parse_matching_lease(reason, &branch))
+        .map(|lease| lease.view(now));
+    let foreign_lock_reason = worktree.locked_reason.as_ref().and_then(|reason| {
+        lease
+            .is_none()
+            .then(|| display_lock_reason(reason.as_str()))
+    });
+    LeaseEntry {
+        branch,
+        path: worktree.path.clone(),
+        lease,
+        foreign_lock_reason,
+    }
+}
+
+fn parse_matching_lease(reason: &str, branch: &str) -> Option<Lease> {
+    Lease::parse_reason(reason).filter(|lease| lease.branch == branch)
+}
+
+fn display_lock_reason(reason: &str) -> String {
+    if reason.is_empty() {
+        "<no reason>".to_string()
+    } else {
+        reason.to_string()
+    }
+}
+
+pub(crate) fn guard_registered_worktree(branch: &str, path: &str, operation: &str) -> Result<()> {
+    let worktrees = git::worktree_list()?;
+    let worktree = worktrees.iter().find(|worktree| worktree.path == path);
+    let Some(worktree) = worktree else {
+        bail!(
+            "worktree `{path}` disappeared before ez could {operation} `{branch}`\n  \
+             → Inspect `git worktree list` and retry"
+        );
+    };
+    if worktree.branch.as_deref() != Some(branch) {
+        bail!(
+            "worktree ownership changed at `{path}` before ez could {operation} `{branch}`\n  \
+             → Inspect `git worktree list` and retry"
+        );
+    }
+    guard_worktree_lock(branch, path, worktree.locked_reason.as_deref(), operation)
+}
+
+pub(crate) fn guard_worktree_lock(
+    branch: &str,
+    path: &str,
+    reason: Option<&str>,
+    operation: &str,
+) -> Result<()> {
+    let Some(reason) = reason else {
+        return Ok(());
+    };
+    if let Some(lease) = parse_matching_lease(reason, branch) {
+        let stale = lease.is_stale()?;
+        let state = if stale { "stale" } else { "active" };
+        let release = if stale {
+            format!("ez worktree release {branch} --force")
+        } else {
+            format!("ez worktree release {branch} --owner {}", lease.owner)
+        };
+        bail!(EzError::UserMessage(format!(
+            "cannot {operation} `{branch}` because worktree `{path}` has an {state} lease owned by `{}`\n  \
+             → Coordinate with that owner, then run `{release}`",
+            lease.owner
+        )));
+    }
+    bail!(EzError::UserMessage(format!(
+        "cannot {operation} `{branch}` because worktree `{path}` has a foreign Git lock: `{}`\n  \
+         → Preserve that lock or remove it manually with `git worktree unlock {path}`",
+        display_lock_reason(reason)
+    )));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -839,6 +1282,32 @@ mod tests {
         let unmanaged = select_managed_branches(&state, &["feat/other".to_string()])
             .expect_err("unmanaged branch must not be selected");
         assert!(unmanaged.to_string().contains("not tracked by ez"));
+    }
+
+    #[test]
+    fn destructive_guard_distinguishes_active_stale_and_foreign_locks() {
+        let active = Lease::new("agent-a", "feat/base", now_unix().expect("time"), 3600)
+            .expect("active lease")
+            .reason()
+            .expect("active reason");
+        let active_error = guard_worktree_lock("feat/base", "/repo/base", Some(&active), "delete")
+            .expect_err("active lease must block");
+        assert!(active_error.to_string().contains("agent-a"));
+        assert!(active_error.to_string().contains("--owner agent-a"));
+
+        let stale = Lease::new("gone-agent", "feat/base", 1, 1)
+            .expect("stale lease")
+            .reason()
+            .expect("stale reason");
+        let stale_error = guard_worktree_lock("feat/base", "/repo/base", Some(&stale), "fold")
+            .expect_err("stale lease must block");
+        assert!(stale_error.to_string().contains("stale lease"));
+        assert!(stale_error.to_string().contains("--force"));
+
+        let foreign = guard_worktree_lock("feat/base", "/repo/base", Some("maintenance"), "merge")
+            .expect_err("foreign lock must block");
+        assert!(foreign.to_string().contains("foreign Git lock"));
+        assert!(guard_worktree_lock("feat/base", "/repo/base", None, "delete").is_ok());
     }
 
     #[test]

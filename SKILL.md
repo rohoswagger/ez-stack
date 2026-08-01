@@ -144,6 +144,9 @@ ez worktree ensure    # provision missing worktrees for every managed layer
 ez worktree ensure --dry-run --json  # inspect the deterministic fleet plan
 ez worktree exec -- cargo test  # test every layer in its own worktree, parent-first
 ez worktree exec feat/base feat/child --json -- npm test
+ez worktree claim --owner codex-1  # reserve the current linked worktree for this agent
+ez worktree leases --json  # inspect ownership and foreign locks across the fleet
+ez worktree release --owner codex-1  # release when this agent is done
 ez adopt feat/base    # adopt a local or remote branch without requiring a PR
 ez adopt feat/base feat/child  # adopt an explicit bottom-to-top branch chain
 ```
@@ -174,6 +177,16 @@ child exit code. Child commands receive `EZ_BRANCH`, `EZ_WORKTREE`, `EZ_PORT`,
 `EZ_STACK_INDEX`, and `EZ_STACK_SIZE`. The argv is executed directly; use
 `sh -lc` explicitly for shell syntax.
 
+Use `ez worktree claim [branch] --owner <identity>` before starting agent work
+in a linked worktree, and release it with
+`ez worktree release [branch] --owner <identity>` when finished. Claims use
+Git's native worktree lock reason, expire after four hours by default, and are
+visible through `ez worktree leases --json` and `ez list --json`. Never bypass
+another active owner. Stale ez leases require an explicit `--break-stale`
+takeover or forced release; foreign Git locks are never overwritten or released
+by ez. Claim/release are local/offline and do not change stack metadata, refs,
+remotes, or GitHub state.
+
 Stack mutations are worktree-native. `ez restack`, `ez move`, `ez commit`, and
 `ez amend` operate on checked-out descendants inside their owning worktrees.
 Do not detach those worktrees or update their branch refs manually. ez verifies
@@ -196,6 +209,8 @@ worktrees retain their processes, files, refs, and metadata.
 ## Multi-Agent Rules
 
 - **One worktree per agent.** Never share a worktree.
+- **Claim before editing.** Use `ez worktree claim --owner <stable-id>`.
+- **Release after handoff.** Do not leave active leases on completed work.
 - **Always `--from main`** for independent tasks.
 - **Sync before push** to pick up other agents' merged work.
 - **Preferred commit flow:** `ez commit -m "msg" -- path1 path2`
@@ -229,4 +244,4 @@ Check `redundant_commits > 0` after sync/restack — means commits were auto-dro
 
 ## Advanced Commands
 
-See [reference.md](reference.md) for the full command reference: `ez adopt`, `ez worktree ensure`, `ez worktree exec`, `ez commit`, `ez amend`, `ez diff`, `ez status`, `ez restack`, `ez log`, `ez move`, `ez fold`, `ez merge`, `ez switch`, `ez pr-edit`, `ez draft`/`ez ready`, `ez pr-link`, `ez config`, `ez update`, `ez setup`, `ez skill install`.
+See [reference.md](reference.md) for the full command reference: `ez adopt`, `ez worktree ensure`, `ez worktree exec`, `ez worktree claim`, `ez worktree release`, `ez worktree leases`, `ez commit`, `ez amend`, `ez diff`, `ez status`, `ez restack`, `ez log`, `ez move`, `ez fold`, `ez merge`, `ez switch`, `ez pr-edit`, `ez draft`/`ez ready`, `ez pr-link`, `ez config`, `ez update`, `ez setup`, `ez skill install`.
