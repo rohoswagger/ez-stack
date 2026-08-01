@@ -960,6 +960,197 @@ exit 0
         !cmd_output(repo, "git", &["branch", "--list", branch]).is_empty()
     }
 
+    fn install_merge_fold_extra_pr_edit_failing_gh(prefix: &str) -> (PathBuf, PathBuf) {
+        let log = crate::test_support::temp_dir(prefix).join("gh.log");
+        let script = r#"#!/bin/sh
+echo "$@" >> "$GH_LOG"
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '{"number":%s,"url":"https://github.com/org/repo/pull/%s","state":"OPEN","title":"Feature %s","isDraft":false,"mergedAt":null,"baseRefName":"main"}\n' "$3" "$3" "$3"
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  echo "simulated pr edit failure" >&2
+  exit 1
+fi
+if [ "$1" = "api" ]; then
+  if [ "$2" = "-X" ] && [ "$3" = "PUT" ]; then
+    cat >/dev/null
+    printf '{"status":"merged"}\n'
+    exit 0
+  fi
+  printf '[]\n'
+  exit 0
+fi
+exit 0
+"#;
+        (install_fake_bin(prefix, "gh", script), log)
+    }
+
+    #[test]
+    fn merge_fold_extra_preflight_skips_targets_without_linked_worktrees() {
+        let targets = vec![MergeTarget {
+            branch: "feat/no-worktree".to_string(),
+            pr_number: 7,
+            title: "No worktree".to_string(),
+        }];
+        let worktrees = HashMap::new();
+
+        preflight_clean_linked_worktrees(&targets, &worktrees)
+            .expect("missing linked worktree should be skipped");
+    }
+
+    #[test]
+    fn merge_fold_extra_merge_targets_require_pr_metadata() {
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/no-pr", "main", "main-sha", None, None);
+
+        let err = match merge_targets(&state, "feat/no-pr", false, None) {
+            Ok(_) => panic!("missing PR should abort"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("has no associated PR"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn merge_fold_extra_single_target_is_not_native_stack_match() {
+        let targets = vec![MergeTarget {
+            branch: "feat/one".to_string(),
+            pr_number: 9,
+            title: "One".to_string(),
+        }];
+
+        let matched = exact_native_stack_match(&targets, None).expect("single target check");
+
+        assert!(!matched);
+    }
+
+    #[test]
+    fn merge_fold_extra_cleanup_switches_off_current_branch_before_delete() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("merge-fold-extra-current-cleanup");
+        run_cmd(&repo, "git", &["checkout", "-b", "feat/current"]);
+        write_file(&repo, "current.txt", "current\n");
+        run_cmd(&repo, "git", &["add", "current.txt"]);
+        run_cmd(&repo, "git", &["commit", "-m", "current"]);
+        let _cwd = CwdGuard::enter(&repo);
+        let state = StackState::new("main".to_string());
+
+        cleanup_merged_branch(&state, "feat/current", None, "main").expect("cleanup current");
+
+        assert_eq!(
+            cmd_output(&repo, "git", &["branch", "--show-current"]),
+            "main"
+        );
+        assert!(!local_branch_exists(&repo, "feat/current"));
+    }
+
+    #[test]
+    fn merge_fold_extra_reparented_child_pr_base_failure_warns_but_merges_parent() {
+        let _guard = take_env_lock();
+        let parent_branch = "feat/reparent-parent";
+        let child_branch = "feat/reparent-child";
+        let parent_pr = 61;
+        let child_pr = 62;
+        let merge_repo = init_merge_repo(
+            "merge-fold-extra-child-pr-edit-failure",
+            parent_branch,
+            parent_pr,
+        );
+        run_cmd(
+            &merge_repo.repo,
+            "git",
+            &["checkout", "-b", child_branch, parent_branch],
+        );
+        write_file(&merge_repo.repo, "child.txt", "child\n");
+        run_cmd(&merge_repo.repo, "git", &["add", "child.txt"]);
+        run_cmd(&merge_repo.repo, "git", &["commit", "-m", "child"]);
+        run_cmd(
+            &merge_repo.repo,
+            "git",
+            &["push", "-u", "origin", child_branch],
+        );
+        run_cmd(&merge_repo.repo, "git", &["checkout", "main"]);
+        let (fake_dir, gh_log) =
+            install_merge_fold_extra_pr_edit_failing_gh("merge-fold-extra-child-pr-edit-gh");
+        let _path = PathGuard::install(&fake_dir);
+        unsafe {
+            std::env::set_var("GH_LOG", &gh_log);
+        }
+        let _cwd = CwdGuard::enter(&merge_repo.worktree);
+        let parent_head = git::rev_parse(parent_branch).expect("parent head");
+        let mut state = StackState::load().expect("load state");
+        state.add_branch(child_branch, parent_branch, &parent_head, None, None);
+        state.get_branch_mut(child_branch).expect("child").pr_number = Some(child_pr);
+        state.save().expect("save child state");
+
+        run("squash", true, false).expect("parent merge should complete");
+
+        let log = std::fs::read_to_string(&gh_log).expect("gh log");
+        assert!(
+            log.contains("pr edit 62 --base main"),
+            "child PR base update should be attempted: {log}"
+        );
+        assert!(!local_branch_exists(&merge_repo.repo, parent_branch));
+        assert!(local_branch_exists(&merge_repo.repo, child_branch));
+        let state = {
+            let _main_cwd = CwdGuard::enter(&merge_repo.repo);
+            StackState::load().expect("load state")
+        };
+        let child = state.get_branch(child_branch).expect("child state");
+        assert_eq!(child.parent, "main");
+    }
+
+    #[test]
+    fn merge_fold_extra_fetch_restack_skips_up_to_date_managed_parent() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("merge-fold-extra-fetch-skip");
+        let bare =
+            crate::test_support::temp_dir("merge-fold-extra-fetch-skip-remote").join("origin.git");
+        std::fs::create_dir_all(&bare).expect("create bare remote dir");
+        run_cmd(&bare, "git", &["init", "--bare"]);
+        run_cmd(
+            &repo,
+            "git",
+            &["remote", "add", "origin", bare.to_str().expect("bare path")],
+        );
+        run_cmd(&repo, "git", &["push", "-u", "origin", "main"]);
+        run_cmd(&repo, "git", &["checkout", "-b", "feat/base"]);
+        write_file(&repo, "base.txt", "base\n");
+        run_cmd(&repo, "git", &["add", "base.txt"]);
+        run_cmd(&repo, "git", &["commit", "-m", "base"]);
+        run_cmd(&repo, "git", &["push", "-u", "origin", "feat/base"]);
+        run_cmd(&repo, "git", &["checkout", "-b", "feat/child"]);
+        write_file(&repo, "child.txt", "child\n");
+        run_cmd(&repo, "git", &["add", "child.txt"]);
+        run_cmd(&repo, "git", &["commit", "-m", "child"]);
+        run_cmd(&repo, "git", &["push", "-u", "origin", "feat/child"]);
+        run_cmd(&repo, "git", &["checkout", "main"]);
+        let _cwd = CwdGuard::enter(&repo);
+        let main_head = git::rev_parse("main").expect("main head");
+        let base_head = git::rev_parse("feat/base").expect("base head");
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/base", "main", &main_head, None, None);
+        state.add_branch("feat/child", "feat/base", &base_head, None, None);
+
+        let (restacked, pushed) =
+            fetch_restack_and_push_remaining(&mut state, "origin", "origin").expect("fetch skip");
+
+        assert_eq!(restacked, 0);
+        assert!(pushed.is_empty());
+        assert_eq!(
+            state.get_branch("feat/child").expect("child").parent_head,
+            base_head
+        );
+    }
+
     #[test]
     fn merge_receipt_includes_removed_worktree_when_present() {
         let outcome = MergeOutcome {
