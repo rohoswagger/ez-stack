@@ -131,14 +131,18 @@ ez sync --autostash   # pulls trunk, cleans merged PRs, restacks your branches
 ez adopt              # adopt all open PRs rooted on trunk
 ez adopt --pr 42      # adopt its native stack/PR chain + provision each worktree
 ez adopt --pr 42 --no-worktrees  # reconstruct metadata only
-ez adopt feat/a feat/b  # adopt specific branches by name
+ez adopt feat/base    # adopt a local or remote branch without requiring a PR
+ez adopt feat/base feat/child  # adopt an explicit bottom-to-top branch chain
 ```
 
 `ez adopt` prefers GitHub's native stack order, falls back to the ordinary PR
 base graph, reconstructs `stack.json`, and provisions one worktree per active
-layer. It aborts before mutation when existing local metadata conflicts with a
-native stack. Use it to continue working on someone else's stack from a fresh
-clone.
+layer. With explicit branch names, the positional order is authoritative
+bottom-to-top and no PRs or GitHub auth are required. Remote-only branches are
+fetched and materialized locally. Adoption aborts before mutation when existing
+local metadata conflicts with a native stack or when a local branch is behind or
+diverged from its remote. Use it to continue working on someone else's stack
+from a fresh clone.
 
 ### Finish
 ```bash

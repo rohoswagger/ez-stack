@@ -12,7 +12,7 @@ use crate::ui;
 struct AdoptCandidate {
     branch: String,
     base: String,
-    pr_number: u64,
+    pr_number: Option<u64>,
     title: String,
     is_draft: bool,
 }
@@ -76,7 +76,7 @@ fn build_adopt_graph(trunk: &str, prs: &HashMap<String, github::PrInfo>) -> Vec<
                 AdoptCandidate {
                     branch: branch.to_string(),
                     base: pr.base.clone(),
-                    pr_number: pr.number,
+                    pr_number: Some(pr.number),
                     title: pr.title.clone(),
                     is_draft: pr.is_draft,
                 },
@@ -127,7 +127,7 @@ fn build_native_adopt_candidates(
         candidates.push(AdoptCandidate {
             branch: branch.clone(),
             base: parent.clone(),
-            pr_number: pr.number,
+            pr_number: Some(pr.number),
             title: pr.title.clone(),
             is_draft: pr.is_draft,
         });
@@ -135,6 +135,57 @@ fn build_native_adopt_candidates(
     }
 
     candidates
+}
+
+fn build_explicit_chain_candidates(
+    trunk: &str,
+    branches: &[String],
+    prs: &HashMap<String, github::PrInfo>,
+) -> Result<Vec<AdoptCandidate>> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    let mut parent = trunk.to_string();
+
+    for branch in branches {
+        if !seen.insert(branch.as_str()) {
+            bail!(EzError::UserMessage(format!(
+                "branch `{branch}` was specified more than once"
+            )));
+        }
+        if branch == trunk {
+            bail!(EzError::UserMessage(format!(
+                "cannot adopt trunk branch `{trunk}` as a stacked branch"
+            )));
+        }
+
+        if let Some(pr) = prs.get(branch).filter(|pr| is_active_pr(pr)) {
+            if pr.base != parent {
+                bail!(EzError::UserMessage(format!(
+                    "`{branch}` has open PR #{} with reported base `{}`, but its explicit parent is `{parent}`. Reorder the branch arguments or use `ez adopt --pr {}` to adopt the PR stack from GitHub.",
+                    pr.number, pr.base, pr.number
+                )));
+            }
+            candidates.push(AdoptCandidate {
+                branch: branch.clone(),
+                base: parent.clone(),
+                pr_number: Some(pr.number),
+                title: pr.title.clone(),
+                is_draft: pr.is_draft,
+            });
+        } else {
+            candidates.push(AdoptCandidate {
+                branch: branch.clone(),
+                base: parent.clone(),
+                pr_number: None,
+                title: branch.clone(),
+                is_draft: false,
+            });
+        }
+
+        parent = branch.clone();
+    }
+
+    Ok(candidates)
 }
 
 fn adoption_parent_head(branch: &str, parent: &str) -> Result<String> {
@@ -200,18 +251,6 @@ fn fetch_local_prs(remote: &str) -> Result<HashMap<String, github::PrInfo>> {
     Ok(prs)
 }
 
-fn fetch_prs_by_branches(
-    remote: &str,
-    trunk: &str,
-    branches: &[String],
-) -> Result<HashMap<String, github::PrInfo>> {
-    let refs: Vec<&str> = branches.iter().map(String::as_str).collect();
-    let mut prs = github::get_pr_statuses_for(remote, &refs);
-    expand_ancestor_chains(&mut prs, remote, trunk);
-    prs.retain(|_, pr| is_active_pr(pr));
-    Ok(prs)
-}
-
 fn fetch_prs_by_number(
     remote: &str,
     trunk: &str,
@@ -263,35 +302,74 @@ fn fetch_candidates_by_pr_number(
     Ok((title, None, build_adopt_graph(trunk, &prs)))
 }
 
-fn validate_native_adopt_candidates(
+fn validate_managed_adopt_candidates(
     state: &StackState,
     candidates: &[AdoptCandidate],
     native_stack_number: Option<u64>,
 ) -> Result<()> {
-    let Some(native_stack_number) = native_stack_number else {
-        return Ok(());
-    };
-
     for candidate in candidates {
         let Some(meta) = state.branches.get(&candidate.branch) else {
             continue;
         };
-        let pr_conflicts = meta.pr_number.is_some_and(|pr| pr != candidate.pr_number);
+        let pr_conflicts = match (meta.pr_number, candidate.pr_number) {
+            (None, Some(_)) => false,
+            (None, None) => false,
+            (Some(local), Some(remote)) => local != remote,
+            (Some(_), None) => true,
+        };
         if meta.parent == candidate.base && !pr_conflicts {
             continue;
         }
 
-        let local_pr = meta
-            .pr_number
-            .map(|number| format!("#{number}"))
-            .unwrap_or_else(|| "none".to_string());
+        let local_pr = format_pr_number(meta.pr_number);
+        let remote_pr = format_pr_number(candidate.pr_number);
+        let context = native_stack_number
+            .map(|number| format!("native stack #{number} "))
+            .unwrap_or_default();
         bail!(EzError::UserMessage(format!(
-            "native stack #{native_stack_number} conflicts with local ez metadata for `{}`: local parent=`{}`, native parent=`{}`, local PR={}, native PR=#{}. Resolve the local stack metadata before re-adopting this native stack.",
-            candidate.branch, meta.parent, candidate.base, local_pr, candidate.pr_number
+            "{context}conflicts with local ez metadata for `{}`: local parent=`{}`, remote parent=`{}`, local PR={}, remote PR={}. Resolve the local stack metadata before adopting this branch.",
+            candidate.branch, meta.parent, candidate.base, local_pr, remote_pr
         )));
     }
 
     Ok(())
+}
+
+fn format_pr_number(number: Option<u64>) -> String {
+    number
+        .map(|number| format!("#{number}"))
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn fetch_and_validate_candidate_refs(
+    remote: &str,
+    candidates: &[AdoptCandidate],
+) -> Result<HashMap<String, String>> {
+    let mut candidate_refs = HashMap::new();
+    for candidate in candidates {
+        if let Some(pr_number) = candidate.pr_number {
+            let pr_ref = git::fetch_pr_head(remote, pr_number)?;
+            candidate_refs.insert(candidate.branch.clone(), pr_ref);
+            continue;
+        }
+
+        let local_exists = git::branch_exists(&candidate.branch);
+        match git::fetch_remote_branch_ref(remote, &candidate.branch) {
+            Ok(remote_ref) => {
+                candidate_refs.insert(candidate.branch.clone(), remote_ref);
+            }
+            Err(remote_err) => {
+                if !local_exists {
+                    bail!(EzError::UserMessage(format!(
+                        "branch `{}` was not found locally or on remote `{remote}`: {remote_err}",
+                        candidate.branch
+                    )));
+                }
+            }
+        }
+    }
+    validate_existing_branch_pr_refs(candidates, &candidate_refs)?;
+    Ok(candidate_refs)
 }
 
 fn validate_existing_branch_pr_refs(
@@ -302,35 +380,22 @@ fn validate_existing_branch_pr_refs(
         if !git::branch_exists(&candidate.branch) {
             continue;
         }
-        let Some(pr_ref) = candidate_refs.get(&candidate.branch) else {
+        let Some(ref_name) = candidate_refs.get(&candidate.branch) else {
             continue;
         };
-        if git::is_ancestor(pr_ref, &candidate.branch) {
+        if git::is_ancestor(ref_name, &candidate.branch) {
             continue;
         }
-
+        let detail = candidate
+            .pr_number
+            .map(|number| format!("PR #{number} head"))
+            .unwrap_or_else(|| "remote branch".to_string());
         bail!(EzError::UserMessage(format!(
-            "local branch `{}` does not contain PR #{} head `{}`. Update or rename the local branch before adopting so ez does not attach the PR to stale or diverged code.",
-            candidate.branch, candidate.pr_number, pr_ref
+            "local branch `{}` does not contain {detail} `{ref_name}`",
+            candidate.branch
         )));
     }
-
     Ok(())
-}
-
-fn fetch_and_validate_candidate_refs(
-    remote: &str,
-    candidates: &[AdoptCandidate],
-) -> Result<HashMap<String, String>> {
-    let mut candidate_refs = HashMap::new();
-    for candidate in candidates {
-        candidate_refs.insert(
-            candidate.branch.clone(),
-            git::fetch_pr_head(remote, candidate.pr_number)?,
-        );
-    }
-    validate_existing_branch_pr_refs(candidates, &candidate_refs)?;
-    Ok(candidate_refs)
 }
 
 fn rollback_worktrees(paths: &[String]) {
@@ -398,6 +463,7 @@ fn adopt_candidates_transactionally(
     candidates: &[AdoptCandidate],
     no_worktrees: bool,
     candidate_refs: &HashMap<String, String>,
+    abort_on_parent_resolution_failure: bool,
 ) -> Result<(usize, usize, WorktreeProvisioning)> {
     let original_state = state.clone();
     let mut created_branches = Vec::new();
@@ -405,32 +471,18 @@ fn adopt_candidates_transactionally(
     let mut skipped = 0;
 
     for candidate in candidates {
-        if state.is_managed(&candidate.branch) {
-            if let Ok(meta) = state.get_branch_mut(&candidate.branch) {
-                if meta.pr_number.is_none() {
-                    meta.pr_number = Some(candidate.pr_number);
-                    ui::info(&format!(
-                        "Updated PR number for `{}` → #{}",
-                        candidate.branch, candidate.pr_number
-                    ));
-                }
-            }
-            skipped += 1;
-            continue;
-        }
-
         let branch_existed = git::branch_exists(&candidate.branch);
         if !branch_existed {
             ui::info(&format!("Fetching `{}` from remote...", candidate.branch));
-            let Some(pr_ref) = candidate_refs.get(&candidate.branch) else {
+            let Some(source_ref) = candidate_refs.get(&candidate.branch) else {
                 rollback_created_branches(&created_branches);
                 *state = original_state;
                 return Err(anyhow::anyhow!(
-                    "internal error: missing fetched PR ref for `{}`",
+                    "internal error: missing fetched source ref for `{}`",
                     candidate.branch
                 ));
             };
-            if let Err(err) = git::create_branch_at(&candidate.branch, pr_ref) {
+            if let Err(err) = git::create_branch_at(&candidate.branch, source_ref) {
                 rollback_created_branches(&created_branches);
                 *state = original_state;
                 return Err(err);
@@ -438,10 +490,35 @@ fn adopt_candidates_transactionally(
             created_branches.push(candidate.branch.clone());
         }
 
+        if state.is_managed(&candidate.branch) {
+            if let Ok(meta) = state.get_branch_mut(&candidate.branch) {
+                if meta.pr_number.is_none()
+                    && let Some(pr_number) = candidate.pr_number
+                {
+                    meta.pr_number = Some(pr_number);
+                    ui::info(&format!(
+                        "Updated PR number for `{}` → #{}",
+                        candidate.branch, pr_number
+                    ));
+                }
+            }
+            skipped += 1;
+            continue;
+        }
+
         let parent = &candidate.base;
         let parent_head = match adoption_parent_head(&candidate.branch, parent) {
             Ok(parent_head) => parent_head,
-            Err(_) => {
+            Err(err) => {
+                if abort_on_parent_resolution_failure {
+                    rollback_created_branches(&created_branches);
+                    *state = original_state;
+                    return Err(EzError::UserMessage(format!(
+                        "could not resolve parent `{parent}` for `{}`: {err}",
+                        candidate.branch
+                    ))
+                    .into());
+                }
                 ui::warn(&format!(
                     "Could not resolve parent `{parent}` for `{}` — skipping",
                     candidate.branch
@@ -456,6 +533,15 @@ fn adopt_candidates_transactionally(
         };
 
         if parent_head.is_empty() {
+            if abort_on_parent_resolution_failure {
+                rollback_created_branches(&created_branches);
+                *state = original_state;
+                return Err(EzError::UserMessage(format!(
+                    "could not resolve parent `{parent}` for `{}`",
+                    candidate.branch
+                ))
+                .into());
+            }
             ui::warn(&format!(
                 "Could not resolve parent `{parent}` for `{}` — skipping",
                 candidate.branch
@@ -470,13 +556,17 @@ fn adopt_candidates_transactionally(
 
         state.add_branch(&candidate.branch, parent, &parent_head, None, None);
         if let Ok(meta) = state.get_branch_mut(&candidate.branch) {
-            meta.pr_number = Some(candidate.pr_number);
+            meta.pr_number = candidate.pr_number;
         }
 
         let draft = if candidate.is_draft { " [draft]" } else { "" };
+        let pr_label = candidate
+            .pr_number
+            .map(|number| format!("#{number}, "))
+            .unwrap_or_default();
         ui::success(&format!(
-            "Adopted `{}` (#{}, base: `{}`){draft}",
-            candidate.branch, candidate.pr_number, candidate.base
+            "Adopted `{}` ({pr_label}base: `{}`){draft}",
+            candidate.branch, candidate.base
         ));
 
         adopted += 1;
@@ -529,13 +619,14 @@ pub fn run(pr: Option<u64>, specific_branches: &[String], no_worktrees: bool) ->
         Ok::<StackState, anyhow::Error>(state)
     })?;
 
-    if !github::is_gh_authenticated() {
+    let gh_authenticated = github::is_gh_authenticated();
+    if (pr.is_some() || specific_branches.is_empty()) && !gh_authenticated {
         bail!(EzError::GhError(
             "not authenticated — run `gh auth login` first".to_string()
         ));
     }
 
-    let (candidates, native_stack_number) = if let Some(pr_number) = pr {
+    let (candidates, native_stack_number, explicit_chain) = if let Some(pr_number) = pr {
         let sp = ui::spinner(&format!("Fetching PR #{pr_number} and its chain..."));
         let (title, native_stack_number, graph) =
             fetch_candidates_by_pr_number(&state.remote, &state.trunk, pr_number)?;
@@ -548,26 +639,52 @@ pub fn run(pr: Option<u64>, specific_branches: &[String], no_worktrees: bool) ->
                 state.trunk
             );
         }
-        (graph, native_stack_number)
+        (graph, native_stack_number, false)
     } else if !specific_branches.is_empty() {
-        let sp = ui::spinner("Fetching PRs for named branches...");
-        let prs = fetch_prs_by_branches(&state.remote, &state.trunk, specific_branches)?;
-        sp.finish_and_clear();
+        let prs = if gh_authenticated {
+            let refs: Vec<&str> = specific_branches.iter().map(String::as_str).collect();
+            let mut prs = github::get_pr_statuses_for(&state.remote, &refs);
+            prs.retain(|_, pr| is_active_pr(pr));
+            prs
+        } else {
+            HashMap::new()
+        };
 
-        for branch in specific_branches {
-            if !prs.contains_key(branch.as_str()) {
-                ui::warn(&format!("Branch `{branch}` has no open PR — skipping"));
+        let all_have_open_pr = specific_branches
+            .iter()
+            .all(|branch| prs.contains_key(branch.as_str()));
+
+        if all_have_open_pr {
+            let sp = ui::spinner("Fetching PRs for named branches...");
+            let mut prs = prs;
+            expand_ancestor_chains(&mut prs, &state.remote, &state.trunk);
+            prs.retain(|_, pr| is_active_pr(pr));
+            sp.finish_and_clear();
+
+            let graph = build_adopt_graph(&state.trunk, &prs);
+            if graph.is_empty() {
+                bail!(
+                    "None of the specified branches have open PRs rooted on `{}`",
+                    state.trunk
+                );
             }
+            (graph, None, false)
+        } else {
+            if gh_authenticated {
+                for branch in specific_branches {
+                    if !prs.contains_key(branch.as_str()) {
+                        ui::warn(&format!(
+                            "Branch `{branch}` has no open PR — treating arguments as an explicit stack"
+                        ));
+                    }
+                }
+            }
+            (
+                build_explicit_chain_candidates(&state.trunk, specific_branches, &prs)?,
+                None,
+                true,
+            )
         }
-
-        let graph = build_adopt_graph(&state.trunk, &prs);
-        if graph.is_empty() {
-            bail!(
-                "None of the specified branches have open PRs rooted on `{}`",
-                state.trunk
-            );
-        }
-        (graph, None)
     } else {
         // Default scopes strictly to local branches. Local PRs whose base
         // isn't another local PR (or trunk) are warned and dropped — we
@@ -602,9 +719,9 @@ pub fn run(pr: Option<u64>, specific_branches: &[String], no_worktrees: bool) ->
             ui::info("No open PRs found for local branches that root on trunk");
             return Ok(());
         }
-        (graph, None)
+        (graph, None, false)
     };
-    validate_native_adopt_candidates(&state, &candidates, native_stack_number)?;
+    validate_managed_adopt_candidates(&state, &candidates, native_stack_number)?;
     let candidate_refs = fetch_and_validate_candidate_refs(&state.remote, &candidates)?;
 
     ui::header(&format!("Found {} branch(es) to adopt", candidates.len()));
@@ -615,14 +732,23 @@ pub fn run(pr: Option<u64>, specific_branches: &[String], no_worktrees: bool) ->
         } else {
             ""
         };
+        let identity = c
+            .pr_number
+            .map(|number| format!("#{number}"))
+            .unwrap_or_else(|| "branch".to_string());
         ui::info(&format!(
-            "  #{} {} → {} (base: `{}`){draft}{already}",
-            c.pr_number, c.branch, c.title, c.base
+            "  {} {} → {} (base: `{}`){draft}{already}",
+            identity, c.branch, c.title, c.base
         ));
     }
 
-    let (adopted, skipped, provisioning) =
-        adopt_candidates_transactionally(&mut state, &candidates, no_worktrees, &candidate_refs)?;
+    let (adopted, skipped, provisioning) = adopt_candidates_transactionally(
+        &mut state,
+        &candidates,
+        no_worktrees,
+        &candidate_refs,
+        explicit_chain,
+    )?;
 
     if adopted == 0 && skipped > 0 {
         ui::info(&format!("All {skipped} branch(es) were already tracked"));
@@ -783,7 +909,7 @@ mod tests {
 
         assert_eq!(graph.len(), 1);
         assert_eq!(graph[0].branch, "feat/solo");
-        assert_eq!(graph[0].pr_number, 42);
+        assert_eq!(graph[0].pr_number, Some(42));
         assert_eq!(graph[0].base, "main");
     }
 
@@ -870,24 +996,114 @@ mod tests {
         assert_eq!(candidates[0].base, "main");
     }
 
+    #[test]
+    fn build_explicit_chain_candidates_uses_argument_order_and_enriches_matching_prs() {
+        let mut prs = HashMap::new();
+        let (branch, pr) = make_pr("feat/base", "main", 10);
+        prs.insert(branch, pr);
+        let (branch, pr) = make_pr("feat/child", "feat/base", 11);
+        prs.insert(branch, pr);
+
+        let candidates = build_explicit_chain_candidates(
+            "main",
+            &["feat/base".to_string(), "feat/child".to_string()],
+            &prs,
+        )
+        .expect("explicit chain");
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| c.branch.as_str())
+                .collect::<Vec<_>>(),
+            vec!["feat/base", "feat/child"]
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| c.base.as_str())
+                .collect::<Vec<_>>(),
+            vec!["main", "feat/base"]
+        );
+        assert_eq!(
+            candidates.iter().map(|c| c.pr_number).collect::<Vec<_>>(),
+            vec![Some(10), Some(11)]
+        );
+    }
+
+    #[test]
+    fn build_explicit_chain_candidates_mixes_pr_backed_and_pr_less_and_rejects_base_mismatch() {
+        let mut prs = HashMap::new();
+        let (branch, mut pr) = make_pr("feat/child", "main", 11);
+        pr.title = "Child PR".to_string();
+        prs.insert(branch, pr);
+
+        let err = build_explicit_chain_candidates(
+            "main",
+            &["feat/base".to_string(), "feat/child".to_string()],
+            &prs,
+        )
+        .expect_err("reported PR base must match explicit parent");
+        assert!(err.to_string().contains("feat/child"));
+        assert!(err.to_string().contains("reported base `main`"));
+        assert!(err.to_string().contains("explicit parent is `feat/base`"));
+
+        let mut prs = HashMap::new();
+        let (branch, pr) = make_pr("feat/child", "feat/base", 11);
+        prs.insert(branch, pr);
+        let candidates = build_explicit_chain_candidates(
+            "main",
+            &["feat/base".to_string(), "feat/child".to_string()],
+            &prs,
+        )
+        .expect("mixed explicit chain");
+        assert_eq!(candidates[0].pr_number, None);
+        assert_eq!(candidates[1].pr_number, Some(11));
+        assert_eq!(candidates[0].title, "feat/base");
+        assert_eq!(candidates[1].title, "PR for feat/child");
+    }
+
+    #[test]
+    fn build_explicit_chain_candidates_rejects_duplicate_branch_names() {
+        let err = build_explicit_chain_candidates(
+            "main",
+            &["feat/base".to_string(), "feat/base".to_string()],
+            &HashMap::new(),
+        )
+        .expect_err("duplicate branch names must not create a self-parenting layer");
+
+        assert!(err.to_string().contains("feat/base"));
+        assert!(err.to_string().contains("more than once"));
+    }
+
     fn candidate(branch: &str, base: &str, pr_number: u64) -> AdoptCandidate {
         AdoptCandidate {
             branch: branch.to_string(),
             base: base.to_string(),
-            pr_number,
+            pr_number: Some(pr_number),
             title: format!("PR for {branch}"),
             is_draft: false,
         }
     }
 
+    fn branch_candidate(branch: &str, base: &str) -> AdoptCandidate {
+        AdoptCandidate {
+            branch: branch.to_string(),
+            base: base.to_string(),
+            pr_number: None,
+            title: branch.to_string(),
+            is_draft: false,
+        }
+    }
+
     #[test]
-    fn validate_native_adopt_candidates_allows_matching_metadata_and_missing_pr_number() {
+    fn validate_managed_adopt_candidates_allows_matching_metadata_and_missing_pr_number() {
         let mut state = StackState::new("main".to_string());
         state.add_branch("feat/base", "main", "base-head", None, None);
         state.get_branch_mut("feat/base").expect("base").pr_number = Some(10);
         state.add_branch("feat/child", "feat/base", "child-head", None, None);
 
-        validate_native_adopt_candidates(
+        validate_managed_adopt_candidates(
             &state,
             &[
                 candidate("feat/base", "main", 10),
@@ -899,12 +1115,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_native_adopt_candidates_rejects_parent_divergence_before_mutation() {
+    fn validate_managed_adopt_candidates_rejects_parent_divergence_before_mutation() {
         let mut state = StackState::new("main".to_string());
         state.add_branch("feat/child", "feat/old-parent", "child-head", None, None);
         state.get_branch_mut("feat/child").expect("child").pr_number = Some(11);
 
-        let err = validate_native_adopt_candidates(
+        let err = validate_managed_adopt_candidates(
             &state,
             &[candidate("feat/child", "main", 11)],
             Some(77),
@@ -914,18 +1130,18 @@ mod tests {
         assert!(message.contains("native stack #77"));
         assert!(message.contains("feat/child"));
         assert!(message.contains("local parent=`feat/old-parent`"));
-        assert!(message.contains("native parent=`main`"));
+        assert!(message.contains("remote parent=`main`"));
         assert!(message.contains("local PR=#11"));
-        assert!(message.contains("native PR=#11"));
+        assert!(message.contains("remote PR=#11"));
     }
 
     #[test]
-    fn validate_native_adopt_candidates_rejects_pr_number_divergence_before_mutation() {
+    fn validate_managed_adopt_candidates_rejects_pr_number_divergence_before_mutation() {
         let mut state = StackState::new("main".to_string());
         state.add_branch("feat/child", "main", "child-head", None, None);
         state.get_branch_mut("feat/child").expect("child").pr_number = Some(99);
 
-        let err = validate_native_adopt_candidates(
+        let err = validate_managed_adopt_candidates(
             &state,
             &[candidate("feat/child", "main", 11)],
             Some(77),
@@ -935,9 +1151,47 @@ mod tests {
         assert!(message.contains("native stack #77"));
         assert!(message.contains("feat/child"));
         assert!(message.contains("local parent=`main`"));
-        assert!(message.contains("native parent=`main`"));
+        assert!(message.contains("remote parent=`main`"));
         assert!(message.contains("local PR=#99"));
-        assert!(message.contains("native PR=#11"));
+        assert!(message.contains("remote PR=#11"));
+    }
+
+    #[test]
+    fn validate_managed_adopt_candidates_rejects_parent_and_prless_conflicts_for_any_adoption() {
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/parent-conflict", "feat/old", "head", None, None);
+        state.add_branch("feat/pr-conflict", "main", "head", None, None);
+        state
+            .get_branch_mut("feat/pr-conflict")
+            .expect("branch")
+            .pr_number = Some(99);
+
+        let err = validate_managed_adopt_candidates(
+            &state,
+            &[branch_candidate("feat/parent-conflict", "main")],
+            None,
+        )
+        .expect_err("parent mismatch should abort");
+        assert!(err.to_string().contains("feat/parent-conflict"));
+        assert!(err.to_string().contains("local parent=`feat/old`"));
+        assert!(err.to_string().contains("remote parent=`main`"));
+
+        let err = validate_managed_adopt_candidates(
+            &state,
+            &[branch_candidate("feat/pr-conflict", "main")],
+            None,
+        )
+        .expect_err("pr-less candidate against local PR metadata should abort");
+        assert!(err.to_string().contains("feat/pr-conflict"));
+        assert!(err.to_string().contains("local PR=#99"));
+        assert!(err.to_string().contains("remote PR=none"));
+
+        validate_managed_adopt_candidates(
+            &state,
+            &[candidate("feat/pr-conflict", "main", 99)],
+            None,
+        )
+        .expect("matching PR metadata should pass");
     }
 
     #[test]
@@ -1021,7 +1275,7 @@ exit 2
                 .iter()
                 .map(|candidate| candidate.pr_number)
                 .collect::<Vec<_>>(),
-            vec![10, 20]
+            vec![Some(10), Some(20)]
         );
         assert!(candidates[1].is_draft);
 
@@ -1038,14 +1292,14 @@ exit 2
             AdoptCandidate {
                 branch: "feat/base".to_string(),
                 base: "main".to_string(),
-                pr_number: 10,
+                pr_number: Some(10),
                 title: "Base".to_string(),
                 is_draft: false,
             },
             AdoptCandidate {
                 branch: "feat/child".to_string(),
                 base: "feat/base".to_string(),
-                pr_number: 11,
+                pr_number: Some(11),
                 title: "Child".to_string(),
                 is_draft: true,
             },
@@ -1085,7 +1339,7 @@ exit 2
         let candidates = vec![AdoptCandidate {
             branch: "feat/base".to_string(),
             base: "main".to_string(),
-            pr_number: 10,
+            pr_number: None,
             title: "Base".to_string(),
             is_draft: false,
         }];
@@ -1098,7 +1352,7 @@ exit 2
         let receipt = adopt_receipt_value(0, 1, &candidates, None, &provisioning);
 
         assert!(receipt["native_stack_number"].is_null());
-        assert_eq!(receipt["pr_numbers"], serde_json::json!([10]));
+        assert_eq!(receipt["pr_numbers"], serde_json::json!([null]));
         assert_eq!(receipt["worktrees_created"], 0);
         assert_eq!(receipt["worktree_paths"], serde_json::json!([]));
     }
@@ -1258,14 +1512,14 @@ exit 2
             AdoptCandidate {
                 branch: "feat/base".to_string(),
                 base: "main".to_string(),
-                pr_number: 10,
+                pr_number: Some(10),
                 title: "Base".to_string(),
                 is_draft: false,
             },
             AdoptCandidate {
                 branch: "feat/child".to_string(),
                 base: "feat/base".to_string(),
-                pr_number: 11,
+                pr_number: Some(11),
                 title: "Child".to_string(),
                 is_draft: false,
             },
@@ -1380,7 +1634,7 @@ exit 2
             std::path::PathBuf::from(git::worktree_path("feat/child").expect("child path"));
         write_file(&child_collision, "collision.txt", "block worktree add\n");
 
-        let err = adopt_candidates_transactionally(&mut state, &candidates, false, &refs)
+        let err = adopt_candidates_transactionally(&mut state, &candidates, false, &refs, true)
             .expect_err("second worktree add should fail");
         assert!(
             err.to_string().contains("already exists")
@@ -1439,11 +1693,11 @@ exit 2
             git::rev_parse("main").expect("main sha"),
         );
 
-        let err = adopt_candidates_transactionally(&mut state, &candidates, true, &refs)
+        let err = adopt_candidates_transactionally(&mut state, &candidates, true, &refs, true)
             .expect_err("missing second PR ref should abort");
         assert!(
             err.to_string()
-                .contains("missing fetched PR ref for `feat/child`")
+                .contains("missing fetched source ref for `feat/child`")
         );
         assert_eq!(
             std::fs::read(&state_path).expect("read state after failure"),
@@ -1452,5 +1706,328 @@ exit 2
         );
         assert!(!git::branch_exists("feat/base"));
         assert!(!git::branch_exists("feat/child"));
+    }
+
+    #[test]
+    fn managed_candidate_with_missing_local_ref_is_rehydrated_before_worktree_provisioning() {
+        use crate::test_support::{CwdGuard, init_git_repo, take_env_lock};
+
+        let _guard = take_env_lock();
+        let repo = init_git_repo("adopt-managed-missing-ref");
+        let _cwd = CwdGuard::enter(&repo);
+        let main_head = git::rev_parse("main").expect("main sha");
+
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/remote", "main", &main_head, None, None);
+        state.save().expect("save managed metadata");
+
+        let candidates = vec![branch_candidate("feat/remote", "main")];
+        let refs = HashMap::from([("feat/remote".to_string(), main_head)]);
+
+        let (adopted, skipped, provisioning) =
+            adopt_candidates_transactionally(&mut state, &candidates, false, &refs, true)
+                .expect("rehydrate managed branch and provision its worktree");
+
+        assert_eq!((adopted, skipped), (0, 1));
+        assert_eq!(provisioning.created, 1);
+        assert!(git::branch_exists("feat/remote"));
+        assert!(
+            std::path::Path::new(&git::worktree_path("feat/remote").expect("worktree path"))
+                .exists()
+        );
+        assert!(StackState::load().expect("state").is_managed("feat/remote"));
+    }
+
+    #[test]
+    fn explicit_remote_only_branch_fetches_creates_worktree_and_saves_state() {
+        use crate::test_support::{
+            CwdGuard, init_git_repo, run_cmd, take_env_lock, temp_dir, write_file,
+        };
+
+        let _guard = take_env_lock();
+        let remote = temp_dir("adopt-remote-only-bare");
+        run_cmd(&remote, "git", &["init", "--bare", "-b", "main"]);
+        let repo = init_git_repo("adopt-remote-only");
+        let _cwd = CwdGuard::enter(&repo);
+        run_cmd(
+            &repo,
+            "git",
+            &["remote", "add", "origin", remote.to_str().expect("remote")],
+        );
+        run_cmd(&repo, "git", &["push", "origin", "main"]);
+
+        git::create_branch("feat/remote").expect("create remote branch");
+        write_file(&repo, "remote.txt", "remote\n");
+        git::add_all_including_untracked().expect("stage remote");
+        git::commit("remote branch").expect("commit remote");
+        run_cmd(&repo, "git", &["push", "origin", "feat/remote"]);
+        git::checkout("main").expect("checkout main");
+        git::delete_branch("feat/remote", true).expect("delete local remote branch");
+
+        let mut state = StackState::new("main".to_string());
+        state.remote = "origin".to_string();
+        state.save().expect("save state");
+        let candidates =
+            build_explicit_chain_candidates("main", &["feat/remote".to_string()], &HashMap::new())
+                .expect("explicit candidates");
+        validate_managed_adopt_candidates(&state, &candidates, None).expect("metadata preflight");
+        let refs =
+            fetch_and_validate_candidate_refs("origin", &candidates).expect("fetch remote ref");
+        let (adopted, skipped, provisioning) =
+            adopt_candidates_transactionally(&mut state, &candidates, false, &refs, true)
+                .expect("adopt");
+
+        assert_eq!((adopted, skipped), (1, 0));
+        assert_eq!(provisioning.created, 1);
+        assert!(git::branch_exists("feat/remote"));
+        let saved = StackState::load().expect("load state");
+        let meta = saved.get_branch("feat/remote").expect("tracked branch");
+        assert_eq!(meta.parent, "main");
+        assert_eq!(meta.pr_number, None);
+        assert!(std::path::Path::new(&git::worktree_path("feat/remote").expect("wt")).exists());
+    }
+
+    #[test]
+    fn explicit_local_prless_branch_supports_worktree_and_no_worktrees_modes() {
+        use crate::test_support::{CwdGuard, init_git_repo, take_env_lock, write_file};
+
+        let _guard = take_env_lock();
+        let repo = init_git_repo("adopt-local-prless");
+        let _cwd = CwdGuard::enter(&repo);
+        git::create_branch("feat/local").expect("create local branch");
+        write_file(&repo, "local.txt", "local\n");
+        git::add_all_including_untracked().expect("stage local");
+        git::commit("local branch").expect("commit local");
+        git::checkout("main").expect("checkout main");
+
+        let mut state = StackState::new("main".to_string());
+        state.save().expect("save state");
+        let candidates =
+            build_explicit_chain_candidates("main", &["feat/local".to_string()], &HashMap::new())
+                .expect("explicit candidates");
+        let refs =
+            fetch_and_validate_candidate_refs("origin", &candidates).expect("local-only accepted");
+        let (_, _, provisioning) =
+            adopt_candidates_transactionally(&mut state, &candidates, false, &refs, true)
+                .expect("adopt local");
+        assert_eq!(provisioning.created, 1);
+        assert!(
+            StackState::load()
+                .expect("state")
+                .get_branch("feat/local")
+                .expect("branch")
+                .pr_number
+                .is_none()
+        );
+
+        let repo2 = init_git_repo("adopt-local-prless-no-worktree");
+        let _cwd2 = CwdGuard::enter(&repo2);
+        git::create_branch("feat/local").expect("create local branch");
+        write_file(&repo2, "local.txt", "local\n");
+        git::add_all_including_untracked().expect("stage local");
+        git::commit("local branch").expect("commit local");
+        git::checkout("main").expect("checkout main");
+        let mut state2 = StackState::new("main".to_string());
+        state2.save().expect("save state");
+        let refs =
+            fetch_and_validate_candidate_refs("origin", &candidates).expect("local-only accepted");
+        let (_, _, provisioning) =
+            adopt_candidates_transactionally(&mut state2, &candidates, true, &refs, true)
+                .expect("adopt without worktree");
+        assert_eq!(provisioning.created, 0);
+        assert!(!std::path::Path::new(&git::worktree_path("feat/local").expect("wt")).exists());
+    }
+
+    #[test]
+    fn explicit_local_branch_adoption_runs_without_github_authentication() {
+        use crate::test_support::{
+            CwdGuard, PathGuard, init_git_repo, install_fake_bin, take_env_lock, write_file,
+        };
+
+        let _guard = take_env_lock();
+        let repo = init_git_repo("adopt-local-offline");
+        let _cwd = CwdGuard::enter(&repo);
+        git::create_branch("feat/offline").expect("create local branch");
+        write_file(&repo, "offline.txt", "offline\n");
+        git::add_all_including_untracked().expect("stage local branch");
+        git::commit("offline branch").expect("commit local branch");
+        git::checkout("main").expect("checkout main");
+
+        StackState::new("main".to_string())
+            .save()
+            .expect("save initial state");
+        let fake_dir = install_fake_bin("gh-adopt-offline", "gh", "#!/bin/sh\nexit 1\n");
+        let _path = PathGuard::install(&fake_dir);
+
+        run(None, &["feat/offline".to_string()], true)
+            .expect("explicit local adoption should not require gh auth");
+
+        let saved = StackState::load().expect("load saved state");
+        let meta = saved.get_branch("feat/offline").expect("tracked branch");
+        assert_eq!(meta.parent, "main");
+        assert_eq!(meta.pr_number, None);
+        assert!(
+            !std::path::Path::new(&git::worktree_path("feat/offline").expect("worktree path"))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn explicit_prless_ref_preflight_allows_equal_ahead_and_rejects_behind_diverged_missing() {
+        use crate::test_support::{
+            CwdGuard, init_git_repo, run_cmd, take_env_lock, temp_dir, write_file,
+        };
+
+        let _guard = take_env_lock();
+        let remote = temp_dir("adopt-ref-preflight-bare");
+        run_cmd(&remote, "git", &["init", "--bare", "-b", "main"]);
+        let repo = init_git_repo("adopt-ref-preflight");
+        let _cwd = CwdGuard::enter(&repo);
+        run_cmd(
+            &repo,
+            "git",
+            &["remote", "add", "origin", remote.to_str().expect("remote")],
+        );
+        run_cmd(&repo, "git", &["push", "origin", "main"]);
+
+        git::create_branch("feat/equal").expect("equal");
+        write_file(&repo, "equal.txt", "equal\n");
+        git::add_all_including_untracked().expect("stage equal");
+        git::commit("equal").expect("commit equal");
+        run_cmd(&repo, "git", &["push", "origin", "feat/equal"]);
+
+        git::checkout("main").expect("main");
+        git::create_branch_at("feat/ahead", "feat/equal").expect("ahead");
+        git::checkout("feat/ahead").expect("checkout ahead");
+        write_file(&repo, "ahead.txt", "ahead\n");
+        git::add_all_including_untracked().expect("stage ahead");
+        git::commit("ahead").expect("commit ahead");
+        run_cmd(&repo, "git", &["push", "origin", "feat/ahead"]);
+        write_file(&repo, "ahead-local.txt", "ahead local\n");
+        git::add_all_including_untracked().expect("stage ahead local");
+        git::commit("ahead local").expect("commit ahead local");
+
+        git::checkout("main").expect("main");
+        git::create_branch_at("feat/behind", "feat/equal").expect("behind");
+        run_cmd(&repo, "git", &["push", "origin", "feat/behind"]);
+        git::checkout("feat/behind").expect("behind");
+        write_file(&repo, "behind-remote.txt", "behind remote\n");
+        git::add_all_including_untracked().expect("stage behind remote");
+        git::commit("behind remote").expect("commit behind remote");
+        run_cmd(&repo, "git", &["push", "origin", "feat/behind"]);
+        git::checkout("feat/behind").expect("behind");
+        git::hard_reset("HEAD~1").expect("make behind");
+
+        git::checkout("main").expect("main");
+        git::create_branch_at("feat/diverged", "feat/equal").expect("diverged");
+        run_cmd(&repo, "git", &["push", "origin", "feat/diverged"]);
+        git::checkout("feat/diverged").expect("diverged");
+        write_file(&repo, "diverged-local.txt", "diverged local\n");
+        git::add_all_including_untracked().expect("stage diverged local");
+        git::commit("diverged local").expect("commit diverged local");
+
+        let remote_clone_parent = temp_dir("adopt-ref-preflight-remote-clone-parent");
+        run_cmd(
+            &remote_clone_parent,
+            "git",
+            &["clone", remote.to_str().expect("remote"), "remote-clone"],
+        );
+        let remote_clone = remote_clone_parent.join("remote-clone");
+        run_cmd(&remote_clone, "git", &["config", "user.name", "Test User"]);
+        run_cmd(
+            &remote_clone,
+            "git",
+            &["config", "user.email", "test@example.com"],
+        );
+        run_cmd(&remote_clone, "git", &["checkout", "feat/diverged"]);
+        write_file(&remote_clone, "diverged-remote.txt", "diverged remote\n");
+        run_cmd(&remote_clone, "git", &["add", "diverged-remote.txt"]);
+        run_cmd(&remote_clone, "git", &["commit", "-m", "diverged remote"]);
+        run_cmd(&remote_clone, "git", &["push", "origin", "feat/diverged"]);
+
+        git::checkout("main").expect("main");
+
+        fetch_and_validate_candidate_refs(
+            "origin",
+            &[
+                branch_candidate("feat/equal", "main"),
+                branch_candidate("feat/ahead", "feat/equal"),
+            ],
+        )
+        .expect("equal and ahead accepted");
+
+        let behind =
+            fetch_and_validate_candidate_refs("origin", &[branch_candidate("feat/behind", "main")])
+                .expect_err("behind rejected");
+        assert!(
+            behind.to_string().contains("behind")
+                || behind.to_string().contains("does not contain")
+        );
+
+        let diverged = fetch_and_validate_candidate_refs(
+            "origin",
+            &[branch_candidate("feat/diverged", "main")],
+        )
+        .expect_err("diverged rejected");
+        assert!(diverged.to_string().contains("diverged"));
+
+        let missing = fetch_and_validate_candidate_refs(
+            "origin",
+            &[branch_candidate("feat/missing", "main")],
+        )
+        .expect_err("missing rejected");
+        assert!(missing.to_string().contains("feat/missing"));
+    }
+
+    #[test]
+    fn explicit_unrelated_history_aborts_and_rolls_back_state_refs_and_worktrees() {
+        use crate::test_support::{
+            CwdGuard, init_git_repo, run_cmd, take_env_lock, temp_dir, write_file,
+        };
+
+        let _guard = take_env_lock();
+        let repo = init_git_repo("adopt-unrelated-rollback");
+        let other = temp_dir("adopt-unrelated-other");
+        run_cmd(&other, "git", &["init", "-b", "main"]);
+        run_cmd(&other, "git", &["config", "user.name", "Test User"]);
+        run_cmd(&other, "git", &["config", "user.email", "test@example.com"]);
+        write_file(&other, "other.txt", "other\n");
+        run_cmd(&other, "git", &["add", "other.txt"]);
+        run_cmd(&other, "git", &["commit", "-m", "other root"]);
+        run_cmd(&other, "git", &["branch", "feat/unrelated"]);
+
+        let _cwd = CwdGuard::enter(&repo);
+        run_cmd(
+            &repo,
+            "git",
+            &["remote", "add", "other", other.to_str().expect("other")],
+        );
+        run_cmd(
+            &repo,
+            "git",
+            &[
+                "fetch",
+                "other",
+                "feat/unrelated:refs/remotes/origin/feat/unrelated",
+            ],
+        );
+        let unrelated_ref = "origin/feat/unrelated".to_string();
+        let mut state = StackState::new("main".to_string());
+        state.save().expect("save state");
+        let state_path = StackState::state_path().expect("state path");
+        let original_state = std::fs::read(&state_path).expect("state bytes");
+        let candidates = vec![branch_candidate("feat/unrelated", "main")];
+        let mut refs = HashMap::new();
+        refs.insert("feat/unrelated".to_string(), unrelated_ref);
+
+        let err = adopt_candidates_transactionally(&mut state, &candidates, false, &refs, true)
+            .expect_err("unrelated merge-base should abort explicit adoption");
+        assert!(err.to_string().contains("parent") || err.to_string().contains("merge"));
+        assert_eq!(
+            std::fs::read(&state_path).expect("state bytes"),
+            original_state
+        );
+        assert!(!git::branch_exists("feat/unrelated"));
+        assert!(!std::path::Path::new(&git::worktree_path("feat/unrelated").expect("wt")).exists());
     }
 }

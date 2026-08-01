@@ -924,6 +924,18 @@ pub fn fetch_refupdate(remote: &str, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Strictly fetch a remote branch into its remote-tracking ref and return that ref.
+///
+/// Unlike `fetch_branch`, this does not swallow errors. It updates
+/// `refs/remotes/<remote>/<branch>` from `refs/heads/<branch>` and fails when the
+/// remote branch is missing or inaccessible.
+pub fn fetch_remote_branch_ref(remote: &str, branch: &str) -> Result<String> {
+    let remote_ref = format!("{remote}/{branch}");
+    let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
+    run_git(&["fetch", remote, &refspec])?;
+    Ok(remote_ref)
+}
+
 /// Remove a linked worktree at `path`. Fails if the worktree has uncommitted changes.
 pub fn worktree_remove(path: &str) -> Result<()> {
     run_git(&["worktree", "remove", path])?;
@@ -1368,6 +1380,36 @@ exit 0
 
         worktree_remove_force(&wt_path).expect("remove worktree");
         worktree_prune().expect("prune");
+    }
+
+    #[test]
+    fn fetch_remote_branch_ref_strictly_updates_remote_tracking_ref() {
+        let _guard = take_env_lock();
+        let remote = temp_dir("git-fetch-remote-branch-bare");
+        run_cmd(&remote, "git", &["init", "--bare", "-b", "main"]);
+        let repo = init_git_repo("git-fetch-remote-branch");
+        let _cwd = CwdGuard::enter(&repo);
+        run_cmd(
+            &repo,
+            "git",
+            &["remote", "add", "origin", remote.to_str().expect("remote")],
+        );
+        run_cmd(&repo, "git", &["push", "origin", "main"]);
+
+        create_branch("feat/remote").expect("create remote branch");
+        write_file(&repo, "remote.txt", "remote\n");
+        add_all_including_untracked().expect("stage remote");
+        commit("remote branch").expect("commit remote branch");
+        let remote_head = rev_parse("feat/remote").expect("remote head");
+        run_cmd(&repo, "git", &["push", "origin", "feat/remote"]);
+        checkout("main").expect("checkout main");
+        delete_branch("feat/remote", true).expect("delete local branch");
+
+        let remote_ref = fetch_remote_branch_ref("origin", "feat/remote").expect("fetch branch");
+
+        assert_eq!(remote_ref, "origin/feat/remote");
+        assert_eq!(rev_parse(&remote_ref).expect("remote ref"), remote_head);
+        assert!(fetch_remote_branch_ref("origin", "feat/missing").is_err());
     }
 
     #[test]
