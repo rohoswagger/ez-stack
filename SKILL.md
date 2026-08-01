@@ -90,8 +90,10 @@ ez create feat/auth-api            # stacks on current branch
 ez commit -m "feat: add API"
 ez create feat/auth-middleware     # stacks on auth-api
 ez commit -m "feat: add middleware"
-ez submit                          # pushes + creates PRs for entire stack
+ez submit                          # atomically pushes + creates PRs for entire stack
 ```
+
+`ez submit` pushes all stack branches first with one atomic `--force-with-lease` push. For 2+ PRs it also asks GitHub to register the PR chain as a native stack when the public-preview API is available; if unavailable, the ordinary base-chained PRs still succeed.
 
 ### Self-review before pushing
 ```bash
@@ -107,10 +109,17 @@ ez push -Am "feat: done"               # include untracked files too
 ez push --title "feat: auth" --body "..." # with PR metadata
 ez push --no-pr                        # push branch only
 ez push --pr                           # create/update PR even if no_pr config is true
-ez submit                                # push entire stack
+ez submit                                # atomically push entire stack
 ez merge --yes                           # merge bottom PR non-interactively
-ez merge --stack --yes                   # merge the current linear stack bottom-to-top
+ez merge --stack --yes                   # atomically land a native stack; sequential fallback
 ```
+
+`ez merge` uses GitHub's asynchronous merge API when available. After a direct
+merge, ez removes each merged branch's clean linked worktree and returns the
+main worktree path for shell integration. For an exact native-stack match,
+`--stack` makes one atomic request through the top PR and reconciles all local
+worktrees together. If GitHub enqueues the merge, ez preserves the worktrees,
+branches, and stack state until the queue finishes.
 
 ### Sync with other agents' work
 ```bash

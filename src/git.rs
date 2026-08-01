@@ -581,6 +581,38 @@ pub fn push(remote: &str, branch: &str, force: bool) -> Result<()> {
     bail!(crate::error::EzError::GitError(stderr));
 }
 
+pub fn push_atomic(remote: &str, branches: &[&str]) -> Result<()> {
+    if branches.is_empty() {
+        return Ok(());
+    }
+
+    let mut args = vec!["push", "--atomic", "--force-with-lease", remote];
+    args.extend_from_slice(branches);
+
+    let (success, _, stderr) = run_git_with_status(&args)?;
+    if success {
+        return Ok(());
+    }
+    if stderr.contains("stale info") || stderr.contains("(stale)") {
+        let branch =
+            first_stale_branch_from_stderr(&stderr, branches).unwrap_or_else(|| branches.join(","));
+        bail!(crate::error::EzError::StaleRemoteRef(branch));
+    }
+    bail!(crate::error::EzError::GitError(stderr));
+}
+
+fn first_stale_branch_from_stderr(stderr: &str, branches: &[&str]) -> Option<String> {
+    stderr.lines().find_map(|line| {
+        if !(line.contains("stale info") || line.contains("(stale)")) {
+            return None;
+        }
+        branches
+            .iter()
+            .find(|branch| line.contains(**branch))
+            .map(|branch| (*branch).to_string())
+    })
+}
+
 pub fn delete_branch(branch: &str, force: bool) -> Result<()> {
     let flag = if force { "-D" } else { "-d" };
     run_git(&["branch", flag, branch])?;
@@ -1155,6 +1187,72 @@ exit 1
     #[test]
     fn fetch_args_force_progress_output() {
         assert_eq!(fetch_args("origin"), ["fetch", "--progress", "origin"]);
+    }
+
+    #[test]
+    fn push_atomic_uses_one_force_with_lease_atomic_invocation() {
+        let _guard = take_env_lock();
+        let log_dir = crate::test_support::temp_dir("git-push-atomic");
+        let log_path = log_dir.join("calls.log");
+        let fake_dir = install_fake_bin(
+            "git-push-atomic-bin",
+            "git",
+            &format!(
+                r#"#!/bin/sh
+echo "$@" >> "{}"
+exit 0
+"#,
+                log_path.display()
+            ),
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        push_atomic("origin", &["feat/a", "feat/b"]).expect("atomic push");
+
+        assert_eq!(
+            std::fs::read_to_string(log_path).expect("log"),
+            "push --atomic --force-with-lease origin feat/a feat/b\n"
+        );
+    }
+
+    #[test]
+    fn push_atomic_empty_branch_list_is_noop() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "git-push-atomic-empty-bin",
+            "git",
+            r#"#!/bin/sh
+echo "git should not be invoked" >&2
+exit 1
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        push_atomic("origin", &[]).expect("empty atomic push");
+    }
+
+    #[test]
+    fn push_atomic_maps_stale_ref_to_first_mentioned_branch() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "git-push-atomic-stale-bin",
+            "git",
+            r#"#!/bin/sh
+printf '%s\n' '! [rejected] feat/b -> feat/b (stale info)' >&2
+printf '%s\n' '! [rejected] feat/a -> feat/a (stale info)' >&2
+exit 1
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let err = push_atomic("origin", &["feat/a", "feat/b"]).expect_err("stale ref");
+        assert!(
+            matches!(
+                err.downcast_ref::<EzError>(),
+                Some(EzError::StaleRemoteRef(branch)) if branch == "feat/b"
+            ),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]

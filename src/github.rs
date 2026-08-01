@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
+use std::io::Write;
 use std::process::Command;
+use std::process::Stdio;
+use std::time::Duration;
 
 use crate::error::EzError;
 
@@ -7,6 +10,34 @@ fn run_gh(args: &[&str]) -> Result<String> {
     let output = Command::new("gh")
         .args(args)
         .output()
+        .with_context(|| format!("failed to run gh {}", args.join(" ")))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(EzError::GhError(stderr).into())
+    }
+}
+
+fn run_gh_with_stdin(args: &[&str], stdin: &str) -> Result<String> {
+    let mut child = Command::new("gh")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to run gh {}", args.join(" ")))?;
+
+    child
+        .stdin
+        .take()
+        .context("failed to open gh stdin")?
+        .write_all(stdin.as_bytes())
+        .context("failed to write gh stdin")?;
+
+    let output = child
+        .wait_with_output()
         .with_context(|| format!("failed to run gh {}", args.join(" ")))?;
 
     if output.status.success() {
@@ -26,6 +57,27 @@ pub struct PrInfo {
     pub base: String,
     pub is_draft: bool,
     pub merged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeStackOutcome {
+    NotNeeded,
+    Created { number: u64 },
+    Extended { number: u64, added: usize },
+    Unchanged { number: u64 },
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeStackInfo {
+    pub number: u64,
+    pub pull_requests: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergePrOutcome {
+    Merged,
+    Enqueued,
 }
 
 pub fn body_from_file(path: &str) -> Result<String> {
@@ -351,8 +403,32 @@ fn pr_info_from_graphql_node(node: &serde_json::Value) -> Option<PrInfo> {
     })
 }
 
-pub fn merge_pr(pr_number: u64, method: &str) -> Result<()> {
+pub fn merge_pr(pr_number: u64, method: &str) -> Result<MergePrOutcome> {
+    merge_pr_with_poll_interval(pr_number, method, Duration::from_secs(1))
+}
+
+fn merge_pr_with_poll_interval(
+    pr_number: u64,
+    method: &str,
+    poll_interval: Duration,
+) -> Result<MergePrOutcome> {
     let repo = repo_name()?;
+    let route = format!("repos/{repo}/pulls/{pr_number}/merge-async");
+    let method_json = serde_json::to_string(method)?;
+    let payload = format!(r#"{{"merge_method":{method_json},"merge_action":"default"}}"#);
+    let response = match run_gh_with_stdin(&["api", "-X", "PUT", &route, "--input", "-"], &payload)
+    {
+        Ok(response) => response,
+        Err(err) if is_not_found_gh_error(&err) => {
+            return merge_pr_legacy(&repo, pr_number, method);
+        }
+        Err(err) => return Err(err),
+    };
+
+    handle_merge_async_response(&repo, pr_number, &response, poll_interval)
+}
+
+fn merge_pr_legacy(repo: &str, pr_number: u64, method: &str) -> Result<MergePrOutcome> {
     let route = format!("repos/{repo}/pulls/{pr_number}/merge");
     let response = run_gh(&[
         "api",
@@ -365,11 +441,200 @@ pub fn merge_pr(pr_number: u64, method: &str) -> Result<()> {
 
     let value: serde_json::Value = serde_json::from_str(&response)?;
     if value["merged"].as_bool().unwrap_or(false) {
-        return Ok(());
+        return Ok(MergePrOutcome::Merged);
     }
 
     let message = value["message"].as_str().unwrap_or("merge failed");
     bail!(EzError::GhError(message.to_string()));
+}
+
+fn handle_merge_async_response(
+    repo: &str,
+    pr_number: u64,
+    response: &str,
+    poll_interval: Duration,
+) -> Result<MergePrOutcome> {
+    let mut value: serde_json::Value = serde_json::from_str(response)
+        .with_context(|| "failed to parse GitHub async merge response")?;
+    for _ in 0..600 {
+        match parse_merge_async_status(&value)? {
+            MergeAsyncStatus::Merged => return Ok(MergePrOutcome::Merged),
+            MergeAsyncStatus::Enqueued => return Ok(MergePrOutcome::Enqueued),
+            MergeAsyncStatus::Failed(message) => bail!(EzError::GhError(message)),
+            MergeAsyncStatus::Pending(uuid) => {
+                if poll_interval > Duration::ZERO {
+                    std::thread::sleep(poll_interval);
+                }
+                let route = format!("repos/{repo}/pulls/{pr_number}/merge-async/{uuid}");
+                let poll_response = run_gh(&["api", &route])?;
+                value = serde_json::from_str(&poll_response)
+                    .with_context(|| "failed to parse GitHub async merge poll response")?;
+            }
+        }
+    }
+
+    bail!(EzError::GhError(format!(
+        "GitHub async merge for PR #{pr_number} is still pending after 600 polls; check the merge queue status on GitHub and retry `ez merge` if needed"
+    )));
+}
+
+enum MergeAsyncStatus {
+    Merged,
+    Enqueued,
+    Failed(String),
+    Pending(String),
+}
+
+fn parse_merge_async_status(value: &serde_json::Value) -> Result<MergeAsyncStatus> {
+    match value["status"].as_str() {
+        Some("merged") => Ok(MergeAsyncStatus::Merged),
+        Some("enqueued") => Ok(MergeAsyncStatus::Enqueued),
+        Some("failed") => {
+            let message = value["details"]["message"]
+                .as_str()
+                .unwrap_or("GitHub async merge failed")
+                .to_string();
+            Ok(MergeAsyncStatus::Failed(message))
+        }
+        Some("pending") => {
+            let uuid = value["details"]["uuid"]
+                .as_str()
+                .context("GitHub async merge response is pending but missing details.uuid")?;
+            Ok(MergeAsyncStatus::Pending(uuid.to_string()))
+        }
+        Some(status) => bail!(EzError::GhError(format!(
+            "unknown GitHub async merge status `{status}`"
+        ))),
+        None => bail!(EzError::GhError(
+            "GitHub async merge response missing status".to_string()
+        )),
+    }
+}
+
+pub fn ensure_native_stack(pr_numbers: &[u64]) -> Result<NativeStackOutcome> {
+    if pr_numbers.len() < 2 {
+        return Ok(NativeStackOutcome::NotNeeded);
+    }
+
+    let repo = repo_name()?;
+    let bottom = pr_numbers[0];
+    let route = format!("repos/{repo}/stacks?pull_request={bottom}");
+    let existing = match run_gh(&["api", &route]) {
+        Ok(json) => json,
+        Err(err) if is_not_found_gh_error(&err) => return Ok(NativeStackOutcome::Unavailable),
+        Err(err) => return Err(err),
+    };
+
+    let stacks: Vec<serde_json::Value> = serde_json::from_str(&existing)
+        .with_context(|| "failed to parse GitHub native stack lookup response")?;
+
+    let Some(stack) = stacks.first() else {
+        let payload = serde_json::json!({ "pull_requests": pr_numbers }).to_string();
+        let response = run_gh_with_stdin(
+            &[
+                "api",
+                "-X",
+                "POST",
+                &format!("repos/{repo}/stacks"),
+                "--input",
+                "-",
+            ],
+            &payload,
+        )?;
+        let number = parse_native_stack_number(&response)?;
+        return Ok(NativeStackOutcome::Created { number });
+    };
+
+    let number = parse_native_stack_info_number(stack)?;
+    let existing_prs = parse_native_stack_pr_numbers(stack)?;
+
+    if existing_prs == pr_numbers {
+        return Ok(NativeStackOutcome::Unchanged { number });
+    }
+    if is_prefix(&existing_prs, pr_numbers) {
+        let delta = &pr_numbers[existing_prs.len()..];
+        let payload = serde_json::json!({ "pull_requests": delta }).to_string();
+        run_gh_with_stdin(
+            &[
+                "api",
+                "-X",
+                "POST",
+                &format!("repos/{repo}/stacks/{number}/add"),
+                "--input",
+                "-",
+            ],
+            &payload,
+        )?;
+        return Ok(NativeStackOutcome::Extended {
+            number,
+            added: delta.len(),
+        });
+    }
+    if is_prefix(pr_numbers, &existing_prs) {
+        return Ok(NativeStackOutcome::Unchanged { number });
+    }
+
+    bail!(EzError::GhError(format!(
+        "native stack #{number} diverges from desired PR chain; existing pull_requests={existing_prs:?}, desired pull_requests={pr_numbers:?}. Resolve the GitHub stack manually, then retry `ez submit`."
+    )));
+}
+
+pub fn native_stack_for_pr(pr_number: u64) -> Result<Option<NativeStackInfo>> {
+    let repo = repo_name()?;
+    let route = format!("repos/{repo}/stacks?pull_request={pr_number}");
+    let response = match run_gh(&["api", &route]) {
+        Ok(json) => json,
+        Err(err) if is_not_found_gh_error(&err) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+
+    let stacks: Vec<serde_json::Value> = serde_json::from_str(&response)
+        .with_context(|| "failed to parse GitHub native stack lookup response")?;
+    let Some(stack) = stacks.first() else {
+        return Ok(None);
+    };
+
+    Ok(Some(NativeStackInfo {
+        number: parse_native_stack_info_number(stack)?,
+        pull_requests: parse_native_stack_pr_numbers(stack)?,
+    }))
+}
+
+fn is_not_found_gh_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string().to_ascii_lowercase();
+    message.contains("404") || message.contains("not found")
+}
+
+fn parse_native_stack_info_number(stack: &serde_json::Value) -> Result<u64> {
+    stack["number"]
+        .as_u64()
+        .context("GitHub native stack response missing stack number")
+}
+
+fn parse_native_stack_number(response: &str) -> Result<u64> {
+    let value: serde_json::Value = serde_json::from_str(response)
+        .with_context(|| "failed to parse GitHub native stack mutation response")?;
+    value["number"]
+        .as_u64()
+        .context("GitHub native stack mutation response missing stack number")
+}
+
+fn parse_native_stack_pr_numbers(stack: &serde_json::Value) -> Result<Vec<u64>> {
+    let pull_requests = stack["pull_requests"]
+        .as_array()
+        .context("GitHub native stack response missing pull_requests")?;
+    pull_requests
+        .iter()
+        .map(|pr| {
+            pr["number"]
+                .as_u64()
+                .context("GitHub native stack pull_request missing number")
+        })
+        .collect()
+}
+
+fn is_prefix<T: PartialEq>(prefix: &[T], values: &[T]) -> bool {
+    prefix.len() <= values.len() && values.starts_with(prefix)
 }
 
 pub fn edit_pr(pr_number: u64, title: Option<&str>, body: Option<&str>) -> Result<()> {
@@ -557,8 +822,9 @@ case "$cmd" in
     esac
     ;;
   api)
-    if [ "$1" = "-X" ] && [ "$2" = "PUT" ] && [ "$3" = 'repos/org/repo/pulls/77/merge' ] && [ "$4" = "-f" ] && [ "$5" = 'merge_method=squash' ]; then
-      echo '{"merged":true,"message":"merged"}'
+    if [ "$1" = "-X" ] && [ "$2" = "PUT" ] && [ "$3" = 'repos/org/repo/pulls/77/merge-async' ] && [ "$4" = "--input" ] && [ "$5" = "-" ]; then
+      cat >/dev/null
+      echo '{"status":"merged"}'
     elif [ "$1" = "graphql" ]; then
       # Capture the request so tests can assert what was sent.
       if [ -n "$EZ_FAKE_GH_LOG" ]; then
@@ -655,7 +921,10 @@ esac
 
         update_pr_base(77, "develop").expect("update base");
         edit_pr(77, Some("New title"), Some("New body")).expect("edit pr");
-        merge_pr(77, "squash").expect("merge pr");
+        assert_eq!(
+            merge_pr(77, "squash").expect("merge pr"),
+            MergePrOutcome::Merged
+        );
         set_pr_ready(77, true).expect("ready");
         open_pr_in_browser("feature").expect("open in browser");
         assert!(is_gh_authenticated());
@@ -776,6 +1045,191 @@ exit 1
     }
 
     #[test]
+    fn merge_pr_async_immediate_merged_sends_exact_request_and_payload() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-merge-async-immediate",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "PUT" ] && [ "$4" = "repos/org/repo/pulls/77/merge-async" ] && [ "$5" = "--input" ] && [ "$6" = "-" ]; then
+  printf '%s\n' "$*" > "$EZ_FAKE_GH_LOG"
+  cat > "$EZ_FAKE_GH_PAYLOAD"
+  echo '{"status":"merged"}'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let log_path = fake_dir.join("args.log");
+        let payload_path = fake_dir.join("payload.json");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &log_path);
+            std::env::set_var("EZ_FAKE_GH_PAYLOAD", &payload_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let outcome = merge_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO)
+            .expect("async merge");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+            std::env::remove_var("EZ_FAKE_GH_PAYLOAD");
+        }
+        assert_eq!(outcome, MergePrOutcome::Merged);
+        assert_eq!(
+            std::fs::read_to_string(log_path).expect("args"),
+            "api -X PUT repos/org/repo/pulls/77/merge-async --input -\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(payload_path).expect("payload"),
+            r#"{"merge_method":"squash","merge_action":"default"}"#
+        );
+    }
+
+    #[test]
+    fn merge_pr_async_pending_polls_until_merged() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-merge-async-pending",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "PUT" ]; then
+  cat >/dev/null
+  echo '{"status":"pending","details":{"uuid":"abc-123"}}'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/pulls/77/merge-async/abc-123" ]; then
+  echo poll >> "$EZ_FAKE_GH_LOG"
+  echo '{"status":"merged"}'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let log_path = fake_dir.join("polls.log");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &log_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let outcome = merge_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO)
+            .expect("pending merge");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+        }
+        assert_eq!(outcome, MergePrOutcome::Merged);
+        assert_eq!(std::fs::read_to_string(log_path).expect("polls"), "poll\n");
+    }
+
+    #[test]
+    fn merge_pr_async_enqueued_returns_enqueued() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-merge-async-enqueued",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "PUT" ]; then
+  cat >/dev/null
+  echo '{"status":"enqueued"}'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        assert_eq!(
+            merge_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO).expect("enqueued"),
+            MergePrOutcome::Enqueued
+        );
+    }
+
+    #[test]
+    fn merge_pr_async_failed_uses_details_message() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-merge-async-failed",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "PUT" ]; then
+  cat >/dev/null
+  echo '{"status":"failed","details":{"message":"merge queue rejected it"}}'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let err = merge_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO)
+            .expect_err("failed merge");
+
+        assert!(
+            err.to_string().contains("merge queue rejected it"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn merge_pr_async_404_falls_back_to_legacy_merge() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-merge-async-404-fallback",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "PUT" ] && [ "$4" = "repos/org/repo/pulls/77/merge-async" ]; then
+  echo "HTTP 404: Not Found" >&2
+  exit 1
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "PUT" ] && [ "$4" = "repos/org/repo/pulls/77/merge" ] && [ "$5" = "-f" ] && [ "$6" = "merge_method=squash" ]; then
+  echo legacy >> "$EZ_FAKE_GH_LOG"
+  echo '{"merged":true,"message":"merged"}'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let log_path = fake_dir.join("legacy.log");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &log_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let outcome = merge_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO)
+            .expect("legacy fallback");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+        }
+        assert_eq!(outcome, MergePrOutcome::Merged);
+        assert_eq!(
+            std::fs::read_to_string(log_path).expect("legacy"),
+            "legacy\n"
+        );
+    }
+
+    #[test]
     fn body_from_file_surfaces_missing_file_path() {
         let path = temp_dir("gh-body-file").join("missing.md");
         let err = body_from_file(path.to_str().expect("utf8 path"))
@@ -803,6 +1257,321 @@ exit 0
         let _path = PathGuard::install(&fake_dir);
 
         assert_eq!(get_ci_status("feature"), "");
+    }
+
+    #[test]
+    fn ensure_native_stack_not_needed_for_fewer_than_two_prs() {
+        assert_eq!(
+            ensure_native_stack(&[10]).expect("single pr"),
+            NativeStackOutcome::NotNeeded
+        );
+    }
+
+    #[test]
+    fn native_stack_for_pr_parses_first_stack_in_order() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-read-parse",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=20" ]; then
+  echo '[{"number":88,"pull_requests":[{"number":10},{"number":20},{"number":30}]},{"number":99,"pull_requests":[{"number":20}]}]'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let stack = native_stack_for_pr(20)
+            .expect("lookup")
+            .expect("stack should exist");
+
+        assert_eq!(
+            stack,
+            NativeStackInfo {
+                number: 88,
+                pull_requests: vec![10, 20, 30],
+            }
+        );
+    }
+
+    #[test]
+    fn native_stack_for_pr_returns_none_for_empty_list() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-read-empty",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=20" ]; then
+  echo '[]'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        assert_eq!(native_stack_for_pr(20).expect("lookup"), None);
+    }
+
+    #[test]
+    fn native_stack_for_pr_returns_none_for_404_unavailable() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-read-404",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ]; then
+  echo "HTTP 404: Not Found" >&2
+  exit 1
+fi
+exit 2
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        assert_eq!(native_stack_for_pr(20).expect("lookup"), None);
+    }
+
+    #[test]
+    fn ensure_native_stack_creates_with_ordered_payload() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-create",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+  echo '[]'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "POST" ] && [ "$4" = "repos/org/repo/stacks" ] && [ "$5" = "--input" ] && [ "$6" = "-" ]; then
+  cat > "$EZ_FAKE_GH_PAYLOAD"
+  echo '{"number":88}'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let payload_path = fake_dir.join("payload.json");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_PAYLOAD", &payload_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let outcome = ensure_native_stack(&[10, 20, 30]).expect("create stack");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_PAYLOAD");
+        }
+        assert_eq!(outcome, NativeStackOutcome::Created { number: 88 });
+        assert_eq!(
+            std::fs::read_to_string(payload_path).expect("payload"),
+            r#"{"pull_requests":[10,20,30]}"#
+        );
+    }
+
+    #[test]
+    fn ensure_native_stack_extends_with_delta_only() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-extend",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+  echo '[{"number":88,"pull_requests":[{"number":10},{"number":20}]}]'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "POST" ] && [ "$4" = "repos/org/repo/stacks/88/add" ] && [ "$5" = "--input" ] && [ "$6" = "-" ]; then
+  cat > "$EZ_FAKE_GH_PAYLOAD"
+  echo '{"number":88}'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let payload_path = fake_dir.join("payload.json");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_PAYLOAD", &payload_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let outcome = ensure_native_stack(&[10, 20, 30, 40]).expect("extend stack");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_PAYLOAD");
+        }
+        assert_eq!(
+            outcome,
+            NativeStackOutcome::Extended {
+                number: 88,
+                added: 2
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(payload_path).expect("payload"),
+            r#"{"pull_requests":[30,40]}"#
+        );
+    }
+
+    #[test]
+    fn ensure_native_stack_unchanged_skips_post() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-unchanged",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+  echo '[{"number":88,"pull_requests":[{"number":10},{"number":20}]}]'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ]; then
+  echo post >> "$EZ_FAKE_GH_LOG"
+  exit 2
+fi
+exit 2
+"#,
+        );
+        let log_path = fake_dir.join("posts.log");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &log_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let outcome = ensure_native_stack(&[10, 20]).expect("unchanged stack");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+        }
+        assert_eq!(outcome, NativeStackOutcome::Unchanged { number: 88 });
+        assert!(!log_path.exists(), "POST should not be called");
+    }
+
+    #[test]
+    fn ensure_native_stack_partial_prefix_is_unchanged() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-prefix",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+  echo '[{"number":88,"pull_requests":[{"number":10},{"number":20},{"number":30}]}]'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ]; then
+  echo post >> "$EZ_FAKE_GH_LOG"
+  exit 2
+fi
+exit 2
+"#,
+        );
+        let log_path = fake_dir.join("posts.log");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &log_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let outcome = ensure_native_stack(&[10, 20]).expect("partial prefix");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+        }
+        assert_eq!(outcome, NativeStackOutcome::Unchanged { number: 88 });
+        assert!(!log_path.exists(), "POST should not be called");
+    }
+
+    #[test]
+    fn ensure_native_stack_returns_unavailable_on_404() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-404",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ]; then
+  echo "HTTP 404: Not Found" >&2
+  exit 1
+fi
+exit 2
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        assert_eq!(
+            ensure_native_stack(&[10, 20]).expect("unavailable"),
+            NativeStackOutcome::Unavailable
+        );
+    }
+
+    #[test]
+    fn ensure_native_stack_divergence_errors_without_posting() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-diverged",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=10" ]; then
+  echo '[{"number":88,"pull_requests":[{"number":10},{"number":99}]}]'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ]; then
+  echo post >> "$EZ_FAKE_GH_LOG"
+  exit 2
+fi
+exit 2
+"#,
+        );
+        let log_path = fake_dir.join("posts.log");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &log_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let err = ensure_native_stack(&[10, 20, 30]).expect_err("divergence");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+        }
+        assert!(
+            err.to_string().contains("diverges"),
+            "unexpected error: {err:#}"
+        );
+        assert!(!log_path.exists(), "POST should not be called");
     }
 
     #[test]
