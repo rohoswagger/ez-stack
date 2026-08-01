@@ -214,3 +214,21 @@ fn release_builds_are_locked_to_the_committed_dependency_graph() {
         "Python wheel binaries must be built from Cargo.lock"
     );
 }
+
+#[test]
+fn ci_runs_for_pull_requests_targeting_any_stack_layer() {
+    let workflow = std::fs::read_to_string(".github/workflows/ci.yml")
+        .expect("read CI workflow from repository root");
+    let pull_request_trigger = workflow
+        .split_once("  pull_request:")
+        .expect("CI workflow must define a pull_request trigger")
+        .1
+        .split_once("\nenv:")
+        .expect("pull_request trigger should appear before the workflow environment")
+        .0;
+
+    assert!(
+        !pull_request_trigger.contains("branches:"),
+        "stacked PRs target feature branches as well as main, so CI must not filter pull_request base branches"
+    );
+}
