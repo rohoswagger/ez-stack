@@ -104,6 +104,17 @@ fn defensive_commit_file(dir: &Path, file: &str, contents: &str, message: &str) 
     defensive_git_output(dir, &["rev-parse", "HEAD"])
 }
 
+fn defensive_commit_file_on_branch(
+    repo: &Path,
+    branch: &str,
+    file: &str,
+    contents: &str,
+    message: &str,
+) -> String {
+    defensive_run(repo, "git", &["checkout", branch]);
+    defensive_commit_file(repo, file, contents, message)
+}
+
 fn defensive_append_file(dir: &Path, file: &str, contents: &str) {
     use std::io::Write;
     let mut handle = std::fs::OpenOptions::new()
@@ -146,6 +157,10 @@ fn defensive_expected_worktree(repo: &Path, branch: &str) -> PathBuf {
 
 fn defensive_ref_tip(repo: &Path, rev: &str) -> String {
     defensive_git_output(repo, &["rev-parse", rev])
+}
+
+fn defensive_branch_list(repo: &Path, pattern: &str) -> String {
+    defensive_git_output(repo, &["branch", "--list", pattern])
 }
 
 fn defensive_status(repo: &Path) -> String {
@@ -313,6 +328,64 @@ fn create_branch_only_receipt_reports_warn_scope_mode_by_default() {
 }
 
 #[test]
+fn create_from_current_managed_branch_creates_child_worktree_and_receipt() {
+    let repo = DefensiveRepo::new("create-current-managed-worktree");
+    defensive_run_ez(&repo.path, &["create", "feat/base", "--from", "main"]);
+    let base = defensive_expected_worktree(&repo.path, "feat/base");
+    let base_tip = defensive_commit_file(&base, "base.txt", "base\n", "base");
+
+    let output = defensive_run_ez(&base, &["create", "feat/child"]);
+
+    let receipt = defensive_receipt_with_cmd(&output, "create");
+    assert_eq!(receipt["branch"], "feat/child");
+    assert_eq!(receipt["parent"], "feat/base");
+    assert_eq!(receipt["scope_defined"], false);
+    let child = defensive_expected_worktree(&repo.path, "feat/child");
+    assert_eq!(
+        std::fs::canonicalize(defensive_stdout(&output)).expect("canonical stdout worktree"),
+        std::fs::canonicalize(&child).expect("canonical expected worktree")
+    );
+    assert!(child.is_dir(), "child worktree should be created");
+    assert_eq!(
+        defensive_stack_state(&repo.path)["branches"]["feat/child"]["parent"],
+        "feat/base"
+    );
+    assert_eq!(
+        defensive_stack_state(&repo.path)["branches"]["feat/child"]["parent_head"],
+        base_tip
+    );
+    assert_eq!(
+        defensive_git_output(&base, &["branch", "--show-current"]),
+        "feat/base",
+        "create from a linked parent must not switch the parent worktree"
+    );
+}
+
+#[test]
+fn create_duplicate_from_current_managed_branch_leaves_existing_stack_unchanged() {
+    let repo = DefensiveRepo::new("create-current-managed-duplicate");
+    defensive_run_ez(&repo.path, &["create", "feat/base", "--from", "main"]);
+    let base = defensive_expected_worktree(&repo.path, "feat/base");
+    defensive_run_ez(&base, &["create", "feat/child", "--no-worktree"]);
+    let before_state = defensive_stack_state(&repo.path);
+    let before_child = defensive_ref_tip(&repo.path, "feat/child");
+
+    let output = defensive_run_ez_raw(&base, &["create", "feat/child"]);
+
+    defensive_assert_failure(&output);
+    let stderr = defensive_stderr(&output);
+    assert!(stderr.contains("Use `ez switch feat/child`"), "{stderr}");
+    assert_eq!(defensive_stack_state(&repo.path), before_state);
+    assert_eq!(defensive_ref_tip(&repo.path, "feat/child"), before_child);
+    assert_eq!(
+        defensive_branch_list(&repo.path, "feat/child")
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn restack_warns_when_dirty_trunk_blocks_fast_forward_update() {
     let repo = DefensiveRepo::new("restack-dirty-trunk-update");
     defensive_create_committed_worktree(&repo, "feat/topic", "main");
@@ -343,6 +416,138 @@ fn restack_warns_when_dirty_trunk_blocks_fast_forward_update() {
         "local dirty edit\n"
     );
     let _ = std::fs::remove_dir_all(writer);
+}
+
+#[test]
+fn restack_aligns_branch_when_patch_is_already_applied_on_parent() {
+    let repo = DefensiveRepo::new("restack-already-applied");
+    defensive_run_ez(&repo.path, &["create", "feat/topic", "--from", "main"]);
+    let topic = defensive_expected_worktree(&repo.path, "feat/topic");
+    let topic_before = defensive_commit_file(&topic, "topic.txt", "topic\n", "topic");
+    defensive_run(&repo.path, "git", &["checkout", "main"]);
+    defensive_commit_file(&repo.path, "main-before.txt", "main\n", "main before");
+    defensive_run(&repo.path, "git", &["cherry-pick", "feat/topic"]);
+    let main_tip = defensive_ref_tip(&repo.path, "main");
+    assert_ne!(
+        topic_before, main_tip,
+        "cherry-pick should create a new commit"
+    );
+
+    let output = defensive_run_ez(&repo.path, &["restack"]);
+
+    let stderr = defensive_stderr(&output);
+    assert!(stderr.contains("already applied"), "{stderr}");
+    let receipt = defensive_receipt_with_action(&output, "restacked");
+    assert_eq!(receipt["branch"], "feat/topic");
+    assert_eq!(receipt["method"], "already_applied");
+    assert_eq!(receipt["redundant_commits"], 1);
+    assert_eq!(defensive_ref_tip(&repo.path, "feat/topic"), main_tip);
+    assert_eq!(
+        defensive_stack_state(&repo.path)["branches"]["feat/topic"]["parent_head"],
+        main_tip
+    );
+    assert_eq!(
+        defensive_status(&topic),
+        "",
+        "linked worktree should remain clean after alignment"
+    );
+}
+
+#[test]
+fn restack_reparents_child_when_recorded_parent_branch_was_deleted() {
+    let repo = DefensiveRepo::new("restack-reparent-deleted-parent");
+    let main_initial = defensive_ref_tip(&repo.path, "main");
+    defensive_run_ez(
+        &repo.path,
+        &["create", "feat/base", "--from", "main", "--no-worktree"],
+    );
+    let base_tip =
+        defensive_commit_file_on_branch(&repo.path, "feat/base", "base.txt", "base\n", "base");
+    defensive_run_ez(
+        &repo.path,
+        &[
+            "create",
+            "feat/child",
+            "--from",
+            "feat/base",
+            "--no-worktree",
+        ],
+    );
+    defensive_commit_file_on_branch(&repo.path, "feat/child", "child.txt", "child\n", "child");
+    defensive_run(&repo.path, "git", &["checkout", "main"]);
+    defensive_run(&repo.path, "git", &["branch", "-D", "feat/base"]);
+    let main_tip = defensive_commit_file(&repo.path, "main2.txt", "main2\n", "main2");
+    assert_ne!(main_initial, main_tip);
+    assert_eq!(
+        defensive_stack_state(&repo.path)["branches"]["feat/child"]["parent_head"],
+        base_tip
+    );
+
+    let output = defensive_run_ez(&repo.path, &["restack"]);
+
+    let stderr = defensive_stderr(&output);
+    assert!(stderr.contains("reparenting onto `main`"), "{stderr}");
+    assert_eq!(
+        defensive_stack_state(&repo.path)["branches"]["feat/child"]["parent"],
+        "main"
+    );
+    assert_eq!(
+        defensive_stack_state(&repo.path)["branches"]["feat/child"]["parent_head"],
+        main_tip
+    );
+    assert_eq!(
+        defensive_git_output(&repo.path, &["merge-base", "main", "feat/child"]),
+        main_tip
+    );
+}
+
+#[test]
+fn restack_conflict_reports_incomplete_and_continues_to_independent_sibling() {
+    let repo = DefensiveRepo::new("restack-conflict-continues");
+    defensive_run_ez(&repo.path, &["create", "feat/bad", "--from", "main"]);
+    let bad = defensive_expected_worktree(&repo.path, "feat/bad");
+    defensive_commit_file(&bad, "tracked.txt", "branch edit\n", "bad");
+    defensive_run_ez(&repo.path, &["create", "feat/good", "--from", "main"]);
+    let good = defensive_expected_worktree(&repo.path, "feat/good");
+    defensive_commit_file(&good, "good.txt", "good\n", "good");
+    defensive_commit_file(&repo.path, "tracked.txt", "trunk edit\n", "trunk");
+    let main_tip = defensive_ref_tip(&repo.path, "main");
+    let bad_before = defensive_ref_tip(&repo.path, "feat/bad");
+
+    let output = defensive_run_ez_raw(&repo.path, &["restack"]);
+
+    defensive_assert_failure(&output);
+    assert_eq!(output.status.code(), Some(3));
+    let stderr = defensive_stderr(&output);
+    assert!(
+        stderr.contains("Rebase conflict while updating `feat/bad` onto `main`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Left `feat/bad` where it was"), "{stderr}");
+    let incomplete = defensive_receipt_with_action(&output, "restack_incomplete");
+    assert_eq!(incomplete["restacked"], 1);
+    assert_eq!(incomplete["failed"][0]["branch"], "feat/bad");
+    assert_eq!(incomplete["failed"][0]["reason"], "conflict");
+    assert_eq!(defensive_ref_tip(&repo.path, "feat/bad"), bad_before);
+    assert_eq!(
+        defensive_stack_state(&repo.path)["branches"]["feat/bad"]["parent_head"],
+        defensive_ref_tip(&repo.path, "main~1"),
+        "failed branch should keep stale parent_head for retry"
+    );
+    assert_eq!(
+        defensive_stack_state(&repo.path)["branches"]["feat/good"]["parent_head"],
+        main_tip,
+        "sibling should still restack successfully"
+    );
+    assert_eq!(
+        defensive_git_output(&repo.path, &["merge-base", "main", "feat/good"]),
+        main_tip
+    );
+    assert_eq!(
+        defensive_status(&bad),
+        "",
+        "failed linked worktree should be clean after rebase abort"
+    );
 }
 
 #[test]
