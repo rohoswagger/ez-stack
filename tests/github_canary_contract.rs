@@ -197,3 +197,20 @@ fn release_workflows_run_canary_before_build_jobs() {
     );
     assert_job_needs(&python_wheel, "build-wheel", "canary");
 }
+
+#[test]
+fn release_builds_are_locked_to_the_committed_dependency_graph() {
+    let release = read_repo_file(".github/workflows/release.yml");
+    assert!(
+        job_block(&release, "build")
+            .contains("cargo build --release --locked --target ${{ matrix.target }}"),
+        "release binaries must be built from Cargo.lock"
+    );
+
+    let python_wheel = read_repo_file(".github/workflows/python-wheel.yml");
+    assert!(
+        job_block(&python_wheel, "build-wheel")
+            .contains("cargo build --release --locked --target ${{ matrix.target }}"),
+        "Python wheel binaries must be built from Cargo.lock"
+    );
+}
