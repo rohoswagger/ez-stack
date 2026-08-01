@@ -38,11 +38,16 @@ Examples:
 Examples:
   ez adopt
   ez adopt --pr 42
+  ez adopt --pr 42 --no-worktrees
   ez adopt feat/auth feat/db")]
     Adopt {
         /// Adopt the chain for a specific PR number
         #[arg(long)]
         pr: Option<u64>,
+
+        /// Track branches without creating local worktrees
+        #[arg(long)]
+        no_worktrees: bool,
 
         /// Specific branch names to adopt
         branches: Vec<String>,
@@ -803,6 +808,43 @@ mod tests {
         match cli.command {
             Commands::List { json } => assert!(!json),
             _ => panic!("expected list command"),
+        }
+    }
+
+    #[test]
+    fn parses_adopt_defaults_to_worktrees() {
+        let cli = Cli::try_parse_from(["ez", "adopt", "--pr", "42"]).expect("parse adopt --pr");
+
+        match cli.command {
+            Commands::Adopt {
+                pr,
+                branches,
+                no_worktrees,
+            } => {
+                assert_eq!(pr, Some(42));
+                assert!(branches.is_empty());
+                assert!(!no_worktrees);
+            }
+            _ => panic!("expected adopt command"),
+        }
+    }
+
+    #[test]
+    fn parses_adopt_no_worktrees_flag() {
+        let cli = Cli::try_parse_from(["ez", "adopt", "--pr", "42", "--no-worktrees"])
+            .expect("parse adopt --no-worktrees");
+
+        match cli.command {
+            Commands::Adopt {
+                pr,
+                branches,
+                no_worktrees,
+            } => {
+                assert_eq!(pr, Some(42));
+                assert!(branches.is_empty());
+                assert!(no_worktrees);
+            }
+            _ => panic!("expected adopt command"),
         }
     }
 

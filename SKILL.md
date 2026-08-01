@@ -129,11 +129,16 @@ ez sync --autostash   # pulls trunk, cleans merged PRs, restacks your branches
 ### Adopt branches from another machine or collaborator
 ```bash
 ez adopt              # adopt all open PRs rooted on trunk
-ez adopt --pr 42      # adopt PR #42 and its dependency chain
+ez adopt --pr 42      # adopt its native stack/PR chain + provision each worktree
+ez adopt --pr 42 --no-worktrees  # reconstruct metadata only
 ez adopt feat/a feat/b  # adopt specific branches by name
 ```
 
-`ez adopt` reads the PR graph from GitHub and reconstructs `stack.json` locally. Use it to continue working on someone else's stack from a fresh clone.
+`ez adopt` prefers GitHub's native stack order, falls back to the ordinary PR
+base graph, reconstructs `stack.json`, and provisions one worktree per active
+layer. It aborts before mutation when existing local metadata conflicts with a
+native stack. Use it to continue working on someone else's stack from a fresh
+clone.
 
 ### Finish
 ```bash
