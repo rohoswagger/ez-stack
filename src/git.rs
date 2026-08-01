@@ -724,7 +724,7 @@ pub fn push(remote: &str, branch: &str, force: bool) -> Result<()> {
     if success {
         return Ok(());
     }
-    if stderr.contains("stale info") || stderr.contains("(stale)") {
+    if is_stale_ref_error(&stderr) {
         bail!(crate::error::EzError::StaleRemoteRef(branch.to_string()));
     }
     bail!(crate::error::EzError::GitError(stderr));
@@ -742,7 +742,7 @@ pub fn push_atomic(remote: &str, branches: &[&str]) -> Result<()> {
     if success {
         return Ok(());
     }
-    if stderr.contains("stale info") || stderr.contains("(stale)") {
+    if is_stale_ref_error(&stderr) {
         let branch =
             first_stale_branch_from_stderr(&stderr, branches).unwrap_or_else(|| branches.join(","));
         bail!(crate::error::EzError::StaleRemoteRef(branch));
@@ -752,7 +752,7 @@ pub fn push_atomic(remote: &str, branches: &[&str]) -> Result<()> {
 
 fn first_stale_branch_from_stderr(stderr: &str, branches: &[&str]) -> Option<String> {
     stderr.lines().find_map(|line| {
-        if !(line.contains("stale info") || line.contains("(stale)")) {
+        if !is_stale_ref_error(line) {
             return None;
         }
         branches
@@ -760,6 +760,12 @@ fn first_stale_branch_from_stderr(stderr: &str, branches: &[&str]) -> Option<Str
             .find(|branch| line.contains(**branch))
             .map(|branch| (*branch).to_string())
     })
+}
+
+fn is_stale_ref_error(stderr: &str) -> bool {
+    stderr.contains("stale info")
+        || stderr.contains("(stale)")
+        || (stderr.contains("cannot lock ref") && stderr.contains("but expected"))
 }
 
 pub fn delete_branch(branch: &str, force: bool) -> Result<()> {
