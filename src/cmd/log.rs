@@ -237,6 +237,9 @@ fn native_stack_log_suffix(summary: &str) -> String {
 mod tests {
     use super::*;
     use crate::stack::{BranchMeta, StackState};
+    use crate::test_support::{
+        CwdGuard, PathGuard, init_git_repo, install_fake_bin, run_cmd, take_env_lock, write_file,
+    };
     use std::collections::HashMap;
 
     fn make_state() -> StackState {
@@ -328,5 +331,92 @@ mod tests {
 
         assert!(suffix.contains("[native: in sync with GitHub stack #88]"));
         assert!(suffix.starts_with(' '));
+    }
+
+    fn enter_real_stack(prefix: &str, pr_number: Option<u64>) -> (std::path::PathBuf, CwdGuard) {
+        let repo = init_git_repo(prefix);
+        let main_head =
+            crate::git::rev_parse_at(repo.to_str().expect("repo path"), "main").expect("main head");
+        run_cmd(&repo, "git", &["checkout", "-b", "feat/a"]);
+        write_file(&repo, "a.txt", "a\n");
+        run_cmd(&repo, "git", &["add", "a.txt"]);
+        run_cmd(&repo, "git", &["commit", "-m", "a"]);
+        let a_head =
+            crate::git::rev_parse_at(repo.to_str().expect("repo path"), "feat/a").expect("a head");
+        run_cmd(&repo, "git", &["checkout", "-b", "feat/b"]);
+        write_file(&repo, "b.txt", "b\n");
+        run_cmd(&repo, "git", &["add", "b.txt"]);
+        run_cmd(&repo, "git", &["commit", "-m", "b"]);
+
+        let worktree = repo.join(".worktrees/feat-a");
+        std::fs::create_dir_all(worktree.parent().expect("worktree parent"))
+            .expect("create worktree parent");
+        run_cmd(
+            &repo,
+            "git",
+            &[
+                "worktree",
+                "add",
+                worktree.to_str().expect("worktree path"),
+                "feat/a",
+            ],
+        );
+
+        let cwd = CwdGuard::enter(&repo);
+        let mut state = StackState::new("main".to_string());
+        state.repo = Some("owner/repo".to_string());
+        state.add_branch("feat/a", "main", &main_head, None, None);
+        state.get_branch_mut("feat/a").expect("a meta").pr_number = pr_number;
+        state.add_branch("feat/b", "feat/a", &a_head, None, None);
+        state.save().expect("save stack");
+        (repo, cwd)
+    }
+
+    #[test]
+    fn renders_real_nested_stack_in_human_and_json_modes() {
+        let _lock = take_env_lock();
+        let (_repo, _cwd) = enter_real_stack("log-real", None);
+
+        run(false, false).expect("human log");
+        run(true, false).expect("json log");
+        run(true, true).expect("native json log without PRs");
+    }
+
+    #[test]
+    fn renders_pr_status_ci_and_json_url_from_fake_github() {
+        let _lock = take_env_lock();
+        let (_repo, _cwd) = enter_real_stack("log-pr", Some(7));
+        let fake = install_fake_bin(
+            "log-pr-gh",
+            "gh",
+            r#"#!/bin/sh
+case "$*" in
+  "pr view 7"*)
+    printf '%s\n' '{"number":7,"url":"https://github.com/owner/repo/pull/7","state":"OPEN","title":"A","isDraft":true,"mergedAt":null,"baseRefName":"main"}'
+    ;;
+  "run list --branch feat/a"*)
+    printf '%s\n' '{"status":"completed","conclusion":"success"}'
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+        );
+        let _path = PathGuard::install(&fake);
+
+        run(false, false).expect("human log with PR");
+        run(true, false).expect("json log with PR");
+    }
+
+    #[test]
+    fn json_log_uses_null_url_when_repo_is_unknown() {
+        let _lock = take_env_lock();
+        let (_repo, _cwd) = enter_real_stack("log-no-repo", Some(9));
+        let mut state = StackState::load().expect("load stack");
+        state.repo = None;
+        state.save().expect("save stack without repo");
+        let fake = install_fake_bin("log-no-repo-gh", "gh", "#!/bin/sh\nexit 1\n");
+        let _path = PathGuard::install(&fake);
+
+        run(true, false).expect("json log without repo");
     }
 }

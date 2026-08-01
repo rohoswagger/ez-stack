@@ -84,6 +84,21 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::test_support::{CwdGuard, init_git_repo, run_cmd, take_env_lock, write_file};
+
+    fn enter_managed_branch(prefix: &str) -> (std::path::PathBuf, CwdGuard) {
+        let repo = init_git_repo(prefix);
+        let parent_head =
+            git::rev_parse_at(repo.to_str().expect("repo path"), "main").expect("main head");
+        run_cmd(&repo, "git", &["checkout", "-b", "feat/topic"]);
+        let cwd = CwdGuard::enter(&repo);
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/topic", "main", &parent_head, None, None);
+        state.save().expect("save stack");
+        (repo, cwd)
+    }
+
     fn should_skip_commit(if_changed: bool, has_staged: bool) -> bool {
         if_changed && !has_staged
     }
@@ -96,5 +111,31 @@ mod tests {
         assert!(!should_skip_commit(true, true));
         // if_changed=false, nothing staged → NothingToCommit error (existing behavior)
         assert!(!should_skip_commit(false, false));
+    }
+
+    #[test]
+    fn if_changed_skips_without_mutating_state() {
+        let _lock = take_env_lock();
+        let (_repo, _cwd) = enter_managed_branch("commit-if-changed");
+        let before = git::rev_parse("HEAD").expect("head");
+
+        run("unused", false, false, true, &[]).expect("skip succeeds");
+
+        assert_eq!(git::rev_parse("HEAD").expect("head"), before);
+    }
+
+    #[test]
+    fn tracked_and_untracked_stage_modes_commit_real_git_state() {
+        let _lock = take_env_lock();
+        let (repo, _cwd) = enter_managed_branch("commit-stage-modes");
+
+        write_file(&repo, "tracked.txt", "tracked update\n");
+        run("tracked update", true, false, false, &[]).expect("tracked commit");
+        assert!(!git::has_uncommitted_changes().expect("status"));
+
+        write_file(&repo, "new.txt", "new file\n");
+        run("new file", false, true, false, &[]).expect("all-files commit");
+        assert!(git::rev_parse("HEAD:new.txt").is_ok());
+        assert!(!git::has_uncommitted_changes().expect("status"));
     }
 }
