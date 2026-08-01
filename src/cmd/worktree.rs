@@ -1329,6 +1329,56 @@ mod tests {
     }
 
     #[test]
+    fn exact_lock_verification_reports_disappeared_owner_and_lock_changes() {
+        let _lock = take_env_lock();
+        let fixture = FleetRepo::new("fleet-lock-verification");
+        let _cwd = CwdGuard::enter(&fixture.repo);
+        let base_path = git::worktree_path("feat/base").expect("base path");
+        add_owned_worktree(&base_path, "feat/base", "expected-lock").expect("add locked base");
+
+        let missing = verify_exact_lock("/tmp/ez-missing-worktree", "feat/base", None)
+            .expect_err("missing path must be reported");
+        assert!(missing.to_string().contains("disappeared"));
+
+        let owner = verify_exact_lock(&base_path, "feat/child", Some("expected-lock"))
+            .expect_err("wrong branch must be reported");
+        assert!(owner.to_string().contains("ownership changed"));
+        assert!(owner.to_string().contains("found `feat/base`"));
+
+        git::worktree_unlock(&base_path).expect("unlock expected lock");
+        git::worktree_lock(&base_path, "").expect("replace with empty reason lock");
+        let lock = verify_exact_lock(&base_path, "feat/base", Some("expected-lock"))
+            .expect_err("wrong lock must be reported");
+        assert!(lock.to_string().contains("lock changed"));
+        assert!(lock.to_string().contains("<no reason>"));
+
+        release_attempted_lock(&base_path, "");
+        assert!(verify_exact_lock(&base_path, "feat/base", None).is_ok());
+    }
+
+    #[test]
+    fn registered_worktree_guard_reports_missing_and_wrong_owner_paths() {
+        let _lock = take_env_lock();
+        let fixture = FleetRepo::new("fleet-registered-guard");
+        let _cwd = CwdGuard::enter(&fixture.repo);
+        let base_path = git::worktree_path("feat/base").expect("base path");
+        let child_path = git::worktree_path("feat/child").expect("child path");
+        add_owned_worktree(&child_path, "feat/child", "child-lock").expect("add child");
+
+        let missing = guard_registered_worktree("feat/base", &base_path, "delete")
+            .expect_err("missing registered path must fail");
+        assert!(
+            missing
+                .to_string()
+                .contains("disappeared before ez could delete")
+        );
+
+        let wrong_owner = guard_registered_worktree("feat/base", &child_path, "delete")
+            .expect_err("wrong owner must fail");
+        assert!(wrong_owner.to_string().contains("ownership changed at"));
+    }
+
+    #[test]
     fn deterministic_order_never_materializes_an_unmanaged_parent() {
         let mut state = StackState::new("main".to_string());
         state.add_branch("feat/child", "outside-parent", "m", None, None);
@@ -1512,6 +1562,21 @@ mod tests {
     }
 
     #[test]
+    fn exec_rejects_empty_stack_after_loading_repository_state() {
+        let _lock = take_env_lock();
+        let repo = init_git_repo("fleet-empty-exec");
+        let _cwd = CwdGuard::enter(&repo);
+        StackState::new("main".to_string())
+            .save()
+            .expect("save trunk-only state");
+
+        let error = exec(&[], &["true".to_string()], false, true)
+            .expect_err("empty managed stack must fail");
+        assert!(error.to_string().contains("no managed branches"));
+        assert!(error.to_string().contains("ez create"));
+    }
+
+    #[test]
     fn missing_ref_preflight_prevents_partial_creation() {
         let _lock = take_env_lock();
         let fixture = FleetRepo::new("fleet-missing-ref");
@@ -1607,6 +1672,33 @@ mod tests {
         assert!(!Path::new(&git::worktree_path("feat/child").expect("child path")).exists());
     }
 
+    #[test]
+    fn rollback_refuses_unregistered_occupied_candidate_path_after_add_failure() {
+        let _lock = take_env_lock();
+        let fixture = FleetRepo::new("fleet-rollback-unregistered-occupied");
+        let _cwd = CwdGuard::enter(&fixture.repo);
+        let base_path = git::worktree_path("feat/base").expect("base path");
+
+        let error = ensure_with_adder(&["feat/base".to_string()], false, |path, _branch, _lock| {
+            std::fs::create_dir_all(path).expect("occupy candidate path");
+            write_file(Path::new(path), "owner.txt", "keep\n");
+            bail!("injected add failure after occupying path")
+        })
+        .expect_err("unregistered occupied path must make rollback incomplete");
+
+        assert!(error.to_string().contains("rollback was incomplete"));
+        assert!(
+            error
+                .to_string()
+                .contains("refuse to remove unregistered path")
+        );
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&base_path).join("owner.txt"))
+                .expect("collision contents"),
+            "keep\n"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn side_effectful_post_checkout_failure_rolls_back_failing_worktree() {
@@ -1671,6 +1763,54 @@ mod tests {
                 .any(|worktree| {
                     worktree.path == base_path
                         && worktree.branch.as_deref() == Some("feat/base")
+                        && worktree.locked_reason.is_none()
+                })
+        );
+    }
+
+    #[test]
+    fn final_unlock_failure_reports_concurrent_lock_change_after_successful_creation() {
+        let _lock = take_env_lock();
+        let fixture = FleetRepo::new("fleet-unlock-race");
+        let _cwd = CwdGuard::enter(&fixture.repo);
+        let base_path = git::worktree_path("feat/base").expect("base path");
+        let child_path = git::worktree_path("feat/child").expect("child path");
+        let mut calls = 0;
+
+        let error = ensure_with_adder(&[], false, |path, branch, lock_reason| {
+            calls += 1;
+            if calls == 2 {
+                git::worktree_unlock(&base_path).expect("unlock first ownership");
+                git::worktree_lock(&base_path, "replacement-lock")
+                    .expect("replace first ownership");
+            }
+            add_owned_worktree(path, branch, lock_reason)
+        })
+        .expect_err("changed ownership lock must fail final unlock");
+
+        assert!(
+            error
+                .to_string()
+                .contains("ownership locks could not be released")
+        );
+        assert!(error.to_string().contains("ownership lock changed"));
+        assert!(
+            git::worktree_list()
+                .expect("worktree list")
+                .iter()
+                .any(|worktree| {
+                    worktree.path == base_path
+                        && worktree.branch.as_deref() == Some("feat/base")
+                        && worktree.locked_reason.as_deref() == Some("replacement-lock")
+                })
+        );
+        assert!(
+            git::worktree_list()
+                .expect("worktree list")
+                .iter()
+                .any(|worktree| {
+                    worktree.path == child_path
+                        && worktree.branch.as_deref() == Some("feat/child")
                         && worktree.locked_reason.is_none()
                 })
         );
