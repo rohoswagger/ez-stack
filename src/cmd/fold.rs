@@ -628,6 +628,89 @@ mod tests {
     }
 
     #[test]
+    fn merge_fold_extra_rollback_reports_branch_restore_failure() {
+        let _lock = take_env_lock();
+        let fixture = FoldRepo::new("merge-fold-extra-fold-branch-rollback-error", true, false);
+        let _cwd = CwdGuard::enter(&fixture.repo);
+        run_cmd(
+            &fixture.repo,
+            "git",
+            &[
+                "worktree",
+                "remove",
+                fixture.target_worktree.to_str().expect("target path"),
+            ],
+        );
+        run_cmd(&fixture.repo, "git", &["branch", "-D", "feat/target"]);
+        let snapshot = FoldSnapshot {
+            original_state_path: StackState::state_path().expect("state path"),
+            original_state_bytes: std::fs::read(StackState::state_path().expect("state path"))
+                .expect("read state"),
+            target: "feat/target".to_string(),
+            target_sha: "not-a-sha".to_string(),
+            target_worktree: None,
+            parent: "feat/base".to_string(),
+            parent_sha: fixture.base_sha.clone(),
+            parent_worktree: Some(fixture.base_worktree.to_string_lossy().into_owned()),
+        };
+
+        let errors = rollback_fold(&snapshot);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("restore branch `feat/target`")),
+            "branch restore failure should be reported: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn merge_fold_extra_rollback_restores_parent_ref_without_worktree_and_reports_worktree_failure()
+    {
+        let _lock = take_env_lock();
+        let fixture = FoldRepo::new(
+            "merge-fold-extra-fold-worktree-rollback-error",
+            false,
+            false,
+        );
+        let _cwd = CwdGuard::enter(&fixture.repo);
+        let blocked_parent = fixture.repo.join("not-a-directory");
+        std::fs::write(&blocked_parent, "file blocks worktree parent\n")
+            .expect("create blocking file");
+        let blocked_worktree = blocked_parent.join("target");
+        run_cmd(
+            &fixture.repo,
+            "git",
+            &["branch", "-f", "feat/base", &fixture.target_sha],
+        );
+        let snapshot = FoldSnapshot {
+            original_state_path: StackState::state_path().expect("state path"),
+            original_state_bytes: std::fs::read(StackState::state_path().expect("state path"))
+                .expect("read state"),
+            target: "feat/target".to_string(),
+            target_sha: fixture.target_sha.clone(),
+            target_worktree: Some(blocked_worktree.to_string_lossy().into_owned()),
+            parent: "feat/base".to_string(),
+            parent_sha: fixture.base_sha.clone(),
+            parent_worktree: None,
+        };
+
+        let errors = rollback_fold(&snapshot);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("restore worktree")),
+            "worktree restore failure should be reported: {errors:?}"
+        );
+        assert_eq!(
+            command_output(&fixture.repo, &["rev-parse", "feat/base"]),
+            fixture.base_sha,
+            "parent ref should be restored by compare-and-swap rollback"
+        );
+    }
+
+    #[test]
     fn fold_validation_rejects_pr_backed_and_bottom_layers() {
         let pr_backed = FoldValidationInput {
             target: "feat/child",
