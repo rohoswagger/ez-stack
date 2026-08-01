@@ -250,9 +250,14 @@ cleanup candidate until you explicitly bring it under ez with `ez track` or
 Sync applies changes in a deliberate order: fetch and refresh trunk, clean
 finished managed layers, reparent their surviving children, preflight the
 remaining rebase ranges, restack the remaining graph, save local state, repair
-changed PR bases, and finally reconcile representable GitHub native stacks. If
-a rebase preflight blocks or a restack conflicts, the command finishes recovery
-and state persistence before returning, so the branch remains retryable.
+changed PR bases, and finally reconcile representable GitHub native stacks.
+Dirty tracked edits in the checked-out trunk worktree are preserved: compatible
+remote trunk advances keep those edits, and conflicting advances abort before
+cleanup, restack, state writes, PR edits, or GitHub native-stack mutation. To
+auto-stash those trunk edits, run `ez sync --autostash` from the dirty trunk
+worktree. If a rebase preflight blocks or a restack conflicts, the command
+finishes recovery and state persistence before returning, so the branch remains
+retryable.
 
 Before `ez restack`, `ez sync`, or `ez move` rewrites branch history, ez checks
 the exact commit range that would be replayed. Merge commits are blocked by
