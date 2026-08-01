@@ -119,6 +119,41 @@ fn run_ez_raw(dir: &Path, args: &[&str]) -> Output {
     run_raw(dir, env!("CARGO_BIN_EXE_ez"), args)
 }
 
+fn run_ez_with_fake_gh(dir: &Path, args: &[&str], script: &str, log_path: &Path) -> Output {
+    let fake_bin = std::env::temp_dir().join(format!(
+        "ez-worktree-mutation-fake-gh-{}-{}",
+        std::process::id(),
+        NEXT_TEMP_REPO_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&fake_bin).expect("create fake gh bin");
+    let gh = fake_bin.join("gh");
+    std::fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\n\
+             echo \"$@\" >> \"$EZ_TEST_GH_LOG\"\n\
+             {script}\n"
+        ),
+    )
+    .expect("write fake gh");
+    let mut permissions = std::fs::metadata(&gh).expect("stat fake gh").permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&gh, permissions).expect("chmod fake gh");
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fake_bin.clone()];
+    paths.extend(std::env::split_paths(&original_path));
+    let output = Command::new(env!("CARGO_BIN_EXE_ez"))
+        .args(args)
+        .current_dir(dir)
+        .env("NO_COLOR", "1")
+        .env("PATH", std::env::join_paths(paths).expect("join fake PATH"))
+        .env("EZ_TEST_GH_LOG", log_path)
+        .output()
+        .expect("run ez with fake gh");
+    std::fs::remove_dir_all(fake_bin).expect("remove fake gh bin");
+    output
+}
+
 fn run_ez_with_fake_dev_tools(
     dir: &Path,
     args: &[&str],
@@ -362,6 +397,27 @@ fn stdout_json(output: &Output) -> Value {
 
 fn stdout_text(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn save_stack_state(repo: &TempRepo, state: &Value) {
+    let common_dir = stdout_text(&run(&repo.path, "git", &["rev-parse", "--git-common-dir"]));
+    let common_dir = PathBuf::from(common_dir);
+    let common_dir = if common_dir.is_absolute() {
+        common_dir
+    } else {
+        repo.path.join(common_dir)
+    };
+    std::fs::write(
+        common_dir.join("ez/stack.json"),
+        serde_json::to_vec_pretty(state).expect("serialize stack state"),
+    )
+    .expect("write stack state");
+}
+
+fn set_pr_number(repo: &TempRepo, branch: &str, pr_number: u64) {
+    let mut state = repo.stack_state();
+    state["branches"][branch]["pr_number"] = Value::from(pr_number);
+    save_stack_state(repo, &state);
 }
 
 fn commit_file(dir: &Path, file: &str, contents: &str, message: &str) {
@@ -630,6 +686,81 @@ fn move_from_a_linked_worktree_restacks_descendant_worktrees() {
     assert_eq!(current_branch(&c_worktree), "feat/c");
     assert_eq!(status_porcelain(&b_worktree), "");
     assert_eq!(status_porcelain(&c_worktree), "");
+}
+
+#[test]
+fn move_rejects_self_and_descendant_targets_without_mutating_state() {
+    let repo = TempRepo::new();
+    let base_worktree = repo.create_worktree("feat/base", "main");
+    commit_file(&base_worktree, "base.txt", "base\n", "base");
+    let child_worktree = repo.create_worktree("feat/child", "feat/base");
+    commit_file(&child_worktree, "child.txt", "child\n", "child");
+    let state_before = repo.stack_state();
+    let base_before = branch_tip(&repo.path, "feat/base");
+    let child_before = branch_tip(&repo.path, "feat/child");
+
+    let self_output = run_ez_raw(&base_worktree, &["move", "--onto", "feat/base"]);
+
+    assert!(!self_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&self_output.stderr).contains("Cannot move a branch onto itself"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&self_output.stderr)
+    );
+    assert_eq!(repo.stack_state(), state_before);
+    assert_eq!(branch_tip(&repo.path, "feat/base"), base_before);
+    assert_eq!(branch_tip(&repo.path, "feat/child"), child_before);
+
+    let descendant_output = run_ez_raw(&base_worktree, &["move", "--onto", "feat/child"]);
+
+    assert!(!descendant_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&descendant_output.stderr)
+            .contains("is a descendant of `feat/base`"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&descendant_output.stderr)
+    );
+    assert_eq!(repo.stack_state(), state_before);
+    assert_eq!(current_branch(&base_worktree), "feat/base");
+    assert_eq!(current_branch(&child_worktree), "feat/child");
+}
+
+#[test]
+fn move_warns_when_pr_base_update_fails_but_persists_local_move() {
+    let repo = TempRepo::new();
+    let base_worktree = repo.create_worktree("feat/base", "main");
+    commit_file(&base_worktree, "base.txt", "base\n", "base");
+    let topic_worktree = repo.create_worktree("feat/topic", "feat/base");
+    commit_file(&topic_worktree, "topic.txt", "topic\n", "topic");
+    set_pr_number(&repo, "feat/topic", 123);
+    let gh_log = repo.path.join("gh.log");
+
+    let output = run_ez_with_fake_gh(
+        &topic_worktree,
+        &["move", "--onto", "main"],
+        "if [ \"$1 $2\" = \"pr edit\" ]; then\n  echo 'simulated edit failure' >&2\n  exit 1\nfi\nexit 97\n",
+        &gh_log,
+    );
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Failed to update PR base"),
+        "move should warn about the failed GitHub update:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&gh_log).expect("read gh log"),
+        "pr edit 123 --base main\n"
+    );
+    let state = repo.stack_state();
+    assert_eq!(state["branches"]["feat/topic"]["parent"], "main");
+    assert_eq!(
+        state["branches"]["feat/topic"]["parent_head"],
+        branch_tip(&repo.path, "main")
+    );
+    assert_ancestor(&repo.path, "main", "feat/topic");
+    assert_eq!(current_branch(&topic_worktree), "feat/topic");
+    assert_eq!(status_porcelain(&topic_worktree), "");
 }
 
 #[test]
