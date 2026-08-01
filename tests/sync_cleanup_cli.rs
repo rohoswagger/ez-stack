@@ -566,6 +566,67 @@ fn sync_autostash_restores_tracked_and_untracked_changes_after_restack_conflict(
 }
 
 #[test]
+fn sync_refuses_to_overwrite_dirty_trunk_when_remote_advances() {
+    let repo = init_repo(
+        "sync-cleanup-dirty-trunk-advance",
+        "main",
+        serde_json::json!({}),
+    );
+    add_branch(&repo, "feat/base", "main", "base.txt", 101);
+    run(&repo.path, "git", &["checkout", "main"]);
+    let old_main = git_output(&repo.path, &["rev-parse", "main"]);
+    let old_state = std::fs::read_to_string(repo.path.join(".git/ez/stack.json"))
+        .expect("read stack state before sync");
+
+    remote_main_change(
+        &repo,
+        "tracked.txt",
+        "upstream trunk edit\n",
+        "conflicting upstream trunk edit",
+    );
+    write_file(&repo.path, "tracked.txt", "local dirty trunk edit\n");
+
+    let output = run_ez(&repo, &repo.path, &["sync"], open_base_graphql());
+
+    assert!(
+        !output.status.success(),
+        "sync must abort before mutating a dirty trunk:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        git_output(&repo.path, &["rev-parse", "main"]),
+        old_main,
+        "local trunk ref must not move when dirty edits block the remote update"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path.join("tracked.txt")).expect("read dirty trunk file"),
+        "local dirty trunk edit\n"
+    );
+    let status = status_porcelain(&repo.path);
+    assert!(
+        status.lines().any(|line| line.ends_with(" tracked.txt")),
+        "{status}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path.join(".git/ez/stack.json"))
+            .expect("read stack state after sync"),
+        old_state,
+        "sync must not mutate stack metadata after a blocked trunk update"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Could not update trunk `main` from `origin/main`"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("commit or stash changes in the `main` worktree"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("ez sync --autostash"), "{stderr}");
+}
+
+#[test]
 fn sync_cleans_closed_unmerged_pr_with_pr_closed_reason_and_reparents_child() {
     let repo = init_repo("sync-cleanup-closed-pr", "main", serde_json::json!({}));
     add_branch(&repo, "feat/base", "main", "base.txt", 101);

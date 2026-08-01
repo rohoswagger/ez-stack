@@ -2,6 +2,7 @@ use anyhow::Result;
 
 use crate::cmd::native_stack::{self, SkippedNativeStackComponent};
 use crate::cmd::restack;
+use crate::error::EzError;
 use crate::git;
 use crate::github;
 use crate::stack::StackState;
@@ -380,7 +381,13 @@ fn run_sync_inner(force: bool) -> Result<()> {
             state.trunk, fetch_remote, state.trunk
         )),
         Ok(false) => {}
-        Err(e) => ui::warn(&format!("Could not update `{}` — {e}", state.trunk)),
+        Err(e) => {
+            return Err(EzError::UserMessage(format!(
+                "Could not update trunk `{}` from `{}/{}` without overwriting local changes.\n  → commit or stash changes in the `{}` worktree, or run `ez sync --autostash` from that worktree.\n\nUnderlying error: {e}",
+                state.trunk, fetch_remote, state.trunk, state.trunk
+            ))
+            .into());
+        }
     }
 
     // Build branch→worktree map for pruning merged branches.

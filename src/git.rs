@@ -1265,9 +1265,11 @@ pub fn update_branch_to_latest_remote(
     Ok(true)
 }
 
-/// Force-align a local branch to the fetched remote-tracking ref, discarding local
-/// divergence. This is intentionally stronger than `update_branch_to_latest_remote`
-/// and is used by `ez sync` so trunk matches the latest remote state exactly.
+/// Align a local branch to the fetched remote-tracking ref.
+///
+/// Checked-out branches move through `reset --keep` in their owning worktree so
+/// compatible dirty edits survive and destructive moves are refused. Branches
+/// not checked out anywhere are still ref-updated directly.
 pub fn reset_branch_to_latest_remote(
     remote: &str,
     branch: &str,
@@ -1281,9 +1283,13 @@ pub fn reset_branch_to_latest_remote(
     }
 
     if current_branch == branch {
-        hard_reset(&remote_tracking)?;
+        verify_worktree_branch_at(current_root, branch)?;
+        reset_keep_at(current_root, &remote_tracking)?;
+        verify_worktree_branch_at(current_root, branch)?;
     } else if let Some(branch_worktree) = branch_checked_out_elsewhere(branch, current_root)? {
-        hard_reset_at(&branch_worktree, &remote_tracking)?;
+        verify_worktree_branch_at(&branch_worktree, branch)?;
+        reset_keep_at(&branch_worktree, &remote_tracking)?;
+        verify_worktree_branch_at(&branch_worktree, branch)?;
     } else {
         fetch_refupdate(remote, branch)?;
     }
@@ -2008,6 +2014,69 @@ exit 0
         assert_eq!(
             std::fs::read_to_string(repo.join("tracked.txt")).expect("tracked"),
             "remote version\n"
+        );
+    }
+
+    #[test]
+    fn reset_branch_to_latest_remote_preserves_compatible_dirty_tracked_edit() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-reset-remote-dirty-compatible");
+        let remote = temp_dir("git-reset-remote-dirty-compatible-origin");
+        run_cmd(&remote, "git", &["init", "--bare", "--initial-branch=main"]);
+        run_cmd(
+            &repo,
+            "git",
+            &["remote", "add", "origin", remote.to_str().expect("remote")],
+        );
+        write_file(&repo, "other.txt", "base other\n");
+        run_cmd(&repo, "git", &["add", "other.txt"]);
+        run_cmd(&repo, "git", &["commit", "-m", "add other"]);
+        run_cmd(&repo, "git", &["push", "-u", "origin", "main"]);
+
+        let updater = temp_dir("git-reset-remote-dirty-compatible-updater");
+        run_cmd(
+            &std::env::temp_dir(),
+            "git",
+            &[
+                "clone",
+                remote.to_str().expect("remote"),
+                updater.to_str().expect("updater"),
+            ],
+        );
+        run_cmd(&updater, "git", &["config", "user.name", "Test User"]);
+        run_cmd(
+            &updater,
+            "git",
+            &["config", "user.email", "test@example.com"],
+        );
+        write_file(&updater, "other.txt", "remote other\n");
+        run_cmd(&updater, "git", &["add", "other.txt"]);
+        run_cmd(&updater, "git", &["commit", "-m", "remote advance other"]);
+        run_cmd(&updater, "git", &["push", "origin", "main"]);
+
+        let _cwd = CwdGuard::enter(&repo);
+        let old_main = rev_parse("main").expect("old main");
+        write_file(&repo, "tracked.txt", "compatible dirty edit\n");
+
+        fetch("origin").expect("fetch origin");
+        let updated =
+            reset_branch_to_latest_remote("origin", "main", "main", &repo_root().expect("root"))
+                .expect("reset branch");
+
+        assert!(updated);
+        assert_ne!(rev_parse("main").expect("post-reset"), old_main);
+        assert_eq!(
+            rev_parse("main").expect("main"),
+            rev_parse("origin/main").expect("origin/main")
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("tracked.txt")).expect("tracked"),
+            "compatible dirty edit\n"
+        );
+        let status = run_git(&["status", "--porcelain"]).expect("status");
+        assert!(
+            status.lines().any(|line| line.ends_with(" tracked.txt")),
+            "{status}"
         );
     }
 }
