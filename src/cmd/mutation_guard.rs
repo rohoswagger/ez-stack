@@ -476,7 +476,7 @@ mod tests {
         let hook = hooks.join("pre-commit");
         std::fs::write(
             &hook,
-            "#!/bin/sh\nprintf 'hook changed\\n' > hook-generated.txt\nexit 1\n",
+            "#!/bin/sh\nprintf 'hook changed\\n' > tracked.txt\nexit 1\n",
         )
         .expect("write pre-commit hook");
         let mut perms = std::fs::metadata(&hook)
@@ -485,6 +485,10 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&hook, perms).expect("chmod hook");
         write_file(&repo, "selected.txt", "selected\n");
+        assert!(
+            git::modified_files().is_empty(),
+            "fixture should start without unstaged tracked changes"
+        );
 
         let err = commit_with_guard(
             "feat: trigger hook failure",
@@ -499,7 +503,12 @@ mod tests {
             "unexpected hook error: {err:#}"
         );
         assert_eq!(
-            std::fs::read_to_string(repo.join("hook-generated.txt")).unwrap(),
+            git::modified_files(),
+            vec!["tracked.txt".to_string()],
+            "tracked hook edits should be visible to the warning reporter"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("tracked.txt")).unwrap(),
             "hook changed\n"
         );
     }
