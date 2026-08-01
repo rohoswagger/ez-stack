@@ -223,6 +223,24 @@ fn add_worktree(repo: &CleanupRepo, branch: &str) -> PathBuf {
     path
 }
 
+fn add_external_worktree(repo: &CleanupRepo, branch: &str) -> PathBuf {
+    let path = temp_dir(&format!(
+        "sync-cleanup-external-{}",
+        branch.replace('/', "-")
+    ));
+    run(
+        &repo.path,
+        "git",
+        &[
+            "worktree",
+            "add",
+            path.to_str().expect("worktree path"),
+            branch,
+        ],
+    );
+    path
+}
+
 fn branch_exists(repo: &CleanupRepo, branch: &str) -> bool {
     run_raw(
         &repo.path,
@@ -407,6 +425,58 @@ fn sync_from_cleaned_linked_worktree_prints_main_worktree_navigation_target() {
     assert_eq!(
         printed, expected,
         "sync should print shell navigation target"
+    );
+}
+
+#[test]
+fn sync_cleans_merged_branch_checked_out_in_external_linked_worktree() {
+    let repo = init_repo(
+        "sync-cleanup-external-worktree",
+        "main",
+        serde_json::json!({}),
+    );
+    add_branch(&repo, "feat/base", "main", "base.txt", 101);
+    add_branch(&repo, "feat/child", "feat/base", "child.txt", 102);
+    let worktree = add_external_worktree(&repo, "feat/base");
+    assert!(
+        !worktree.starts_with(repo.path.join(".worktrees")),
+        "regression must use a linked worktree outside the canonical worktree directory"
+    );
+
+    let output = run_ez(
+        &repo,
+        &repo.path,
+        &["sync"],
+        merged_base_open_child_graphql(),
+    );
+
+    assert!(
+        output.status.success(),
+        "sync failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!branch_exists(&repo, "feat/base"), "merged parent removed");
+    assert!(
+        !worktree.exists(),
+        "external linked worktree must be removed using git's worktree registry"
+    );
+    assert!(repo.path.exists(), "main worktree must remain intact");
+    assert_eq!(current_branch(&repo.path), "main");
+    assert!(
+        branch_exists(&repo, "feat/child"),
+        "surviving child remains"
+    );
+    let state = stack_state(&repo);
+    assert!(state["branches"].get("feat/base").is_none());
+    assert_eq!(state["branches"]["feat/child"]["parent"], "main");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(r#""action":"cleaned""#), "{stderr}");
+    assert!(stderr.contains(r#""branch":"feat/base""#), "{stderr}");
+    let log = std::fs::read_to_string(&repo.gh_log).expect("gh log");
+    assert!(
+        log.contains("pr edit 102 --base main"),
+        "child PR base should be repaired after external worktree cleanup:\n{log}"
     );
 }
 
