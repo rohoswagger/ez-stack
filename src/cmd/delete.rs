@@ -472,7 +472,9 @@ fn inside_worktree_delete_cancelled(target: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{CwdGuard, init_git_repo, run_cmd, take_env_lock, temp_dir};
+    use crate::test_support::{
+        CwdGuard, PathGuard, init_git_repo, install_fake_bin, run_cmd, take_env_lock, temp_dir,
+    };
 
     #[test]
     fn inside_worktree_path_matches_exact_and_nested() {
@@ -602,5 +604,76 @@ mod tests {
             .expect_err("unregistered path should fail claim verification");
 
         assert!(error.to_string().contains("path is no longer registered"));
+    }
+
+    #[test]
+    fn quarantine_claimed_worktree_reports_rename_failure() {
+        let original = temp_dir("delete-quarantine-rename-missing")
+            .join("missing")
+            .to_string_lossy()
+            .to_string();
+        let quarantine = temp_dir("delete-quarantine-rename-destination")
+            .join("quarantine")
+            .to_string_lossy()
+            .to_string();
+
+        let error = quarantine_claimed_worktree(&original, &quarantine, "feat/missing", "claim")
+            .expect_err("missing original path should fail quarantine");
+
+        assert!(error.to_string().contains("Could not quarantine"));
+        assert!(error.to_string().contains("feat/missing"));
+    }
+
+    #[test]
+    fn quarantine_claimed_worktree_restores_original_when_repair_fails() {
+        let _lock = take_env_lock();
+        let repo = init_git_repo("delete-quarantine-repair-source");
+        let _cwd = CwdGuard::enter(&repo);
+        let original = temp_dir("delete-quarantine-repair-original").join("original");
+        std::fs::create_dir_all(&original).expect("create original worktree path");
+        std::fs::write(original.join("user.txt"), "preserve\n").expect("write original file");
+        let quarantine = original
+            .parent()
+            .expect("original parent")
+            .join("quarantine")
+            .to_string_lossy()
+            .to_string();
+        let fake_bin = install_fake_bin(
+            "delete-quarantine-repair-fake-git",
+            "git",
+            "#!/bin/sh\n\
+             if [ \"$1 $2\" = \"worktree repair\" ]; then\n\
+             \techo 'simulated repair failure' >&2\n\
+             \texit 1\n\
+             fi\n\
+             exec \"$EZ_TEST_REAL_GIT\" \"$@\"\n",
+        );
+        let real_git = std::process::Command::new("which")
+            .arg("git")
+            .output()
+            .expect("which git");
+        assert!(real_git.status.success());
+        let real_git = String::from_utf8_lossy(&real_git.stdout).trim().to_string();
+        // SAFETY: this test holds the shared environment mutex.
+        unsafe {
+            std::env::set_var("EZ_TEST_REAL_GIT", real_git);
+        }
+        let _path = PathGuard::install(&fake_bin);
+
+        let error = quarantine_claimed_worktree(
+            original.to_str().expect("original path"),
+            &quarantine,
+            "feat/repair",
+            "claim",
+        )
+        .expect_err("repair failure should abort quarantine");
+
+        assert!(error.to_string().contains("Could not repair quarantined"));
+        assert!(original.exists());
+        assert_eq!(
+            std::fs::read_to_string(original.join("user.txt")).expect("read restored file"),
+            "preserve\n"
+        );
+        assert!(!Path::new(&quarantine).exists());
     }
 }
