@@ -300,7 +300,18 @@ Examples:
     },
 
     /// Fetch trunk, refresh it locally, and rebase stale branches onto their latest parent tips
-    Restack,
+    #[command(after_help = "\
+Examples:
+  ez restack
+  ez restack --force
+
+By default, ez blocks before rebasing branches whose replay range contains merge
+commits. Use --force only when you accept linearizing those merge commits.")]
+    Restack {
+        /// Permit rebase linearization of merge commits after the preflight warning
+        #[arg(long)]
+        force: bool,
+    },
 
     /// Move up one branch in the stack (toward child branches)
     #[command(after_help = "\
@@ -482,11 +493,16 @@ worktree, reparents children, and preserves remote branches.")]
     #[command(after_help = "\
 Examples:
   ez move --onto main
-  ez move --onto feat/base")]
+  ez move --onto feat/base
+  ez move --onto feat/base --force")]
     Move {
         /// New parent branch
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         onto: Option<String>,
+
+        /// Permit rebase linearization of merge commits in this branch or descendants
+        #[arg(long)]
+        force: bool,
     },
 
     /// Merge the bottom PR via GitHub (after each merge, restacked dependents are pushed with `--force-with-lease` so `--stack` can merge the next PR cleanly)
@@ -1357,7 +1373,10 @@ mod tests {
             .expect("parse move with missing onto value");
 
         match cli.command {
-            Commands::Move { onto } => assert_eq!(onto.as_deref(), Some("")),
+            Commands::Move { onto, force } => {
+                assert_eq!(onto.as_deref(), Some(""));
+                assert!(!force);
+            }
             _ => panic!("expected move command"),
         }
     }

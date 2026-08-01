@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 
+use crate::cmd::preflight;
 use crate::cmd::rebase_conflict;
 use crate::cmd::track;
 use crate::error::EzError;
@@ -60,34 +61,9 @@ impl RestackReport {
     }
 }
 
-/// Drop commits whose patches already landed in `parent`. Returns how many were redundant.
-fn drop_redundant_commits(branch: &str, parent: &str, current_root: &str) -> u64 {
-    let Ok(cherry) = git::cherry(parent, branch) else {
-        return 0;
-    };
-    let redundant = cherry.lines().filter(|l| l.starts_with("- ")).count() as u64;
-    if redundant == 0 {
-        return 0;
-    }
-
-    ui::info(&format!(
-        "Dropping {redundant} redundant commit(s) from `{branch}` (already in `{parent}`)",
-    ));
-    match git::rebase_for_branch(parent, branch, current_root) {
-        Ok(true) => ui::info(&format!("Dropped redundant commits from `{branch}`")),
-        Ok(false) => {
-            ui::warn(&format!(
-                "Could not auto-drop redundant commits from `{branch}` (conflict)"
-            ));
-            ui::hint(&format!(
-                "Run `git rebase {parent}` on `{branch}` manually and skip redundant commits"
-            ));
-        }
-        Err(e) => ui::warn(&format!(
-            "Could not clean up redundant commits from `{branch}`: {e}"
-        )),
-    }
-    redundant
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RestackOptions {
+    pub force: bool,
 }
 
 /// Resolve the branch's parent and its current tip, healing metadata that git has outgrown.
@@ -140,14 +116,28 @@ pub(crate) fn effective_old_base(
         }
     }
 
+    let merge_base = git::merge_base(parent, branch)
+        .ok()
+        .map(|base| base.trim().to_string())
+        .filter(|base| !base.is_empty());
+
     if !stored_parent_head.is_empty() && git::is_ancestor(stored_parent_head, branch) {
+        if let Some(base) = merge_base.as_deref() {
+            if stored_parent_head == base {
+                return (stored_parent_head.to_string(), false);
+            }
+            if git::is_ancestor(stored_parent_head, base) {
+                return (base.to_string(), true);
+            }
+        }
         return (stored_parent_head.to_string(), false);
     }
 
-    match git::merge_base(parent, branch) {
-        Ok(base) if !base.trim().is_empty() => (base.trim().to_string(), true),
-        _ => (stored_parent_head.to_string(), false),
+    if let Some(base) = merge_base {
+        return (base, true);
     }
+
+    (stored_parent_head.to_string(), false)
 }
 
 /// Leave the repo usable after a failed rebase so the next branch starts from a clean slate.
@@ -170,11 +160,22 @@ fn recover_after_failure(branch: &str, current_root: &str) {
 /// child) so a tip moved this pass is seen by its children in the same pass.
 ///
 /// Never returns `Err` — every problem lands in the report. Saving state is the caller's job.
-pub fn restack_branches(
+#[cfg(test)]
+fn restack_branches(
     state: &mut StackState,
     order: &[String],
     current_root: &str,
     cmd: &str,
+) -> RestackReport {
+    restack_branches_with_options(state, order, current_root, cmd, RestackOptions::default())
+}
+
+pub fn restack_branches_with_options(
+    state: &mut StackState,
+    order: &[String],
+    current_root: &str,
+    cmd: &str,
+    options: RestackOptions,
 ) -> RestackReport {
     let mut report = RestackReport::default();
 
@@ -233,6 +234,95 @@ pub fn restack_branches(
             ));
         }
 
+        let candidate = preflight::RebaseCandidate {
+            branch: branch_name.clone(),
+            destination_tip: current_parent_tip.clone(),
+            old_base: old_base.clone(),
+            derived_base: derived,
+        };
+        let branch_preflight = match preflight::inspect_candidate(&candidate) {
+            Ok(branch_preflight) => branch_preflight,
+            Err(e) => {
+                let detail = e.to_string();
+                ui::warn(&format!(
+                    "Could not preflight `{branch_name}` before restack: {detail}"
+                ));
+                report.failures.push(RestackFailure {
+                    branch: branch_name.clone(),
+                    parent,
+                    kind: RestackFailureKind::Error(detail),
+                });
+                continue;
+            }
+        };
+        if branch_preflight.merge_commits > 0 && !options.force {
+            let force_command = match cmd {
+                "restack" | "sync" | "move" => format!("ez {cmd} --force"),
+                _ => "ez restack --force".to_string(),
+            };
+            let detail = format!(
+                "{} merge commit(s) require `{force_command}` before rebase linearization",
+                branch_preflight.merge_commits,
+            );
+            ui::warn(&format!("Skipped `{branch_name}` — {detail}"));
+            ui::receipt(&serde_json::json!({
+                "cmd": cmd,
+                "branch": branch_name,
+                "action": "restack_failed",
+                "reason": "merge_commit_preflight",
+                "parent": parent,
+                "detail": detail,
+            }));
+            report.failures.push(RestackFailure {
+                branch: branch_name.clone(),
+                parent,
+                kind: RestackFailureKind::Error(detail),
+            });
+            continue;
+        }
+        if branch_preflight.all_redundant() {
+            let redundant_count = branch_preflight.cherry.redundant;
+            ui::info(&format!(
+                "Aligning `{branch_name}` to `{parent}` — {redundant_count} commit(s) already applied"
+            ));
+            match git::align_branch_to_target(
+                branch_name,
+                &current_parent_tip,
+                &branch_preflight.branch_tip,
+                current_root,
+            ) {
+                Ok(()) => {
+                    if let Ok(meta) = state.get_branch_mut(branch_name) {
+                        meta.parent_head = current_parent_tip;
+                    }
+                    report.restacked += 1;
+                    let after_sha = git::rev_parse(branch_name).unwrap_or_default();
+                    ui::receipt(&serde_json::json!({
+                        "cmd": cmd,
+                        "branch": branch_name,
+                        "action": "restacked",
+                        "method": "already_applied",
+                        "parent": parent,
+                        "before": &before_sha[..before_sha.len().min(7)],
+                        "after": &after_sha[..after_sha.len().min(7)],
+                        "redundant_commits": redundant_count,
+                    }));
+                }
+                Err(e) => {
+                    let detail = e.to_string();
+                    ui::warn(&format!(
+                        "Could not align `{branch_name}` to `{parent}`: {detail}"
+                    ));
+                    report.failures.push(RestackFailure {
+                        branch: branch_name.clone(),
+                        parent,
+                        kind: RestackFailureKind::Error(detail),
+                    });
+                }
+            }
+            continue;
+        }
+
         let sp = ui::spinner(&format!("Restacking `{branch_name}` onto `{parent}`..."));
         let outcome =
             git::rebase_onto_for_branch(&current_parent_tip, &old_base, branch_name, current_root);
@@ -246,7 +336,6 @@ pub fn restack_branches(
                 report.restacked += 1;
                 ui::info(&format!("Restacked `{branch_name}` onto `{parent}`"));
 
-                let redundant_count = drop_redundant_commits(branch_name, &parent, current_root);
                 let after_sha = git::rev_parse(branch_name).unwrap_or_default();
                 ui::receipt(&serde_json::json!({
                     "cmd": cmd,
@@ -255,7 +344,7 @@ pub fn restack_branches(
                     "parent": parent,
                     "before": &before_sha[..before_sha.len().min(7)],
                     "after": &after_sha[..after_sha.len().min(7)],
-                    "redundant_commits": redundant_count,
+                    "redundant_commits": branch_preflight.cherry.redundant,
                 }));
             }
             Ok(git::RebaseOutcome::Conflict(conflict)) => {
@@ -357,8 +446,26 @@ pub fn cascade_restack(
     return_to: &str,
     cmd: &str,
 ) -> Result<usize> {
+    cascade_restack_with_options(
+        state,
+        root,
+        current_root,
+        return_to,
+        cmd,
+        RestackOptions::default(),
+    )
+}
+
+pub fn cascade_restack_with_options(
+    state: &mut StackState,
+    root: &str,
+    current_root: &str,
+    return_to: &str,
+    cmd: &str,
+    options: RestackOptions,
+) -> Result<usize> {
     let order = state.descendants_topo(root);
-    let report = restack_branches(state, &order, current_root, cmd);
+    let report = restack_branches_with_options(state, &order, current_root, cmd, options);
 
     if !report.is_clean() {
         state.save()?;
@@ -369,7 +476,7 @@ pub fn cascade_restack(
     Ok(report.restacked)
 }
 
-pub fn run() -> Result<()> {
+pub fn run(force: bool) -> Result<()> {
     let mut state = StackState::load()?;
     if let Some(root) = git::current_linked_worktree_root()? {
         ui::linked_worktree_warning(&root);
@@ -392,7 +499,15 @@ pub fn run() -> Result<()> {
     }
 
     let order = state.topo_order();
-    let report = restack_branches(&mut state, &order, &current_root, "restack");
+    let candidates = preflight::restack_candidates(&state, &order);
+    preflight::run("restack", force, &candidates)?;
+    let report = restack_branches_with_options(
+        &mut state,
+        &order,
+        &current_root,
+        "restack",
+        RestackOptions { force },
+    );
 
     // Return to the original branch and persist whatever succeeded before surfacing failures.
     git::checkout(&original_branch)?;

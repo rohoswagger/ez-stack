@@ -172,6 +172,84 @@ fn update_reparented_pr_bases(
     all_updated
 }
 
+struct SyncFinalize<'a> {
+    original_branch: &'a str,
+    shell_cd_path: Option<String>,
+    cleaned_current_worktree: bool,
+    cleaned: &'a [String],
+    restacked: usize,
+    skipped: usize,
+    reparented_branches: &'a std::collections::BTreeSet<String>,
+    reconcile_native: bool,
+}
+
+fn finalize_sync_after_mutations(state: &StackState, finalize: SyncFinalize<'_>) -> Result<()> {
+    state.save()?;
+
+    // Return to original branch if it still exists.
+    // If it was cleaned up (merged), fall back to trunk — but trunk might be in another worktree.
+    if finalize.cleaned_current_worktree {
+        ui::info(&format!(
+            "Current worktree `{}` was cleaned up — switched context to repo root",
+            finalize.original_branch
+        ));
+    } else if git::branch_exists(finalize.original_branch) {
+        let _ = git::checkout(finalize.original_branch);
+    } else {
+        match git::checkout(&state.trunk) {
+            Ok(()) => ui::info(&format!(
+                "Previous branch `{}` was cleaned up — switched to `{}`",
+                finalize.original_branch, state.trunk
+            )),
+            Err(_) => ui::warn(&format!(
+                "Previous branch `{}` was cleaned up. Switch to another branch manually \
+                 (trunk may be checked out in another worktree).",
+                finalize.original_branch
+            )),
+        }
+    }
+
+    if finalize.skipped > 0 {
+        ui::info(&format!(
+            "Synced ({} cleaned, {} restacked, {} skipped)",
+            finalize.cleaned.len(),
+            finalize.restacked,
+            finalize.skipped
+        ));
+    } else if finalize.cleaned.is_empty() && finalize.restacked == 0 {
+        ui::info("Everything is up to date");
+    } else {
+        ui::success(&format!(
+            "Synced ({} cleaned, {} restacked)",
+            finalize.cleaned.len(),
+            finalize.restacked
+        ));
+    }
+
+    // Prune stale worktree admin entries.
+    let _ = git::worktree_prune();
+
+    if let Some(path) = finalize.shell_cd_path {
+        println!("{path}");
+    }
+
+    if update_reparented_pr_bases(state, finalize.reparented_branches) && finalize.reconcile_native
+    {
+        reconcile_native_stacks(state);
+    } else if finalize.reconcile_native {
+        ui::warn(
+            "GitHub native stack update skipped because one or more PR bases could not be updated",
+        );
+        ui::receipt(&serde_json::json!({
+            "cmd": "sync",
+            "native_stack_action": "skipped",
+            "native_stack_reason": "pr_base_update_failed",
+        }));
+    }
+
+    Ok(())
+}
+
 pub fn run(dry_run: bool, autostash: bool, force: bool) -> Result<()> {
     let state = StackState::load()?;
     let _lease_guard = if dry_run {
@@ -552,76 +630,55 @@ fn run_sync_inner(force: bool) -> Result<()> {
         cleaned.push(branch_name.clone());
     }
 
+    let order = state.topo_order();
+    let candidates = crate::cmd::preflight::restack_candidates(&state, &order);
+    let preflight_error = crate::cmd::preflight::run("sync", force, &candidates).err();
+    if let Some(err) = preflight_error {
+        finalize_sync_after_mutations(
+            &state,
+            SyncFinalize {
+                original_branch: &original_branch,
+                shell_cd_path,
+                cleaned_current_worktree,
+                cleaned: &cleaned,
+                restacked: 0,
+                skipped: candidates.len(),
+                reparented_branches: &reparented_branches,
+                reconcile_native: true,
+            },
+        )?;
+        return Err(err);
+    }
+
     // Restack remaining branches. Each branch is attempted independently: one branch that
     // conflicts or refuses to rebase is reported and skipped, and the rest of the stack still
     // gets synced. Failures are surfaced at the very end, after state is saved and the original
     // branch restored, so a stuck branch never leaves the repo mid-rebase.
-    let order = state.topo_order();
-    let report = restack::restack_branches(&mut state, &order, &original_root, "sync");
+    let report = restack::restack_branches_with_options(
+        &mut state,
+        &order,
+        &original_root,
+        "sync",
+        restack::RestackOptions { force },
+    );
     let restacked = report.restacked;
 
-    state.save()?;
-
-    // Return to original branch if it still exists.
-    // If it was cleaned up (merged), fall back to trunk — but trunk might be in another worktree.
-    if cleaned_current_worktree {
-        ui::info(&format!(
-            "Current worktree `{original_branch}` was cleaned up — switched context to repo root"
-        ));
-    } else if git::branch_exists(&original_branch) {
-        let _ = git::checkout(&original_branch);
-    } else {
-        match git::checkout(&state.trunk) {
-            Ok(()) => ui::info(&format!(
-                "Previous branch `{original_branch}` was cleaned up — switched to `{}`",
-                state.trunk
-            )),
-            Err(_) => ui::warn(&format!(
-                "Previous branch `{original_branch}` was cleaned up. Switch to another branch manually \
-                 (trunk may be checked out in another worktree)."
-            )),
-        }
-    }
-
-    if !report.is_clean() {
-        ui::info(&format!(
-            "Synced ({} cleaned, {} restacked, {} skipped)",
-            cleaned.len(),
+    finalize_sync_after_mutations(
+        &state,
+        SyncFinalize {
+            original_branch: &original_branch,
+            shell_cd_path,
+            cleaned_current_worktree,
+            cleaned: &cleaned,
             restacked,
-            report.failures.len()
-        ));
-    } else if cleaned.is_empty() && restacked == 0 {
-        ui::info("Everything is up to date");
-    } else {
-        ui::success(&format!(
-            "Synced ({} cleaned, {} restacked)",
-            cleaned.len(),
-            restacked
-        ));
-    }
-
-    // Prune stale worktree admin entries.
-    let _ = git::worktree_prune();
-
-    if let Some(path) = shell_cd_path {
-        println!("{path}");
-    }
+            skipped: report.failures.len(),
+            reparented_branches: &reparented_branches,
+            reconcile_native: report.is_clean(),
+        },
+    )?;
 
     if !report.is_clean() {
         anyhow::bail!(restack::incomplete_error("sync", &report));
-    }
-
-    if update_reparented_pr_bases(&state, &reparented_branches) {
-        reconcile_native_stacks(&state);
-    } else {
-        ui::warn(
-            "GitHub native stack update skipped because one or more PR bases could not be updated",
-        );
-        ui::receipt(&serde_json::json!({
-            "cmd": "sync",
-            "native_stack_action": "skipped",
-            "native_stack_reason": "pr_base_update_failed",
-        }));
     }
 
     Ok(())

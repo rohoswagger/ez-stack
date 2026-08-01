@@ -237,6 +237,8 @@ Intended workflow:
 | `ez sync --autostash` | Stash before sync, restore after |
 | `ez sync --dry-run` | Preview what sync would do |
 | `ez restack` | Fetch trunk, refresh it locally, and rebase stale branches onto their latest parent tips |
+| `ez restack --force` | Permit merge-commit linearization after the rebase preflight warning |
+| `ez move --onto <branch> --force` | Permit merge-commit linearization while moving this branch and restacking descendants |
 
 #### Sync safety contract
 
@@ -246,11 +248,20 @@ cleanup candidate until you explicitly bring it under ez with `ez track` or
 `ez adopt`.
 
 Sync applies changes in a deliberate order: fetch and refresh trunk, clean
-finished managed layers, reparent their surviving children, restack the
-remaining graph, save local state, repair changed PR bases, and finally
-reconcile representable GitHub native stacks. If a restack conflicts, the
-command finishes recovery and state persistence before returning exit code 3,
-so the branch remains retryable.
+finished managed layers, reparent their surviving children, preflight the
+remaining rebase ranges, restack the remaining graph, save local state, repair
+changed PR bases, and finally reconcile representable GitHub native stacks. If
+a rebase preflight blocks or a restack conflicts, the command finishes recovery
+and state persistence before returning, so the branch remains retryable.
+
+Before `ez restack`, `ez sync`, or `ez move` rewrites branch history, ez checks
+the exact commit range that would be replayed. Merge commits are blocked by
+default because ordinary rebase linearizes them; use `--force` only when that is
+the intended outcome. The preflight also reports stale `parent_head` metadata
+that was safely derived from the current Git graph rather than trusted blindly.
+If every commit in a replay range is already present on the destination parent,
+ez skips `git rebase` entirely and aligns the branch tip to the parent with a
+worktree-safe `reset --keep`/compare-and-swap ref move.
 
 | Condition | `ez sync` result |
 |-----------|------------------|
@@ -258,12 +269,14 @@ so the branch remains retryable.
 | Managed branch was deleted outside ez | Repair stack state and reparent its children without requiring the missing ref |
 | Linked worktree has uncommitted changes | Keep the worktree, branch, and stack entry; emit `cleanup_skipped` |
 | `--force` with an uncommitted managed worktree | Discard that worktree's changes and complete cleanup |
+| `--force` with merge commits in a replay range | Proceed with rebase linearization after emitting a `rebase_preflight` receipt |
 | Worktree has an active ez lease or foreign Git lock | Always keep it, including with `--force`; emit `cleanup_skipped` |
 | Sync is invoked inside a worktree that gets cleaned | Print the main worktree path for shell integration to enter safely |
+| Rebase preflight blocks merge commits | Preserve already-completed cleanup/reparenting, repair PR bases, and return exit code 5 |
 | `--autostash` and restacking fails | Restore tracked and untracked user changes, preserve retryable state, and return exit code 3 |
 
-Every cleanup, skip, PR-base repair, and native-stack outcome also emits a
-structured receipt on stderr for automation and debugging.
+Every cleanup, skip, rebase preflight, restack, PR-base repair, and native-stack
+outcome also emits a structured receipt on stderr for automation and debugging.
 
 ### Navigation
 
@@ -480,7 +493,7 @@ See [SKILL.md](./SKILL.md) for the full agent workflow, and [reference.md](./ref
 
 - **Worktrees** give each agent an isolated copy of the repo with its own branch
 - **Stack metadata** in `.git/ez/stack.json` tracks branch parents and PR numbers
-- **Auto-restacking** via `git rebase --onto` keeps children up to date when parents change
+- **Auto-restacking** via preflighted `git rebase --onto` keeps children up to date when parents change
 - **Mutation receipts** (JSON on stderr) let agents verify every operation
 - **Progressive help** — `ez`, `ez <cmd>`, `ez <cmd> --help` each give more detail
 

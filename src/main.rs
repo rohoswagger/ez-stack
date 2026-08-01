@@ -209,7 +209,7 @@ fn run(cli: Cli) -> Result<()> {
             autostash,
             force,
         } => cmd::sync::run(dry_run, autostash, force),
-        Commands::Restack => cmd::restack::run(),
+        Commands::Restack { force } => cmd::restack::run(force),
         Commands::Up { branch } => cmd::navigate::up(branch.as_deref()),
         Commands::Down { branch } => cmd::navigate::down(branch.as_deref()),
         Commands::Top => cmd::navigate::top(),
@@ -226,7 +226,7 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Track { branch, parent } => cmd::track::run(branch, parent),
         Commands::Delete { branch, force, yes } => cmd::delete::run(branch.as_deref(), force, yes),
         Commands::Fold { branch, yes } => cmd::fold::run(branch.as_deref(), yes),
-        Commands::Move { onto } => cmd::move_branch::run(onto.as_deref()),
+        Commands::Move { onto, force } => cmd::move_branch::run(onto.as_deref(), force),
         Commands::Merge { method, yes, stack } => cmd::merge::run(&method, yes, stack),
         Commands::PrEdit {
             title,
