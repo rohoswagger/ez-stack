@@ -349,7 +349,9 @@ fn status_native_stack_reports_in_sync_remote_and_local_chain() {
     );
     assert_eq!(
         stack_request_lines(&repo),
-        vec!["api repos/org/repo/stacks?pull_request=102 -H X-GitHub-Api-Version: 2026-03-10"]
+        vec![
+            "api repos/org/repo/stacks?pull_request=102 -H X-GitHub-Api-Version: 2026-03-10 -H Accept: application/vnd.github+json"
+        ]
     );
 }
 
@@ -447,6 +449,8 @@ fn log_native_stack_queries_once_per_local_chain_and_reports_each_position() {
     assert_eq!(entries[1]["native_stack"]["github"]["position"], 2);
     assert_eq!(
         stack_request_lines(&repo),
-        vec!["api repos/org/repo/stacks?pull_request=102 -H X-GitHub-Api-Version: 2026-03-10"]
+        vec![
+            "api repos/org/repo/stacks?pull_request=102 -H X-GitHub-Api-Version: 2026-03-10 -H Accept: application/vnd.github+json"
+        ]
     );
 }

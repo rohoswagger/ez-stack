@@ -284,7 +284,8 @@ Examples:
   ez sync
   ez sync --autostash
   ez sync --dry-run
-  ez sync --force")]
+  ez sync --force
+  ez sync --repair-native-stack")]
     Sync {
         /// Show what sync would do without making changes
         #[arg(long)]
@@ -297,6 +298,10 @@ Examples:
         /// Force-remove worktrees and branches even if they have uncommitted changes
         #[arg(long)]
         force: bool,
+
+        /// Explicitly dissolve and recreate divergent GitHub native stacks
+        #[arg(long)]
+        repair_native_stack: bool,
     },
 
     /// Fetch trunk, refresh it locally, and rebase stale branches onto their latest parent tips
@@ -1257,6 +1262,27 @@ mod tests {
                 assert!(json);
             }
             _ => panic!("expected worktree ensure command"),
+        }
+    }
+
+    #[test]
+    fn parses_sync_repair_native_stack_flag() {
+        let cli = Cli::try_parse_from(["ez", "sync", "--repair-native-stack"])
+            .expect("parse sync repair native stack");
+
+        match cli.command {
+            Commands::Sync {
+                dry_run,
+                autostash,
+                force,
+                repair_native_stack,
+            } => {
+                assert!(!dry_run);
+                assert!(!autostash);
+                assert!(!force);
+                assert!(repair_native_stack);
+            }
+            _ => panic!("expected sync command"),
         }
     }
 

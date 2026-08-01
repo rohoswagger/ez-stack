@@ -53,6 +53,7 @@ When `.git/ez/stack.json` exists, prefer these commands:
 - Push current branch and create/update PR: `ez push`
 - Push the stack: `ez submit`
 - Sync after trunk changes or merges: `ez sync` or `ez sync --autostash`
+- Repair a divergent GitHub native stack only when explicitly requested: `ez sync --repair-native-stack`
 - Adopt branches from GitHub PRs: `ez adopt` or `ez adopt --pr 42`
 - Inspect state programmatically: `ez status --json` and `ez log --json`
 
@@ -107,6 +108,9 @@ ez parent
 
 # Sync safely with a dirty working tree
 ez sync --autostash
+
+# Explicit remote repair; may dissolve and recreate a representable GitHub native stack
+ez sync --repair-native-stack
 
 # Read current stack state as JSON
 ez status --json

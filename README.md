@@ -236,6 +236,7 @@ Intended workflow:
 | `ez sync` | Fetch trunk, clean merged branches/worktrees, restack, and reconcile representable GitHub native stacks |
 | `ez sync --autostash` | Stash before sync, restore after |
 | `ez sync --dry-run` | Preview what sync would do |
+| `ez sync --repair-native-stack` | Explicitly dissolve and recreate divergent representable GitHub native stacks |
 | `ez restack` | Fetch trunk, refresh it locally, and rebase stale branches onto their latest parent tips |
 | `ez restack --force` | Permit merge-commit linearization after the rebase preflight warning |
 | `ez move --onto <branch> --force` | Permit merge-commit linearization while moving this branch and restacking descendants |
@@ -258,6 +259,20 @@ auto-stash those trunk edits, run `ez sync --autostash` from the dirty trunk
 worktree. If a rebase preflight blocks or a restack conflicts, the command
 finishes recovery and state persistence before returning, so the branch remains
 retryable.
+
+By default, native-stack reconciliation is non-destructive: divergent GitHub
+native stacks are reported with an actionable receipt and left unchanged. Use
+`ez sync --repair-native-stack` only when you explicitly want ez to repair a
+representable exact 2+ PR chain by asking GitHub to unstack the divergent native
+stack and recreate it in ez's local order. If GitHub reports a queued or locked
+stack, or if recreation fails after a dissolve, explicit repair returns a
+nonzero error after emitting the native-stack receipt. Concurrent GitHub updates
+are handled by bounded re-reads before retrying; fork/cross-repository stacks
+and branching local graphs are skipped without native-stack mutation.
+
+`ez sync --dry-run --repair-native-stack` performs no GitHub calls. It previews
+the exact PR chains that would be repaired and prints the matching
+`ez sync --repair-native-stack` retry hint.
 
 Before `ez restack`, `ez sync`, or `ez move` rewrites branch history, ez checks
 the exact commit range that would be replayed. Merge commits are blocked by

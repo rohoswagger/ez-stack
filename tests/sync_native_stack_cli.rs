@@ -160,6 +160,8 @@ if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=101" ]; then
     extend) printf '[{"number":88,"pull_requests":[{"number":101},{"number":102}]}]\n'; exit 0 ;;
     unavailable) printf 'HTTP 404: Not Found\n' >&2; exit 1 ;;
     divergence) printf '[{"number":88,"pull_requests":[{"number":101},{"number":999}]}]\n'; exit 0 ;;
+    repair) printf '[{"number":88,"pull_requests":[{"number":101},{"number":999}]}]\n'; exit 0 ;;
+    repair_retained_divergent) printf '[{"number":88,"pull_requests":[{"number":101},{"number":999}]}]\n'; exit 0 ;;
     stale_longer) printf '[{"number":88,"pull_requests":[{"number":101},{"number":102},{"number":999}]}]\n'; exit 0 ;;
   esac
 fi
@@ -169,12 +171,24 @@ if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request=102" ] && { 
 fi
 if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "POST" ] && [ "$4" = "repos/org/repo/stacks" ]; then
   cat > "$GH_PAYLOAD"
+  if [ "$GH_MODE" = "repair" ]; then
+    printf '{"number":89,"pull_requests":[{"number":101},{"number":102}]}\n'
+    exit 0
+  fi
   printf '{"number":88,"pull_requests":[{"number":101},{"number":102}]}\n'
   exit 0
 fi
 if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "POST" ] && [ "$4" = "repos/org/repo/stacks/88/add" ]; then
   cat > "$GH_PAYLOAD"
   printf '{"number":88}\n'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "POST" ] && [ "$4" = "repos/org/repo/stacks/88/unstack" ]; then
+  cat >/dev/null
+  if [ "$GH_MODE" = "repair_retained_divergent" ]; then
+    printf '{"number":88,"pull_requests":[{"number":101},{"number":999}]}\n'
+    exit 0
+  fi
   exit 0
 fi
 printf 'unexpected gh invocation: %s\n' "$*" >&2
@@ -434,6 +448,73 @@ fn sync_reports_divergence_without_overwriting_github_stack() {
             .contains("retry `ez sync`")
     );
     assert!(!repo.payload.exists(), "divergence must not mutate GitHub");
+    let log = std::fs::read_to_string(&repo.gh_log).expect("gh log");
+    assert!(
+        !log.contains("/unstack") && !log.contains("-X POST repos/org/repo/stacks --input -"),
+        "default sync must not repair divergent native stacks:\n{log}"
+    );
+}
+
+#[test]
+fn sync_repair_native_stack_dissolves_and_recreates_divergent_stack() {
+    let repo = init_linear_sync_repo();
+
+    let output = run_ez(&repo, &["sync", "--repair-native-stack"], "repair");
+
+    assert!(
+        output.status.success(),
+        "native repair should not fail sync:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&repo.payload).expect("native payload"))
+            .expect("payload JSON"),
+        serde_json::json!({"pull_requests": [101, 102]})
+    );
+    let repaired = receipt(&output, "repaired");
+    assert_eq!(repaired["native_stack_previous_number"], 88);
+    assert_eq!(repaired["native_stack_number"], 89);
+
+    let log = std::fs::read_to_string(&repo.gh_log).expect("gh log");
+    let unstack = log
+        .find("-X POST repos/org/repo/stacks/88/unstack")
+        .expect("unstack call");
+    let create = log
+        .find("-X POST repos/org/repo/stacks --input -")
+        .expect("recreate call");
+    assert!(
+        unstack < create,
+        "repair must dissolve before recreate:\n{log}"
+    );
+}
+
+#[test]
+fn sync_repair_native_stack_retained_divergent_fails_without_create() {
+    let repo = init_linear_sync_repo();
+
+    let output = run_ez(
+        &repo,
+        &["sync", "--repair-native-stack"],
+        "repair_retained_divergent",
+    );
+
+    assert!(
+        !output.status.success(),
+        "native repair failure should fail explicit repair sync:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let error = receipt(&output, "error");
+    assert!(
+        error["native_stack_error"]
+            .as_str()
+            .expect("error text")
+            .contains("queued or locked"),
+        "unexpected error receipt: {error}"
+    );
+    assert!(
+        !repo.payload.exists(),
+        "retained divergent stack must not be recreated"
+    );
 }
 
 #[test]
@@ -485,6 +566,28 @@ fn sync_does_not_flatten_branching_worktree_graph_into_github_stack() {
     assert!(
         !log.contains("stacks?pull_request="),
         "branching graph must not reach native stack API:\n{log}"
+    );
+    assert!(!repo.payload.exists());
+}
+
+#[test]
+fn sync_repair_native_stack_does_not_flatten_branching_worktree_graph() {
+    let repo = init_linear_sync_repo();
+    add_branch(&repo, "feat/c", "feat/a", "c.txt", 103);
+
+    let output = run_ez(&repo, &["sync", "--repair-native-stack"], "repair");
+
+    assert!(
+        output.status.success(),
+        "branch-aware repair sync failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let skipped = receipt(&output, "skipped");
+    assert_eq!(skipped["native_stack_reason"], "branching_component");
+    let log = std::fs::read_to_string(&repo.gh_log).expect("gh log");
+    assert!(
+        !log.contains("stacks?pull_request=") && !log.contains("/unstack"),
+        "unrepresentable graph must not reach native stack API:\n{log}"
     );
     assert!(!repo.payload.exists());
 }
@@ -625,4 +728,99 @@ fn sync_dry_run_previews_native_chain_without_fetching_or_calling_github() {
     );
     assert!(!repo.gh_log.exists(), "dry-run must not invoke gh");
     assert!(!repo.payload.exists(), "dry-run must not mutate GitHub");
+}
+
+#[test]
+fn sync_dry_run_repair_previews_without_fetching_or_calling_github() {
+    let repo = init_linear_sync_repo();
+
+    let output = run_ez(
+        &repo,
+        &["sync", "--dry-run", "--repair-native-stack"],
+        "repair",
+    );
+
+    assert!(
+        output.status.success(),
+        "dry-run repair failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Would repair GitHub native stack for PRs [101, 102]")
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Run `ez sync --repair-native-stack` (without --dry-run)")
+    );
+    assert!(!repo.gh_log.exists(), "dry-run must not invoke gh");
+    assert!(!repo.payload.exists(), "dry-run must not mutate GitHub");
+}
+
+#[test]
+fn sync_dry_run_previews_registered_external_worktree_outside_dot_worktrees() {
+    let repo = init_linear_sync_repo();
+    let external_worktree = temp_dir("sync-native-external-worktree");
+    run(
+        &repo.path,
+        "git",
+        &[
+            "worktree",
+            "add",
+            external_worktree.to_str().expect("external worktree path"),
+            "feat/a",
+        ],
+    );
+
+    let output = run_ez(&repo, &["sync", "--dry-run"], "create");
+    let expected_worktree = std::fs::canonicalize(&external_worktree)
+        .unwrap_or(external_worktree.clone())
+        .display()
+        .to_string();
+
+    assert!(
+        output.status.success(),
+        "dry-run failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains(&format!("Would remove worktree at `{}`", expected_worktree)),
+        "dry-run should trust Git's worktree registry:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = run_raw(
+        &repo.path,
+        "git",
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            external_worktree.to_str().expect("external worktree path"),
+        ],
+    );
+}
+
+#[test]
+fn sync_repair_native_stack_skips_fork_workflow_without_stack_api() {
+    let repo = init_linear_sync_repo();
+    let mut state = stack_state(&repo);
+    state["repo"] = serde_json::json!("upstream-owner/project");
+    state["fork_repo"] = serde_json::json!("fork-owner/project");
+    save_stack_state(&repo, &state);
+
+    let output = run_ez(&repo, &["sync", "--repair-native-stack"], "repair");
+
+    assert!(
+        output.status.success(),
+        "fork repair sync failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(receipt(&output, "not_applicable")["cmd"], "sync");
+    let log = std::fs::read_to_string(&repo.gh_log).expect("gh log");
+    assert!(
+        !log.contains("stacks?pull_request=") && !log.contains("/unstack"),
+        "fork workflow must not use same-repository native stack API:\n{log}"
+    );
+    assert!(!repo.payload.exists());
 }
