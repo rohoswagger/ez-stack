@@ -514,6 +514,44 @@ fi
 }
 
 #[test]
+fn push_prefills_body_with_repo_pr_template() {
+    let script_body = r#"
+if [ "$1" = "repo" ] && [ "$2" = "view" ] && [ "$3" = "--json" ] && [ "$4" = "nameWithOwner" ] && [ "$5" = "-q" ] && [ "$6" = ".nameWithOwner" ]; then
+  printf 'org/repo\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "feat/topic" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName" ]; then
+  printf 'no pull request found\n' >&2
+  exit 1
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ] && [ "$3" = "--title" ] && [ "$4" = "feat/topic" ] && [ "$5" = "--body" ] && [ "$6" = "$(printf '## Description\n\nFill me in.')" ] && [ "$7" = "--base" ] && [ "$8" = "main" ] && [ "$9" = "--head" ] && [ "${10}" = "feat/topic" ] && [ "${11}" = "--draft" ]; then
+  printf 'https://github.com/org/repo/pull/42\n'
+  exit 0
+fi
+"#;
+    let (repo, worktree) = init_single_branch_repo("core-push-template", script_body);
+    std::fs::create_dir_all(worktree.join(".github")).expect("create .github dir");
+    write_file(
+        &worktree,
+        ".github/pull_request_template.md",
+        "## Description\n\nFill me in.\n",
+    );
+
+    let output = run_ez_with_fake_gh(&repo, &worktree, &["push", "--draft"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stack_state(&repo.path)["branches"]["feat/topic"]["pr_number"],
+        Value::from(42)
+    );
+    let log = gh_log(&repo);
+    assert!(
+        log.contains("## Description"),
+        "expected pr create to pre-fill the repo PR template:\n{log}"
+    );
+}
+
+#[test]
 fn draft_and_ready_emit_exact_github_calls() {
     let script_body = r#"
 if [ "$1" = "pr" ] && [ "$2" = "ready" ] && [ "$3" = "--undo" ] && [ "$4" = "42" ]; then

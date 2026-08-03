@@ -107,6 +107,40 @@ pub fn body_from_file(path: &str) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("failed to read body file `{path}`"))
 }
 
+/// Candidate locations GitHub checks for a pull request template.
+const PR_TEMPLATE_CANDIDATES: &[&str] = &[
+    ".github/PULL_REQUEST_TEMPLATE.md",
+    ".github/pull_request_template.md",
+    ".github/PULL_REQUEST_TEMPLATE/pull_request_template.md",
+    ".github/PULL_REQUEST_TEMPLATE/PULL_REQUEST_TEMPLATE.md",
+    "PULL_REQUEST_TEMPLATE.md",
+    "pull_request_template.md",
+    "docs/PULL_REQUEST_TEMPLATE.md",
+];
+
+/// Best-effort read of the repository's pull request template, if any.
+///
+/// GitHub pre-fills the body of a new PR with the repo's template when it is
+/// created through the web UI. `ez push`/`ez submit` mirror that behavior so a
+/// new PR is born with the template filled in rather than a bare one-liner.
+///
+/// Returns `None` (rather than an error) when no template exists, it is empty,
+/// or it cannot be read, so callers can fall back to the default body.
+pub fn read_pr_template() -> Option<String> {
+    let root = crate::git::repo_root().ok()?;
+    for candidate in PR_TEMPLATE_CANDIDATES {
+        let Ok(content) = std::fs::read_to_string(std::path::Path::new(&root).join(candidate))
+        else {
+            continue;
+        };
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
 pub fn create_pr(
     title: &str,
     body: &str,
@@ -1038,7 +1072,9 @@ pub fn set_pr_ready(pr_number: u64, ready: bool, repo: Option<&str>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{CwdGuard, PathGuard, install_fake_bin, take_env_lock, temp_dir};
+    use crate::test_support::{
+        CwdGuard, PathGuard, init_git_repo, install_fake_bin, take_env_lock, temp_dir, write_file,
+    };
 
     fn install_fake_gh(name: &str) -> std::path::PathBuf {
         install_fake_bin(
@@ -1596,6 +1632,52 @@ exit 2
             err.to_string().contains("failed to read body file"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn read_pr_template_returns_content_from_github_dir() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("gh-pr-template");
+        write_file(
+            &repo,
+            ".github/pull_request_template.md",
+            "## Description\n\nFill me in.\n",
+        );
+        let _cwd = CwdGuard::enter(&repo);
+        let template = read_pr_template().expect("template should be found");
+        assert_eq!(template, "## Description\n\nFill me in.");
+    }
+
+    #[test]
+    fn read_pr_template_prefers_pull_request_template_md() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("gh-pr-template-pref");
+        write_file(&repo, "pull_request_template.md", "root level template");
+        write_file(
+            &repo,
+            ".github/pull_request_template.md",
+            "github dir template",
+        );
+        let _cwd = CwdGuard::enter(&repo);
+        let template = read_pr_template().expect("template should be found");
+        assert_eq!(template, "github dir template");
+    }
+
+    #[test]
+    fn read_pr_template_returns_none_without_template() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("gh-pr-template-none");
+        let _cwd = CwdGuard::enter(&repo);
+        assert!(read_pr_template().is_none());
+    }
+
+    #[test]
+    fn read_pr_template_ignores_empty_template_file() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("gh-pr-template-empty");
+        write_file(&repo, ".github/pull_request_template.md", "   \n");
+        let _cwd = CwdGuard::enter(&repo);
+        assert!(read_pr_template().is_none());
     }
 
     #[test]

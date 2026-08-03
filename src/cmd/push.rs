@@ -337,8 +337,14 @@ pub fn push_or_update_pr(
                 .unwrap_or_else(|| branch.to_string());
 
             let title = title_override.unwrap_or(&derived_title);
-            let default_body = "Part of a stack managed by `ez`.";
-            let raw_body = body_override.unwrap_or(default_body);
+            // Pre-fill the body with the repo's PR template (if any) so new PRs
+            // aren't born with a bare one-liner; fall back to a short default.
+            let raw_body: String = match body_override {
+                Some(b) => b.to_string(),
+                None => github::read_pr_template()
+                    .unwrap_or_else(|| "Part of a stack managed by `ez`.".to_string()),
+            };
+            let raw_body = raw_body.as_str();
 
             // Always append stack section to new PRs.
             let body = crate::stack_body::build_stack_body(&ancestors, raw_body);
