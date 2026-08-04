@@ -35,8 +35,16 @@ fn temp_dir(prefix: &str) -> PathBuf {
     path
 }
 
+fn command_program(program: &str) -> &str {
+    if program == "git" && Path::new("/usr/bin/git").exists() {
+        "/usr/bin/git"
+    } else {
+        program
+    }
+}
+
 fn run_raw(dir: &Path, program: &str, args: &[&str]) -> Output {
-    Command::new(program)
+    Command::new(command_program(program))
         .args(args)
         .current_dir(dir)
         .env("NO_COLOR", "1")
