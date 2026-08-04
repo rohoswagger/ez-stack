@@ -28,13 +28,13 @@ Requirements:
 
 ## Install the skill
 
-Install the ez-workflow skill into the current repo so all agents auto-discover it:
+Install the ez-workflow skill for the current user so all agents auto-discover it:
 
 ```bash
 ez skill install
-# Installs canonical skill to .agents/skills/ez-workflow/SKILL.md
-# Symlinks agent-specific skill roots like .claude/skills/ and .codex/skills/
-# Commit the file so other agents in this repo use it too
+# Installs canonical skill to ~/.agents/skills/ez-workflow/SKILL.md
+# Symlinks agent-specific skill roots like ~/.claude/skills/ and ~/.codex/skills/
+# Works from any directory
 ```
 
 This installs the workflow defined in [`SKILL.md`](./SKILL.md).

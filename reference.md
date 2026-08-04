@@ -193,7 +193,7 @@ registered paths are never recursively deleted.
 | Intent | Command |
 |--------|---------|
 | Initialize ez non-interactively | `ez init --yes` |
-| Install skill in repo | `ez skill install` |
+| Install skill for current user | `ez skill install` |
 | Shell integration | `ez setup --yes` |
 | List repo config | `ez config list` |
 | Read repo config | `ez config get default_from` |

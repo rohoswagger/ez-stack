@@ -871,13 +871,13 @@ pub struct SkillArgs {
 
 #[derive(Subcommand)]
 pub enum SkillCommands {
-    /// Install the ez-workflow skill into this repo's .agents/skills/ with agent-specific symlinks
+    /// Install the ez-workflow skill for the current user
     #[command(after_help = "\
 Examples:
   ez skill install")]
     Install,
 
-    /// Remove the ez-workflow skill from this repo
+    /// Remove the ez-workflow skill for the current user
     #[command(after_help = "\
 Examples:
   ez skill uninstall")]

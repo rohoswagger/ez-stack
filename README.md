@@ -479,18 +479,18 @@ linear history. If any affected worktree is dirty or a descendant is stale,
 | `ez init --yes` | Initialize ez and accept recommended non-interactive defaults |
 | `ez setup --yes` | Configure shell integration |
 | `ez config list/get/set/unset` | View or update repo settings such as `remote`, `upstream_remote`, `repo`, `fork_repo`, `default_from`, `draft`, `no_pr`, and `rerere` |
-| `ez skill install` | Install the ez-workflow skill for AI agents |
+| `ez skill install` | Install the ez-workflow skill for the current user |
 | `ez update` | Update to latest version |
 
 ## Agent Integration
 
-Install the skill so agents auto-discover ez:
+Install the skill once per user so agents auto-discover ez from any repo:
 
 ```bash
 ez skill install
 ```
 
-This writes the canonical skill to `.agents/skills/ez-workflow/SKILL.md`, then creates compatibility symlinks for agent-specific skill roots such as `.claude/skills/ez-workflow` and `.codex/skills/ez-workflow`.
+This command works from any directory. It writes the canonical skill to `~/.agents/skills/ez-workflow/SKILL.md`, then creates compatibility links for agent-specific skill roots such as `~/.claude/skills/ez-workflow` and `~/.codex/skills/ez-workflow`. If symlinks are unavailable, `ez` writes compatibility copies instead.
 
 See [SKILL.md](./SKILL.md) for the full agent workflow, and [reference.md](./reference.md) for the complete command reference.
 
