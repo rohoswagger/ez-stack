@@ -157,6 +157,9 @@ pub fn run(yes: bool) -> Result<()> {
         append.push('\n');
     }
 
+    if let Some(parent) = rc_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -174,6 +177,7 @@ pub fn run(yes: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{take_env_lock, temp_dir};
 
     #[test]
     fn detect_shell_name_accepts_supported_shells_only() {
@@ -202,6 +206,10 @@ mod tests {
             rc_file_for_home("bash", home, Some(false)),
             Some(PathBuf::from("/tmp/home/.bash_profile"))
         );
+        assert_eq!(
+            rc_file_for_home("tcsh", PathBuf::from("/tmp/home"), None),
+            None
+        );
     }
 
     #[test]
@@ -217,5 +225,27 @@ mod tests {
             planned_setup_lines("fish", Some("/bin/ez"), "/bin/ez:/usr/bin", "ez shell-init"),
             Vec::<String>::new()
         );
+        assert_eq!(
+            planned_setup_lines("zsh", None, "", ""),
+            vec![r#"eval "$(ez shell-init)""#.to_string()]
+        );
+    }
+
+    #[test]
+    fn setup_marker_round_trips_and_missing_home_is_not_done() {
+        let _guard = take_env_lock();
+        let home = temp_dir("setup-marker");
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+
+        assert!(!is_setup_done());
+        mark_setup_done().expect("mark setup done");
+        assert!(is_setup_done());
+
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+        assert!(!is_setup_done());
     }
 }
