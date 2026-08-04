@@ -130,6 +130,13 @@ fn create_empty_raw_branch(dir: &Path, branch: &str, parent: &str) -> String {
     parent_head
 }
 
+fn create_unrelated_raw_branch(dir: &Path, branch: &str, file: &str) {
+    run(dir, "git", &["checkout", "--orphan", branch]);
+    run(dir, "git", &["rm", "-rf", "."]);
+    commit_file(dir, file, &format!("{branch}\n"), branch);
+    run(dir, "git", &["checkout", "main"]);
+}
+
 fn create_managed_branch(dir: &Path, branch: &str, parent: &str, file: &str) -> String {
     run_ez(dir, &["create", branch, "--from", parent, "--no-worktree"]);
     run(dir, "git", &["checkout", branch]);
@@ -260,6 +267,27 @@ fn track_defaults_to_current_branch_when_branch_argument_is_omitted() {
 }
 
 #[test]
+fn track_records_empty_branch_with_zero_commits_ahead() {
+    let repo = TempRepo::new("empty-branch");
+    let expected_parent_head = create_empty_raw_branch(&repo.path, "feat/empty", "main");
+
+    let output = run_ez(&repo.path, &["track", "feat/empty"]);
+
+    let state = stack_state(&repo.path);
+    assert_eq!(state["branches"]["feat/empty"]["parent"], "main");
+    assert_eq!(
+        state["branches"]["feat/empty"]["parent_head"],
+        expected_parent_head
+    );
+    assert!(
+        stderr_text(&output).contains("`feat/empty` has no commits beyond `main` yet"),
+        "{}",
+        stderr_text(&output)
+    );
+    assert_eq!(receipt_json(&output)["commits_ahead"], 0);
+}
+
+#[test]
 fn track_rejects_already_tracked_branch_without_mutating_state() {
     let repo = TempRepo::new("already-tracked");
     create_managed_branch(&repo.path, "feat/base", "main", "base.txt");
@@ -271,6 +299,29 @@ fn track_rejects_already_tracked_branch_without_mutating_state() {
     assert_eq!(output.status.code(), Some(5));
     assert!(
         stderr_text(&output).contains("branch `feat/base` is already tracked"),
+        "{}",
+        stderr_text(&output)
+    );
+    assert_eq!(stack_state_bytes(&repo.path), before);
+}
+
+#[test]
+fn track_rejects_missing_local_parent_branch_without_mutating_state() {
+    let repo = TempRepo::new("missing-parent-ref");
+    create_managed_branch(&repo.path, "feat/base", "main", "base.txt");
+    run(&repo.path, "git", &["branch", "-D", "feat/base"]);
+    create_raw_branch(&repo.path, "feat/child", "main", "child.txt");
+    let before = stack_state_bytes(&repo.path);
+
+    let output = run_ez_raw(
+        &repo.path,
+        &["track", "feat/child", "--parent", "feat/base"],
+    );
+
+    assert_failure(&output);
+    assert_eq!(output.status.code(), Some(5));
+    assert!(
+        stderr_text(&output).contains("parent `feat/base` does not exist locally"),
         "{}",
         stderr_text(&output)
     );
@@ -293,6 +344,42 @@ fn track_rejects_untracked_parent_without_mutating_state() {
     assert_eq!(output.status.code(), Some(5));
     assert!(
         stderr_text(&output).contains("parent `feat/unmanaged-parent` is not the trunk"),
+        "{}",
+        stderr_text(&output)
+    );
+    assert_eq!(stack_state_bytes(&repo.path), before);
+}
+
+#[test]
+fn track_rejects_unrelated_branch_with_explicit_parent_without_mutating_state() {
+    let repo = TempRepo::new("unrelated-explicit-parent");
+    create_unrelated_raw_branch(&repo.path, "feat/unrelated", "orphan.txt");
+    let before = stack_state_bytes(&repo.path);
+
+    let output = run_ez_raw(&repo.path, &["track", "feat/unrelated", "--parent", "main"]);
+
+    assert_failure(&output);
+    assert_eq!(output.status.code(), Some(5));
+    assert!(
+        stderr_text(&output).contains("`feat/unrelated` and `main` have no common history"),
+        "{}",
+        stderr_text(&output)
+    );
+    assert_eq!(stack_state_bytes(&repo.path), before);
+}
+
+#[test]
+fn track_rejects_unrelated_branch_when_inference_has_no_trunk_merge_base() {
+    let repo = TempRepo::new("unrelated-inferred-parent");
+    create_unrelated_raw_branch(&repo.path, "feat/unrelated", "orphan.txt");
+    let before = stack_state_bytes(&repo.path);
+
+    let output = run_ez_raw(&repo.path, &["track", "feat/unrelated"]);
+
+    assert_failure(&output);
+    assert_eq!(output.status.code(), Some(5));
+    assert!(
+        stderr_text(&output).contains("could not find a merge-base between `feat/unrelated`"),
         "{}",
         stderr_text(&output)
     );
