@@ -707,6 +707,53 @@ exit 0
         (install_fake_bin(prefix, "gh", &script), log)
     }
 
+    fn install_native_stack_pr_edit_failing_gh(
+        prefix: &str,
+        lookup_pr: u64,
+        native_prs: &[u64],
+    ) -> (PathBuf, PathBuf) {
+        let log = crate::test_support::temp_dir(prefix).join("gh.log");
+        let pull_requests = native_prs
+            .iter()
+            .map(|pr| format!(r#"{{"number":{pr}}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let stack_json = format!(r#"[{{"number":88,"pull_requests":[{pull_requests}]}}]"#);
+        let script = format!(
+            r#"#!/bin/sh
+echo "$@" >> "$GH_LOG"
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '{{"number":0,"url":"https://github.com/org/repo/pull/0","state":"OPEN","title":"Feature","isDraft":false,"mergedAt":null,"baseRefName":"main"}}\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  echo "simulated native child pr edit failure" >&2
+  exit 1
+fi
+if [ "$1" = "api" ] && [ "$2" = "repos/org/repo/stacks?pull_request={}" ]; then
+  printf '{}\n'
+  exit 0
+fi
+if [ "$1" = "api" ]; then
+  if [ "$2" = "-X" ] && [ "$3" = "PUT" ]; then
+    cat >/dev/null
+    printf '{{"status":"merged"}}\n'
+    exit 0
+  fi
+  printf '[]\n'
+  exit 0
+fi
+exit 0
+"#,
+            lookup_pr, stack_json
+        );
+        (install_fake_bin(prefix, "gh", &script), log)
+    }
+
     fn init_merge_repo(name: &str, branch: &str, pr_number: u64) -> MergeRepo {
         let repo = init_git_repo(name);
         let bare = crate::test_support::temp_dir(&format!("{name}-remote")).join("origin.git");
@@ -1016,6 +1063,30 @@ exit 0
         assert!(
             err.to_string().contains("has no associated PR"),
             "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn merge_fold_extra_run_rejects_trunk_and_unmanaged_current_branch_before_github() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("merge-fold-extra-run-input-guards");
+        let _cwd = CwdGuard::enter(&repo);
+        let main_head = git::rev_parse("main").expect("main head");
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/managed", "main", &main_head, None, None);
+        state.save().expect("save state");
+
+        let trunk = run("squash", true, false).expect_err("trunk merge should abort");
+        assert!(matches!(
+            trunk.downcast_ref::<EzError>(),
+            Some(EzError::OnTrunk)
+        ));
+
+        run_cmd(&repo, "git", &["checkout", "-b", "scratch"]);
+        let unmanaged = run("squash", true, false).expect_err("unmanaged merge should abort");
+        assert!(
+            unmanaged.to_string().contains("not tracked by ez"),
+            "unexpected error: {unmanaged:#}"
         );
     }
 
@@ -1422,6 +1493,64 @@ exit 0
             local_side, remote_side,
             "restacked side branch should be pushed"
         );
+    }
+
+    #[test]
+    fn native_stack_child_pr_base_failure_warns_but_cleans_targets_and_keeps_child() {
+        let _guard = take_env_lock();
+        let repo = init_native_side_branch_repo("merge-native-child-pr-edit-failure");
+        let side_pr = 203;
+        {
+            let _main_cwd = CwdGuard::enter(&repo.repo);
+            let mut state = StackState::load().expect("load state");
+            state
+                .get_branch_mut(&repo.side_branch)
+                .expect("side branch")
+                .pr_number = Some(side_pr);
+            state.save().expect("save side PR metadata");
+        }
+        let (fake_dir, gh_log) = install_native_stack_pr_edit_failing_gh(
+            "merge-native-child-pr-edit-failure-gh",
+            repo.second_pr,
+            &[repo.first_pr, repo.second_pr],
+        );
+        let _path = PathGuard::install(&fake_dir);
+        unsafe {
+            std::env::set_var("GH_LOG", &gh_log);
+        }
+        let _cwd = CwdGuard::enter(&repo.second_worktree);
+
+        run("squash", true, true).expect("native stack merge should tolerate PR-base warning");
+
+        let log = std::fs::read_to_string(&gh_log).expect("gh log");
+        assert!(
+            log.contains("pr edit 203 --base main"),
+            "external child PR base update should be attempted: {log}"
+        );
+        assert!(
+            !repo.first_worktree.exists(),
+            "first target worktree removed"
+        );
+        assert!(
+            !repo.second_worktree.exists(),
+            "second target worktree removed"
+        );
+        assert!(
+            repo.side_worktree.exists(),
+            "external child worktree remains"
+        );
+        assert!(!local_branch_exists(&repo.repo, &repo.first_branch));
+        assert!(!local_branch_exists(&repo.repo, &repo.second_branch));
+        assert!(local_branch_exists(&repo.repo, &repo.side_branch));
+        let state = {
+            let _main_cwd = CwdGuard::enter(&repo.repo);
+            StackState::load().expect("load state")
+        };
+        let side = state.get_branch(&repo.side_branch).expect("side meta");
+        assert_eq!(side.parent, "main");
+        assert_eq!(side.pr_number, Some(side_pr));
+        assert!(!state.branches.contains_key(&repo.first_branch));
+        assert!(!state.branches.contains_key(&repo.second_branch));
     }
 
     #[test]
