@@ -449,6 +449,45 @@ fn sync_dry_run_reports_native_stack_chain_without_calling_github() {
 }
 
 #[test]
+fn sync_dry_run_reports_native_stack_branching_skip_without_calling_github() {
+    let repo = init_repo("sync-dry-run-native-branching-preview");
+    add_managed_branch(&repo, "feat/base", "main", 41);
+    add_managed_branch(&repo, "feat/left", "feat/base", 42);
+    add_managed_branch(&repo, "feat/right", "feat/base", 43);
+    let tracking_before = git_output(&repo.path, &["rev-parse", "origin/main"]);
+    let remote_head = advance_remote_main(&repo, "sync-dry-run-native-branching-writer");
+    assert_ne!(tracking_before, remote_head, "remote must be ahead locally");
+
+    let before = std::fs::read_to_string(stack_path(&repo)).expect("state before");
+    let output = run_ez(&repo, &repo.path, &["sync", "--dry-run"]);
+
+    assert_success(&output);
+    let stderr = stderr_text(&output);
+    assert!(
+        stderr.contains("Would skip GitHub native stack for `feat/base` (branching_component)"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("Would reconcile GitHub native stack"),
+        "branching graph must not be flattened into a native stack preview:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(stack_path(&repo)).expect("state after"),
+        before
+    );
+    assert_eq!(
+        git_output(&repo.path, &["rev-parse", "origin/main"]),
+        tracking_before,
+        "dry-run must not fetch the remote-only commit"
+    );
+    assert_eq!(
+        git_output(&repo.remote, &["rev-parse", "main"]),
+        remote_head
+    );
+    assert_eq!(gh_log(&repo), "");
+}
+
+#[test]
 fn sync_autostash_without_dirty_changes_runs_cleanly_and_leaves_no_stash() {
     let repo = init_repo("sync-autostash-clean");
 
