@@ -61,6 +61,10 @@ fn run_ez(dir: &Path, args: &[&str]) -> Output {
     run(dir, env!("CARGO_BIN_EXE_ez"), args)
 }
 
+fn run_ez_raw(dir: &Path, args: &[&str]) -> Output {
+    run_raw(dir, env!("CARGO_BIN_EXE_ez"), args)
+}
+
 fn stdout_json(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("stdout JSON")
 }
@@ -84,6 +88,53 @@ fn receipt_json(output: &Output) -> Value {
     let start = line.find('{').expect("receipt start");
     let end = line.rfind('}').expect("receipt end");
     serde_json::from_str(&line[start..=end]).expect("receipt JSON")
+}
+
+#[test]
+fn ensure_cli_human_output_reports_dirty_reused_worktree_and_dry_run_plan() {
+    let repo = TempRepo::new();
+    run_ez(&repo.path, &["init", "--yes"]);
+    run_ez(
+        &repo.path,
+        &["create", "feat/base", "--from", "main", "--no-worktree"],
+    );
+    run_ez(
+        &repo.path,
+        &[
+            "create",
+            "feat/child",
+            "--from",
+            "feat/base",
+            "--no-worktree",
+        ],
+    );
+    let base = canonical_stdout_path(&run_ez(
+        &repo.path,
+        &["switch", "feat/base", "--no-cd-required"],
+    ));
+    std::fs::write(base.join("dirty.txt"), "dirty\n").expect("write dirty file");
+
+    let output = run_ez(&repo.path, &["worktree", "ensure", "--dry-run"]);
+
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Reused `feat/base` worktree"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("(0 staged, 0 modified, 1 untracked)"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("Would create `feat/child` worktree"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("Fleet plan: 1 existing, 1 to create"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(!repo.path.join(".worktrees/feat-child").exists());
 }
 
 #[test]
@@ -480,4 +531,37 @@ fn fleet_exec_human_mode_streams_child_output() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("human-stderr"));
     assert!(stderr.contains("Fleet command passed in 1 worktree"));
+}
+
+#[test]
+fn fleet_exec_human_mode_reports_spawn_failure_without_capturing_output() {
+    let repo = TempRepo::new();
+    run_ez(&repo.path, &["init", "--yes"]);
+    run_ez(
+        &repo.path,
+        &["create", "feat/base", "--from", "main", "--no-worktree"],
+    );
+
+    let output = run_ez_raw(
+        &repo.path,
+        &[
+            "worktree",
+            "exec",
+            "feat/base",
+            "--",
+            "ez-command-that-does-not-exist",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(127));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Could not start `ez-command-that-does-not-exist` in `feat/base`"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("Fleet command failed in 1 of 1 attempted worktree"),
+        "unexpected stderr: {stderr}"
+    );
 }
