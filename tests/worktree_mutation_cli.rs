@@ -356,6 +356,226 @@ fn run_ez_with_quarantine_unlock_failure(dir: &Path, args: &[&str]) -> Output {
         .expect("run ez with quarantine unlock failure")
 }
 
+fn run_ez_with_prune_failure(dir: &Path, args: &[&str]) -> Output {
+    let fake_bin = dir.join(".fake-prune-failure-bin");
+    std::fs::create_dir_all(&fake_bin).expect("create fake prune failure bin");
+    let wrapper = fake_bin.join("git");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\n\
+         if [ \"$1 $2\" = \"worktree prune\" ]; then\n\
+         \techo 'simulated worktree prune failure' >&2\n\
+         \texit 1\n\
+         fi\n\
+         exec \"$EZ_TEST_REAL_GIT\" \"$@\"\n",
+    )
+    .expect("write fake git");
+    let mut permissions = std::fs::metadata(&wrapper)
+        .expect("stat fake git")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&wrapper, permissions).expect("chmod fake git");
+    let real_git = stdout_text(&run(dir, "which", &["git"]));
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(&original_path));
+    Command::new(env!("CARGO_BIN_EXE_ez"))
+        .args(args)
+        .current_dir(dir)
+        .env("NO_COLOR", "1")
+        .env("PATH", std::env::join_paths(paths).expect("join fake PATH"))
+        .env("EZ_TEST_REAL_GIT", real_git)
+        .output()
+        .expect("run ez with prune failure")
+}
+
+fn run_ez_with_listener_lookup_failure(dir: &Path, args: &[&str], branch: &str) -> Output {
+    let fake_bin = dir.join(".fake-listener-lookup-failure-bin");
+    std::fs::create_dir_all(&fake_bin).expect("create fake listener failure bin");
+    let lsof = fake_bin.join("lsof");
+    let kill = fake_bin.join("kill");
+    std::fs::write(
+        &lsof,
+        "#!/bin/sh\n\
+         if [ \"$*\" = \"-nP -iTCP:$EZ_TEST_EXPECTED_PORT -sTCP:LISTEN -t\" ]; then\n\
+         \techo 'simulated lsof ownership failure' >&2\n\
+         \texit 2\n\
+         fi\n\
+         echo \"unexpected lsof args: $*\" >&2\n\
+         exit 97\n",
+    )
+    .expect("write fake lsof");
+    std::fs::write(
+        &kill,
+        "#!/bin/sh\n\
+         echo 'kill should not be called after listener lookup failure' >&2\n\
+         exit 97\n",
+    )
+    .expect("write fake kill");
+    for script in [&lsof, &kill] {
+        let mut permissions = std::fs::metadata(script)
+            .expect("stat fake listener tool")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(script, permissions).expect("chmod fake listener tool");
+    }
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(&original_path));
+    Command::new(env!("CARGO_BIN_EXE_ez"))
+        .args(args)
+        .current_dir(dir)
+        .env("NO_COLOR", "1")
+        .env("PATH", std::env::join_paths(paths).expect("join fake PATH"))
+        .env("EZ_TEST_EXPECTED_PORT", dev_port(branch).to_string())
+        .output()
+        .expect("run ez with listener lookup failure")
+}
+
+fn run_ez_with_kill_failure(dir: &Path, args: &[&str], branch: &str, process_cwd: &Path) -> Output {
+    let fake_bin = dir.join(".fake-kill-failure-bin");
+    std::fs::create_dir_all(&fake_bin).expect("create fake kill failure bin");
+    let lsof = fake_bin.join("lsof");
+    let kill = fake_bin.join("kill");
+    let ps = fake_bin.join("ps");
+    std::fs::write(
+        &lsof,
+        "#!/bin/sh\n\
+         if [ \"$*\" = \"-nP -iTCP:$EZ_TEST_EXPECTED_PORT -sTCP:LISTEN -t\" ]; then\n\
+         \tprintf '4242\\n'\n\
+         elif [ \"$*\" = \"-a -p 4242 -d cwd -Fn\" ]; then\n\
+         \tprintf 'p4242\\nfcwd\\nn%s\\n' \"$EZ_TEST_PROCESS_CWD\"\n\
+         else\n\
+         \techo \"unexpected lsof args: $*\" >&2\n\
+         \texit 97\n\
+         fi\n",
+    )
+    .expect("write fake lsof");
+    std::fs::write(
+        &ps,
+        "#!/bin/sh\n\
+         if [ \"$*\" != \"-o lstart= -p 4242\" ]; then\n\
+         \techo \"unexpected ps args: $*\" >&2\n\
+         \texit 97\n\
+         fi\n\
+         printf 'Mon Jan  1 00:00:00 2024\\n'\n",
+    )
+    .expect("write fake ps");
+    std::fs::write(
+        &kill,
+        "#!/bin/sh\n\
+         if [ \"$*\" != \"-TERM 4242\" ]; then\n\
+         \techo \"unexpected kill args: $*\" >&2\n\
+         \texit 97\n\
+         fi\n\
+         echo 'simulated kill failure' >&2\n\
+         exit 1\n",
+    )
+    .expect("write fake kill");
+    for script in [&lsof, &ps, &kill] {
+        let mut permissions = std::fs::metadata(script)
+            .expect("stat fake kill tool")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(script, permissions).expect("chmod fake kill tool");
+    }
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(&original_path));
+    Command::new(env!("CARGO_BIN_EXE_ez"))
+        .args(args)
+        .current_dir(dir)
+        .env("NO_COLOR", "1")
+        .env("PATH", std::env::join_paths(paths).expect("join fake PATH"))
+        .env("EZ_TEST_EXPECTED_PORT", dev_port(branch).to_string())
+        .env("EZ_TEST_PROCESS_CWD", process_cwd)
+        .output()
+        .expect("run ez with kill failure")
+}
+
+fn run_ez_with_remove_failure_and_blocked_rollback(
+    dir: &Path,
+    args: &[&str],
+    original_worktree: &Path,
+) -> Output {
+    let fake_bin = dir.join(".fake-remove-rollback-failure-bin");
+    std::fs::create_dir_all(&fake_bin).expect("create fake remove rollback failure bin");
+    let wrapper = fake_bin.join("git");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\n\
+         case \"$1 $2 $3\" in\n\
+         \"worktree remove \"*.ez-delete-*|\"worktree remove --force\")\n\
+         \tmkdir -p \"$EZ_TEST_ORIGINAL_WORKTREE\"\n\
+         \techo 'simulated worktree remove failure' >&2\n\
+         \texit 1\n\
+         \t;;\n\
+         esac\n\
+         exec \"$EZ_TEST_REAL_GIT\" \"$@\"\n",
+    )
+    .expect("write fake git");
+    let mut permissions = std::fs::metadata(&wrapper)
+        .expect("stat fake git")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&wrapper, permissions).expect("chmod fake git");
+    let real_git = stdout_text(&run(dir, "which", &["git"]));
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(&original_path));
+    Command::new(env!("CARGO_BIN_EXE_ez"))
+        .args(args)
+        .current_dir(dir)
+        .env("NO_COLOR", "1")
+        .env("PATH", std::env::join_paths(paths).expect("join fake PATH"))
+        .env("EZ_TEST_REAL_GIT", real_git)
+        .env("EZ_TEST_ORIGINAL_WORKTREE", original_worktree)
+        .output()
+        .expect("run ez with remove rollback failure")
+}
+
+fn run_ez_with_branch_delete_and_worktree_add_failure(
+    dir: &Path,
+    args: &[&str],
+    branch: &str,
+) -> Output {
+    let fake_bin = dir.join(".fake-branch-delete-add-failure-bin");
+    std::fs::create_dir_all(&fake_bin).expect("create fake branch delete add failure bin");
+    let wrapper = fake_bin.join("git");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\n\
+         if [ \"$1 $2 $3\" = \"branch -D $EZ_TEST_DELETE_BRANCH\" ]; then\n\
+         \techo 'simulated branch ref lock failure' >&2\n\
+         \texit 1\n\
+         fi\n\
+         if [ \"$1 $2\" = \"worktree add\" ]; then\n\
+         \techo 'simulated worktree restore failure' >&2\n\
+         \texit 1\n\
+         fi\n\
+         exec \"$EZ_TEST_REAL_GIT\" \"$@\"\n",
+    )
+    .expect("write fake git");
+    let mut permissions = std::fs::metadata(&wrapper)
+        .expect("stat fake git")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&wrapper, permissions).expect("chmod fake git");
+    let real_git = stdout_text(&run(dir, "which", &["git"]));
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(&original_path));
+    Command::new(env!("CARGO_BIN_EXE_ez"))
+        .args(args)
+        .current_dir(dir)
+        .env("NO_COLOR", "1")
+        .env("PATH", std::env::join_paths(paths).expect("join fake PATH"))
+        .env("EZ_TEST_REAL_GIT", real_git)
+        .env("EZ_TEST_DELETE_BRANCH", branch)
+        .output()
+        .expect("run ez with branch delete and worktree add failure")
+}
+
 fn run_ez_with_fake_delete_integrations(
     dir: &Path,
     args: &[&str],
@@ -1132,6 +1352,28 @@ fn delete_stale_worktree_registration_preserves_unknown_directory_contents() {
 }
 
 #[test]
+fn delete_missing_registered_worktree_path_is_refused_without_mutation() {
+    let repo = TempRepo::new();
+    let branch = "feat/missing-path";
+    let worktree = repo.create_worktree(branch, "main");
+    commit_file(&worktree, "missing.txt", "missing\n", "missing");
+    std::fs::remove_dir_all(&worktree).expect("remove registered worktree path");
+    let branch_before = branch_tip(&repo.path, branch);
+    let state_before = repo.stack_state();
+
+    let output = run_ez_raw(&repo.path, &["delete", branch, "--yes"]);
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("registered worktree path is missing"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(branch_tip(&repo.path, branch), branch_before);
+    assert_eq!(repo.stack_state(), state_before);
+}
+
+#[test]
 fn delete_managed_branch_checked_out_in_main_worktree_keeps_the_repository() {
     let repo = TempRepo::new();
     run_ez(
@@ -1160,6 +1402,58 @@ fn delete_managed_branch_checked_out_in_main_worktree_keeps_the_repository() {
             .success()
     );
     assert!(repo.stack_state()["branches"]["feat/main-worktree"].is_null());
+}
+
+#[test]
+fn delete_listener_lookup_failure_warns_and_continues_without_killing_processes() {
+    let repo = TempRepo::new();
+    let branch = "feat/listener-lookup-fails";
+    let worktree = repo.create_worktree(branch, "main");
+    commit_file(&worktree, "listener.txt", "listener\n", "listener");
+
+    let output =
+        run_ez_with_listener_lookup_failure(&repo.path, &["delete", branch, "--yes"], branch);
+
+    assert!(
+        output.status.success(),
+        "listener lookup failure is warning-only:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Could not verify process ownership on dev port"));
+    assert!(stderr.contains("\"killed_pids\":[]"));
+    assert!(!worktree.exists());
+    assert!(repo.stack_state()["branches"][branch].is_null());
+}
+
+#[test]
+fn delete_worktree_prune_failure_releases_claim_and_preserves_everything() {
+    let repo = TempRepo::new();
+    let branch = "feat/prune-fails";
+    let worktree = repo.create_worktree(branch, "main");
+    commit_file(&worktree, "prune.txt", "prune\n", "prune");
+    let state_before = repo.stack_state();
+    let tip_before = branch_tip(&repo.path, branch);
+
+    let output = run_ez_with_prune_failure(&repo.path, &["delete", branch, "--yes"]);
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("simulated worktree prune failure"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(worktree.exists());
+    assert_eq!(current_branch(&worktree), branch);
+    assert_eq!(branch_tip(&repo.path, branch), tip_before);
+    assert_eq!(repo.stack_state(), state_before);
+    assert!(
+        !String::from_utf8_lossy(
+            &run(&repo.path, "git", &["worktree", "list", "--porcelain"]).stdout
+        )
+        .contains("ez-delete:"),
+        "delete claim should be released after prune failure"
+    );
 }
 
 #[test]
@@ -1213,6 +1507,32 @@ fn delete_restores_a_removed_worktree_when_local_branch_deletion_fails() {
 }
 
 #[test]
+fn delete_reports_when_branch_delete_failure_cannot_restore_worktree() {
+    let repo = TempRepo::new();
+    let branch = "feat/ref-and-restore-fail";
+    let worktree = repo.create_worktree(branch, "main");
+    commit_file(&worktree, "restore.txt", "restore\n", "restore");
+    let state_before = repo.stack_state();
+    let tip_before = branch_tip(&repo.path, branch);
+
+    let output = run_ez_with_branch_delete_and_worktree_add_failure(
+        &repo.path,
+        &["delete", branch, "--yes"],
+        branch,
+    );
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Worktree rollback also failed"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(!worktree.exists());
+    assert_eq!(branch_tip(&repo.path, branch), tip_before);
+    assert_eq!(repo.stack_state(), state_before);
+}
+
+#[test]
 fn delete_does_not_kill_an_unrelated_process_on_the_same_dev_port() {
     let repo = TempRepo::new();
     let branch = "feat/port-collision";
@@ -1256,6 +1576,33 @@ fn delete_does_not_signal_a_reused_listener_pid() {
     assert!(!kill_marker.exists());
     assert!(!worktree.exists());
     assert!(String::from_utf8_lossy(&output.stderr).contains("\"killed_pids\":[]"));
+}
+
+#[test]
+fn delete_kill_failure_warns_after_successful_branch_and_worktree_removal() {
+    let repo = TempRepo::new();
+    let branch = "feat/kill-fails";
+    let worktree = repo.create_worktree(branch, "main");
+    commit_file(&worktree, "kill.txt", "kill\n", "kill");
+
+    let output =
+        run_ez_with_kill_failure(&repo.path, &["delete", branch, "--yes"], branch, &worktree);
+
+    assert!(
+        output.status.success(),
+        "kill failure should not roll back completed deletion:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Failed to stop process(es) on dev port"));
+    assert!(stderr.contains("\"killed_pids\":[]"));
+    assert!(!worktree.exists());
+    assert!(
+        !run_raw(&repo.path, "git", &["rev-parse", branch])
+            .status
+            .success()
+    );
+    assert!(repo.stack_state()["branches"][branch].is_null());
 }
 
 #[test]
@@ -1364,5 +1711,46 @@ fn delete_quarantine_unlock_failure_restores_the_original_worktree() {
                 .file_name()
                 .to_string_lossy()
                 .starts_with(".ez-delete-"))
+    );
+}
+
+#[test]
+fn delete_remove_failure_reports_when_rollback_path_is_occupied() {
+    let repo = TempRepo::new();
+    let branch = "feat/remove-rollback-fails";
+    let worktree = repo.create_worktree(branch, "main");
+    commit_file(&worktree, "remove.txt", "remove\n", "remove");
+    let state_before = repo.stack_state();
+    let tip_before = branch_tip(&repo.path, branch);
+
+    let output = run_ez_with_remove_failure_and_blocked_rollback(
+        &repo.path,
+        &["delete", branch, "--yes"],
+        &worktree,
+    );
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Worktree-path rollback also failed"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(worktree.exists());
+    assert!(
+        !worktree.join(".git").exists(),
+        "the occupied original path must not be mistaken for a restored worktree"
+    );
+    assert_eq!(branch_tip(&repo.path, branch), tip_before);
+    assert_eq!(repo.stack_state(), state_before);
+    let quarantine_parent = worktree.parent().expect("worktree parent");
+    assert!(
+        std::fs::read_dir(quarantine_parent)
+            .expect("list worktree parent")
+            .any(|entry| entry
+                .expect("worktree parent entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".ez-delete-")),
+        "failed rollback should leave the quarantined worktree for inspection"
     );
 }
