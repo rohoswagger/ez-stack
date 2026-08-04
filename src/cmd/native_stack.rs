@@ -489,32 +489,34 @@ pub(crate) fn summary(inspection: &NativeStackInspection) -> String {
 }
 
 pub(crate) fn report_outcome(outcome: &github::NativeStackOutcome) {
+    if let Some(message) = format_outcome(outcome) {
+        ui::info(&message);
+    }
+}
+
+fn format_outcome(outcome: &github::NativeStackOutcome) -> Option<String> {
     match outcome {
-        github::NativeStackOutcome::NotNeeded => {}
+        github::NativeStackOutcome::NotNeeded => None,
         github::NativeStackOutcome::Created { number } => {
-            ui::info(&format!("Linked PRs into GitHub native stack #{number}"));
+            Some(format!("Linked PRs into GitHub native stack #{number}"))
         }
-        github::NativeStackOutcome::Extended { number, added } => {
-            ui::info(&format!(
-                "Extended GitHub native stack #{number} with {added} PR(s)"
-            ));
-        }
+        github::NativeStackOutcome::Extended { number, added } => Some(format!(
+            "Extended GitHub native stack #{number} with {added} PR(s)"
+        )),
         github::NativeStackOutcome::Unchanged { number } => {
-            ui::info(&format!("GitHub native stack #{number} is up to date"));
+            Some(format!("GitHub native stack #{number} is up to date"))
         }
         github::NativeStackOutcome::Repaired {
             previous_number,
             number,
-        } => {
-            ui::info(&format!(
-                "Repaired GitHub native stack #{previous_number} as #{number}"
-            ));
-        }
+        } => Some(format!(
+            "Repaired GitHub native stack #{previous_number} as #{number}"
+        )),
         github::NativeStackOutcome::Unavailable => {
-            ui::info("GitHub native stacks unavailable; ordinary PR chain succeeded");
+            Some("GitHub native stacks unavailable; ordinary PR chain succeeded".to_string())
         }
         github::NativeStackOutcome::NotApplicable { reason } => {
-            ui::info(&format!("GitHub native stacks not applicable: {reason}"));
+            Some(format!("GitHub native stacks not applicable: {reason}"))
         }
     }
 }
@@ -593,6 +595,7 @@ pub(crate) fn error_receipt_value(
 mod tests {
     use super::*;
     use crate::stack::StackState;
+    use crate::test_support::{PathGuard, install_fake_bin, take_env_lock};
     use std::cell::RefCell;
 
     fn branch_with_pr(state: &mut StackState, name: &str, parent: &str, pr_number: Option<u64>) {
@@ -628,6 +631,15 @@ mod tests {
     }
 
     #[test]
+    fn receipt_records_not_needed_without_stack_number() {
+        let value = receipt_value("submit", &[], &[], &github::NativeStackOutcome::NotNeeded);
+
+        assert_eq!(value["cmd"], "submit");
+        assert_eq!(value["native_stack_action"], "not_needed");
+        assert!(value.get("native_stack_number").is_none());
+    }
+
+    #[test]
     fn error_receipt_preserves_desired_chain() {
         let value = error_receipt_value(
             "sync",
@@ -639,6 +651,99 @@ mod tests {
         assert_eq!(value["native_stack_action"], "error");
         assert_eq!(value["native_stack_error"], "diverged");
         assert_eq!(value["pull_requests"], serde_json::json!([101, 102]));
+    }
+
+    #[test]
+    fn receipt_records_all_mutating_outcome_variants() {
+        let unchanged = receipt_value(
+            "sync",
+            &["feat/a".to_string()],
+            &[101],
+            &github::NativeStackOutcome::Unchanged { number: 88 },
+        );
+        assert_eq!(unchanged["native_stack_action"], "unchanged");
+        assert_eq!(unchanged["native_stack_number"], 88);
+
+        let extended = receipt_value(
+            "sync",
+            &["feat/a".to_string(), "feat/b".to_string()],
+            &[101, 102],
+            &github::NativeStackOutcome::Extended {
+                number: 88,
+                added: 1,
+            },
+        );
+        assert_eq!(extended["native_stack_action"], "extended");
+        assert_eq!(extended["native_stack_number"], 88);
+        assert_eq!(extended["native_stack_added"], 1);
+
+        let repaired = receipt_value(
+            "sync",
+            &["feat/a".to_string(), "feat/b".to_string()],
+            &[101, 102],
+            &github::NativeStackOutcome::Repaired {
+                previous_number: 88,
+                number: 89,
+            },
+        );
+        assert_eq!(repaired["native_stack_action"], "repaired");
+        assert_eq!(repaired["native_stack_previous_number"], 88);
+        assert_eq!(repaired["native_stack_number"], 89);
+
+        let not_applicable = receipt_value(
+            "submit",
+            &["feat/fork".to_string()],
+            &[201],
+            &github::NativeStackOutcome::NotApplicable {
+                reason: "fork workflow".to_string(),
+            },
+        );
+        assert_eq!(not_applicable["native_stack_action"], "not_applicable");
+        assert_eq!(not_applicable["native_stack_reason"], "fork workflow");
+    }
+
+    #[test]
+    fn format_outcome_covers_every_user_visible_variant_exactly() {
+        let cases = [
+            (github::NativeStackOutcome::NotNeeded, None),
+            (
+                github::NativeStackOutcome::Created { number: 88 },
+                Some("Linked PRs into GitHub native stack #88"),
+            ),
+            (
+                github::NativeStackOutcome::Extended {
+                    number: 88,
+                    added: 2,
+                },
+                Some("Extended GitHub native stack #88 with 2 PR(s)"),
+            ),
+            (
+                github::NativeStackOutcome::Unchanged { number: 88 },
+                Some("GitHub native stack #88 is up to date"),
+            ),
+            (
+                github::NativeStackOutcome::Repaired {
+                    previous_number: 88,
+                    number: 89,
+                },
+                Some("Repaired GitHub native stack #88 as #89"),
+            ),
+            (
+                github::NativeStackOutcome::Unavailable,
+                Some("GitHub native stacks unavailable; ordinary PR chain succeeded"),
+            ),
+            (
+                github::NativeStackOutcome::NotApplicable {
+                    reason: "fork workflow".to_string(),
+                },
+                Some("GitHub native stacks not applicable: fork workflow"),
+            ),
+        ];
+
+        for (outcome, expected) in cases {
+            assert_eq!(format_outcome(&outcome).as_deref(), expected);
+            report_outcome(&outcome);
+        }
     }
 
     #[test]
@@ -798,6 +903,129 @@ mod tests {
     }
 
     #[test]
+    fn inspect_branch_in_fork_workflow_never_calls_native_stack_lookup() {
+        let _env = take_env_lock();
+        let fake_bin = install_failing_gh("fork-inspect-branch-no-gh");
+        let _path = PathGuard::install(&fake_bin);
+
+        let mut state = StackState::new("main".to_string());
+        state.upstream_remote = Some("upstream".to_string());
+        branch_with_pr(&mut state, "feat/a", "main", Some(101));
+        branch_with_pr(&mut state, "feat/b", "feat/a", Some(102));
+        branch_with_pr(&mut state, "feat/c", "feat/a", Some(103));
+        branch_with_pr(&mut state, "feat/local", "main", None);
+
+        let trunk = inspect_branch(&state, "main");
+        assert_eq!(trunk.state, "not_applicable");
+        assert_eq!(trunk.local.branches, vec!["main"]);
+        assert!(trunk.local.pull_requests.is_empty());
+        assert_eq!(trunk.reason, Some(fork_not_applicable_reason()));
+
+        let branching = inspect_branch(&state, "feat/b");
+        assert_eq!(branching.state, "not_applicable");
+        assert_eq!(branching.local.branches, vec!["feat/a", "feat/b", "feat/c"]);
+        assert_eq!(branching.local.pull_requests, vec![101, 102, 103]);
+        assert_eq!(branching.reason, Some(fork_not_applicable_reason()));
+
+        let local_only = inspect_branch(&state, "feat/local");
+        assert_eq!(local_only.state, "not_applicable");
+        assert_eq!(local_only.local.branches, vec!["feat/local"]);
+        assert!(local_only.local.pull_requests.is_empty());
+        assert_eq!(local_only.reason, Some(fork_not_applicable_reason()));
+    }
+
+    #[test]
+    fn inspect_branch_in_fork_workflow_reports_linear_chain_context() {
+        let _env = take_env_lock();
+        let fake_bin = install_failing_gh("fork-inspect-branch-linear-no-gh");
+        let _path = PathGuard::install(&fake_bin);
+
+        let mut state = StackState::new("main".to_string());
+        state.remote = "fork".to_string();
+        state.repo = Some("upstream/project".to_string());
+        state.fork_repo = Some("fork/project".to_string());
+        branch_with_pr(&mut state, "feat/a", "main", Some(101));
+        branch_with_pr(&mut state, "feat/b", "feat/a", Some(102));
+
+        let inspection = inspect_branch(&state, "feat/b");
+
+        assert_eq!(inspection.state, "not_applicable");
+        assert_eq!(inspection.local.branches, vec!["feat/a", "feat/b"]);
+        assert_eq!(inspection.local.pull_requests, vec![101, 102]);
+        assert_eq!(inspection.reason, Some(fork_not_applicable_reason()));
+    }
+
+    #[test]
+    fn public_inspection_helpers_do_not_require_github_for_local_not_applicable_branches() {
+        let mut state = StackState::new("main".to_string());
+        branch_with_pr(&mut state, "feat/local", "main", None);
+
+        let branch = inspect_branch(&state, "feat/local");
+        assert_eq!(branch.state, "not_applicable");
+        assert_eq!(branch.local.branches, vec!["feat/local"]);
+
+        let all = inspect_all(&state);
+        assert_eq!(all["feat/local"].state, "not_applicable");
+        assert_eq!(all["feat/local"].local.branches, vec!["feat/local"]);
+    }
+
+    #[test]
+    fn inspect_all_in_fork_workflow_classifies_each_local_shape_without_lookup() {
+        let _env = take_env_lock();
+        let fake_bin = install_failing_gh("fork-inspect-all-no-gh");
+        let _path = PathGuard::install(&fake_bin);
+
+        let mut state = StackState::new("main".to_string());
+        state.repo = Some("upstream/project".to_string());
+        state.fork_repo = Some("fork/project".to_string());
+        branch_with_pr(&mut state, "feat/a", "main", Some(101));
+        branch_with_pr(&mut state, "feat/b", "feat/a", Some(102));
+        branch_with_pr(&mut state, "feat/x", "main", Some(201));
+        branch_with_pr(&mut state, "feat/y", "feat/x", Some(202));
+        branch_with_pr(&mut state, "feat/z", "feat/x", Some(203));
+        branch_with_pr(&mut state, "feat/local", "main", None);
+
+        let inspections = inspect_all(&state);
+
+        assert_eq!(inspections.len(), 6);
+        assert_eq!(inspections["feat/a"].state, "not_applicable");
+        assert_eq!(
+            inspections["feat/a"].local.branches,
+            vec!["feat/a", "feat/b"]
+        );
+        assert_eq!(inspections["feat/a"].local.pull_requests, vec![101, 102]);
+        assert_eq!(inspections["feat/b"], inspections["feat/a"]);
+
+        assert_eq!(inspections["feat/x"].state, "not_applicable");
+        assert_eq!(
+            inspections["feat/x"].reason,
+            Some(fork_not_applicable_reason())
+        );
+        assert_eq!(
+            inspections["feat/x"].local.branches,
+            vec!["feat/x", "feat/y", "feat/z"]
+        );
+        assert_eq!(
+            inspections["feat/x"].local.pull_requests,
+            vec![201, 202, 203]
+        );
+        assert_eq!(inspections["feat/y"], inspections["feat/x"]);
+        assert_eq!(inspections["feat/z"], inspections["feat/x"]);
+
+        assert_eq!(inspections["feat/local"].state, "not_applicable");
+        assert_eq!(inspections["feat/local"].local.branches, vec!["feat/local"]);
+        assert!(inspections["feat/local"].local.pull_requests.is_empty());
+    }
+
+    fn install_failing_gh(prefix: &str) -> std::path::PathBuf {
+        install_fake_bin(
+            prefix,
+            "gh",
+            "#!/bin/sh\nprintf 'unexpected gh invocation: %s\\n' \"$*\" >&2\nexit 97\n",
+        )
+    }
+
+    #[test]
     fn inspect_all_queries_once_per_segment_and_sets_one_based_positions() {
         let mut state = StackState::new("main".to_string());
         branch_with_pr(&mut state, "feat/a", "main", Some(101));
@@ -831,6 +1059,58 @@ mod tests {
                 .position,
             Some(2)
         );
+    }
+
+    #[test]
+    fn inspect_all_reuses_lookup_error_for_every_branch_in_chain() {
+        let mut state = StackState::new("main".to_string());
+        branch_with_pr(&mut state, "feat/a", "main", Some(101));
+        branch_with_pr(&mut state, "feat/b", "feat/a", Some(102));
+
+        let calls = RefCell::new(Vec::new());
+        let inspections = inspect_all_with_lookup(&state, |pr| {
+            calls.borrow_mut().push(pr);
+            Err(anyhow::anyhow!("stack endpoint down"))
+        });
+
+        assert_eq!(calls.into_inner(), vec![102]);
+        assert_eq!(inspections["feat/a"].state, "error");
+        assert_eq!(
+            inspections["feat/a"].error.as_deref(),
+            Some("stack endpoint down")
+        );
+        assert_eq!(inspections["feat/b"], inspections["feat/a"]);
+    }
+
+    #[test]
+    fn inspect_all_marks_skipped_components_and_local_only_branches_without_lookup() {
+        let mut state = StackState::new("main".to_string());
+        branch_with_pr(&mut state, "feat/root", "main", Some(101));
+        branch_with_pr(&mut state, "feat/left", "feat/root", Some(102));
+        branch_with_pr(&mut state, "feat/right", "feat/root", Some(103));
+        branch_with_pr(&mut state, "feat/local", "main", None);
+
+        let inspections = inspect_all_with_lookup(&state, |_| unreachable!());
+
+        assert_eq!(inspections["feat/root"].state, "unrepresentable");
+        assert_eq!(
+            inspections["feat/root"].reason.as_deref(),
+            Some("branching_component")
+        );
+        assert_eq!(
+            inspections["feat/root"].local.branches,
+            vec!["feat/left", "feat/right", "feat/root"]
+        );
+        assert_eq!(
+            inspections["feat/root"].local.pull_requests,
+            vec![102, 103, 101]
+        );
+        assert_eq!(inspections["feat/left"], inspections["feat/root"]);
+        assert_eq!(inspections["feat/right"], inspections["feat/root"]);
+
+        assert_eq!(inspections["feat/local"].state, "not_applicable");
+        assert_eq!(inspections["feat/local"].local.branches, vec!["feat/local"]);
+        assert!(inspections["feat/local"].local.pull_requests.is_empty());
     }
 
     #[test]
@@ -872,5 +1152,119 @@ mod tests {
             })
         );
         assert_eq!(summary(&inspection), "GitHub native stack is in sync");
+    }
+
+    #[test]
+    fn summary_covers_terminal_and_unknown_states() {
+        let diverged = base_inspection(
+            "diverged",
+            vec!["feat/a".to_string()],
+            vec![101],
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            summary(&diverged),
+            "GitHub native stack diverges from local stack"
+        );
+
+        let not_linked = base_inspection(
+            "not_linked",
+            vec!["feat/a".to_string()],
+            vec![101],
+            None,
+            None,
+            None,
+        );
+        assert_eq!(summary(&not_linked), "GitHub native stack is not linked");
+
+        let unavailable = base_inspection(
+            "unavailable",
+            vec!["feat/a".to_string()],
+            vec![101],
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            summary(&unavailable),
+            "GitHub native stack preview is unavailable"
+        );
+
+        let unrepresentable = base_inspection(
+            "unrepresentable",
+            vec!["feat/a".to_string()],
+            vec![101],
+            None,
+            Some("branching_component".to_string()),
+            None,
+        );
+        assert_eq!(
+            summary(&unrepresentable),
+            "Local stack cannot be represented as a GitHub native stack (branching_component)"
+        );
+
+        let unknown_unrepresentable = base_inspection(
+            "unrepresentable",
+            vec!["feat/a".to_string()],
+            vec![101],
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            summary(&unknown_unrepresentable),
+            "Local stack cannot be represented as a GitHub native stack (unknown)"
+        );
+
+        let not_applicable = base_inspection(
+            "not_applicable",
+            vec!["feat/a".to_string()],
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            summary(&not_applicable),
+            "GitHub native stack does not apply to this branch"
+        );
+
+        let error = base_inspection(
+            "error",
+            vec!["feat/a".to_string()],
+            vec![101],
+            None,
+            None,
+            Some("auth failed".to_string()),
+        );
+        assert_eq!(
+            summary(&error),
+            "GitHub native stack inspection failed: auth failed"
+        );
+
+        let unknown_error = base_inspection(
+            "error",
+            vec!["feat/a".to_string()],
+            vec![101],
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            summary(&unknown_error),
+            "GitHub native stack inspection failed: unknown error"
+        );
+
+        let future_state = base_inspection(
+            "queued",
+            vec!["feat/a".to_string()],
+            vec![101],
+            None,
+            None,
+            None,
+        );
+        assert_eq!(summary(&future_state), "GitHub native stack state: queued");
     }
 }
