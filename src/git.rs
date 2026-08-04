@@ -1493,6 +1493,31 @@ CONFLICT (modify/delete): src/old.ts deleted in HEAD and modified in abc123.\n";
     }
 
     #[test]
+    fn parse_conflicting_files_extracts_added_paths_and_deduplicates() {
+        let stderr = "\
+CONFLICT (add/add): Merge conflict in added.txt\n\
+CONFLICT (file location): path/to/file.rs added in feature inside a directory that was renamed in HEAD.\n\
+CONFLICT (content): Merge conflict in added.txt\n";
+
+        assert_eq!(
+            parse_conflicting_files(stderr),
+            vec!["added.txt".to_string(), "path/to/file.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn reports_existing_rebase_recognizes_git_rebase_state_messages() {
+        assert!(reports_existing_rebase(
+            "fatal: It seems that there is already a rebase-merge directory"
+        ));
+        assert!(reports_existing_rebase(
+            "Another rebase is already in progress; try --abort first"
+        ));
+        assert!(reports_existing_rebase("rebase already in progress"));
+        assert!(!reports_existing_rebase("fatal: unrelated git failure"));
+    }
+
+    #[test]
     fn staged_files_matching_scope_short_circuits_empty_patterns() {
         assert_eq!(
             staged_files_matching_scope(&[]).expect("empty scope should succeed"),
@@ -1893,6 +1918,21 @@ exit 0
         assert_eq!(
             worktree.locked_reason.as_deref(),
             Some("raw-git replacement")
+        );
+    }
+
+    #[test]
+    fn conditional_worktree_unlock_reports_missing_lock_as_changed() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-worktree-conditional-missing");
+        let _cwd = CwdGuard::enter(&repo);
+
+        let error = worktree_unlock_if_reason(repo.to_str().expect("utf8 repo"), "ez-lease:gone")
+            .expect_err("missing lock should fail");
+
+        assert!(
+            error.to_string().contains("worktree lock changed at"),
+            "unexpected error: {error:#}"
         );
     }
 
@@ -2423,6 +2463,46 @@ exit 0
         assert_eq!(
             run_git(&["-C", &wt_path, "branch", "--show-current"]).expect("linked branch"),
             "feat/rebase-linked"
+        );
+    }
+
+    #[test]
+    fn abort_rebase_for_branch_aborts_rebase_state_in_other_worktree() {
+        let _guard = take_env_lock();
+        let fixture = temp_dir("git-abort-rebase-elsewhere");
+        let state = fixture.join("rebase-merge");
+        let log_path = fixture.join("calls.log");
+        std::fs::create_dir_all(&state).expect("create rebase state");
+        let fake_dir = install_fake_bin(
+            "git-abort-rebase-elsewhere-bin",
+            "git",
+            &format!(
+                r#"#!/bin/sh
+if [ "$1" = "worktree" ] && [ "$2" = "list" ]; then
+  printf 'worktree /repo/main\0HEAD abc\0branch refs/heads/main\0\0worktree /repo/feature\0HEAD def\0branch refs/heads/feat/rebasing\0\0'
+  exit 0
+fi
+if [ "$1" = "-C" ] && [ "$2" = "/repo/feature" ] && [ "$3" = "rev-parse" ] && [ "$4" = "--git-path" ]; then
+  printf '%s\n' "{state}"
+  exit 0
+fi
+if [ "$1" = "-C" ] && [ "$2" = "/repo/feature" ] && [ "$3" = "rebase" ] && [ "$4" = "--abort" ]; then
+  echo abort >> "{log}"
+  rm -rf "{state}"
+  exit 0
+fi
+exit 2
+"#,
+                state = state.display(),
+                log = log_path.display()
+            ),
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        assert!(abort_rebase_for_branch("feat/rebasing", "/repo/main").expect("abort rebase"));
+        assert_eq!(
+            std::fs::read_to_string(log_path).expect("abort log"),
+            "abort\n"
         );
     }
 

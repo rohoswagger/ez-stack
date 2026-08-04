@@ -1169,6 +1169,44 @@ esac
     }
 
     #[test]
+    fn pr_info_from_rest_value_rejects_payload_without_head_ref() {
+        let value = serde_json::json!({
+            "number": 97,
+            "html_url": "https://example.com/pr/97",
+            "state": "open",
+            "base": {"ref": "develop"},
+            "head": {},
+        });
+
+        assert!(pr_info_from_rest_value(&value).is_none());
+    }
+
+    #[test]
+    fn get_all_pr_statuses_handles_configured_repo_edges_without_panicking() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-all-pr-configured-edges",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "api" ] && [ "$2" = 'repos/owner/repo/pulls?state=all&per_page=100&page=1' ]; then
+  printf '[]'
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = 'repos/owner/repo-bad-json/pulls?state=all&per_page=100&page=1' ]; then
+  printf '{not-json'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        assert!(get_all_pr_statuses(Some("bad/repo/extra")).is_empty());
+        assert!(get_all_pr_statuses(Some("owner/repo")).is_empty());
+        assert!(get_all_pr_statuses(Some("owner/repo-bad-json")).is_empty());
+    }
+
+    #[test]
     fn gh_wrappers_work_against_fake_cli() {
         let _guard = take_env_lock();
         let fake_dir = install_fake_gh("wrappers");
@@ -1196,6 +1234,64 @@ esac
         assert_eq!(status.number, 55);
         assert_eq!(status.base, "main");
         assert_eq!(status.state, "OPEN");
+    }
+
+    #[test]
+    fn gh_wrappers_surface_empty_edit_empty_repo_and_bad_create_url() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-wrapper-error-edges",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  echo "https://github.com/org/repo/not-a-pr"
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let edit = edit_pr(77, None, None, None).expect_err("empty edit should fail");
+        assert!(
+            edit.to_string().contains("No edits specified"),
+            "unexpected error: {edit:#}"
+        );
+
+        let repo = repo_name(None).expect_err("empty repo name should fail");
+        assert!(
+            repo.to_string()
+                .contains("could not determine repository name"),
+            "unexpected error: {repo:#}"
+        );
+
+        let create =
+            create_pr("Title", "Body", "main", "feature", false, None).expect_err("bad URL");
+        assert!(
+            create.to_string().contains("could not parse PR number"),
+            "unexpected error: {create:#}"
+        );
+    }
+
+    #[test]
+    fn set_pr_ready_can_mark_pr_back_to_draft() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-ready-undo",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "ready" ] && [ "$3" = "--undo" ] && [ "$4" = "77" ]; then
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        set_pr_ready(77, false, None).expect("mark draft");
     }
 
     #[test]
@@ -1546,6 +1642,47 @@ exit 2
     }
 
     #[test]
+    fn parse_merge_async_status_reports_missing_and_unknown_statuses() {
+        let missing = match parse_merge_async_status(&serde_json::json!({})) {
+            Ok(_) => panic!("missing status should fail"),
+            Err(error) => error,
+        };
+        assert!(
+            missing.to_string().contains("missing status"),
+            "unexpected error: {missing:#}"
+        );
+
+        let unknown = match parse_merge_async_status(&serde_json::json!({"status":"paused"})) {
+            Ok(_) => panic!("unknown status should fail"),
+            Err(error) => error,
+        };
+        assert!(
+            unknown
+                .to_string()
+                .contains("unknown GitHub async merge status"),
+            "unexpected error: {unknown:#}"
+        );
+
+        let pending = match parse_merge_async_status(&serde_json::json!({"status":"pending"})) {
+            Ok(_) => panic!("pending without uuid should fail"),
+            Err(error) => error,
+        };
+        assert!(
+            pending.to_string().contains("missing details.uuid"),
+            "unexpected error: {pending:#}"
+        );
+
+        match parse_merge_async_status(&serde_json::json!({"status":"failed"}))
+            .expect("default failed message")
+        {
+            MergeAsyncStatus::Failed(message) => {
+                assert_eq!(message, "GitHub async merge failed");
+            }
+            _ => panic!("expected failed status"),
+        }
+    }
+
+    #[test]
     fn merge_pr_async_404_falls_back_to_legacy_merge() {
         let _guard = take_env_lock();
         let fake_dir = install_fake_bin(
@@ -1584,6 +1721,39 @@ exit 2
         assert_eq!(
             std::fs::read_to_string(log_path).expect("legacy"),
             "legacy\n"
+        );
+    }
+
+    #[test]
+    fn merge_pr_legacy_surfaces_github_message_when_merge_false() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-merge-legacy-failure-message",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "PUT" ] && [ "$4" = "repos/org/repo/pulls/77/merge-async" ]; then
+  echo "HTTP 404: Not Found" >&2
+  exit 1
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "PUT" ] && [ "$4" = "repos/org/repo/pulls/77/merge" ]; then
+  echo '{"merged":false,"message":"branch protection blocked merge"}'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let err = merge_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO, None)
+            .expect_err("legacy merge failure");
+
+        assert!(
+            err.to_string().contains("branch protection blocked merge"),
+            "unexpected error: {err:#}"
         );
     }
 
@@ -1932,6 +2102,64 @@ exit 2
             "unexpected error: {err:#}"
         );
         assert!(!log_path.exists(), "POST should not be called");
+    }
+
+    #[test]
+    fn native_stack_parsers_surface_malformed_payloads() {
+        let missing_stack_number = parse_native_stack_info_number(&serde_json::json!({}))
+            .expect_err("missing stack number");
+        assert!(
+            missing_stack_number
+                .to_string()
+                .contains("missing stack number"),
+            "unexpected error: {missing_stack_number:#}"
+        );
+
+        assert_eq!(
+            parse_native_stack_base_ref(&serde_json::json!({"base":{"ref":"trunk"}})),
+            Some("trunk".to_string())
+        );
+        assert_eq!(parse_native_stack_base_ref(&serde_json::json!({})), None);
+
+        let bad_mutation_json =
+            parse_native_stack_number("{not-json").expect_err("bad mutation json");
+        assert!(
+            bad_mutation_json
+                .to_string()
+                .contains("failed to parse GitHub native stack mutation response"),
+            "unexpected error: {bad_mutation_json:#}"
+        );
+
+        let missing_mutation_number =
+            parse_native_stack_number("{}").expect_err("missing mutation number");
+        assert!(
+            missing_mutation_number
+                .to_string()
+                .contains("missing stack number"),
+            "unexpected error: {missing_mutation_number:#}"
+        );
+
+        let missing_pull_requests = parse_native_stack_pr_numbers(&serde_json::json!({}))
+            .expect_err("missing pull_requests");
+        assert!(
+            missing_pull_requests
+                .to_string()
+                .contains("missing pull_requests"),
+            "unexpected error: {missing_pull_requests:#}"
+        );
+
+        let missing_pr_number =
+            parse_native_stack_pr_numbers(&serde_json::json!({"pull_requests":[{}]}))
+                .expect_err("missing pull request number");
+        assert!(
+            missing_pr_number
+                .to_string()
+                .contains("pull_request missing number"),
+            "unexpected error: {missing_pr_number:#}"
+        );
+
+        assert!(is_prefix(&[1, 2], &[1, 2, 3]));
+        assert!(!is_prefix(&[1, 3], &[1, 2, 3]));
     }
 
     #[test]
