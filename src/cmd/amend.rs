@@ -73,3 +73,76 @@ pub fn run(message: Option<&str>, all: bool) -> Result<()> {
     state.save()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{CwdGuard, init_git_repo, run_cmd, take_env_lock, write_file};
+
+    fn enter_managed_branch(prefix: &str) -> (std::path::PathBuf, CwdGuard) {
+        let repo = init_git_repo(prefix);
+        let parent_head =
+            git::rev_parse_at(repo.to_str().expect("repo path"), "main").expect("main head");
+        run_cmd(&repo, "git", &["checkout", "-b", "feat/topic"]);
+        let cwd = CwdGuard::enter(&repo);
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/topic", "main", &parent_head, None, None);
+        state.save().expect("save stack");
+        (repo, cwd)
+    }
+
+    #[test]
+    fn rejects_trunk_unmanaged_and_unstaged_amends() {
+        let _lock = take_env_lock();
+
+        let trunk = init_git_repo("amend-trunk");
+        let trunk_cwd = CwdGuard::enter(&trunk);
+        StackState::new("main".to_string())
+            .save()
+            .expect("save trunk stack");
+        assert!(
+            run(None, false)
+                .expect_err("trunk must fail")
+                .to_string()
+                .contains("trunk")
+        );
+        drop(trunk_cwd);
+
+        let unmanaged = init_git_repo("amend-unmanaged");
+        run_cmd(&unmanaged, "git", &["checkout", "-b", "outside"]);
+        let unmanaged_cwd = CwdGuard::enter(&unmanaged);
+        StackState::new("main".to_string())
+            .save()
+            .expect("save unmanaged stack");
+        assert!(
+            run(None, false)
+                .expect_err("unmanaged must fail")
+                .to_string()
+                .contains("not tracked by ez")
+        );
+        drop(unmanaged_cwd);
+
+        let (_repo, _cwd) = enter_managed_branch("amend-unstaged");
+        assert!(
+            run(None, false)
+                .expect_err("unstaged amend must fail")
+                .to_string()
+                .contains("no staged changes")
+        );
+    }
+
+    #[test]
+    fn stages_all_and_amends_managed_branch() {
+        let _lock = take_env_lock();
+        let (repo, _cwd) = enter_managed_branch("amend-all");
+        write_file(&repo, "tracked.txt", "amended\n");
+
+        run(Some("amended subject"), true).expect("amend succeeds");
+
+        assert_eq!(
+            git::log_oneline("-1", 1).expect("log")[0].1,
+            "amended subject"
+        );
+        assert!(!git::has_uncommitted_changes().expect("status"));
+    }
+}
