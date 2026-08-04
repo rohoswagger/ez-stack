@@ -356,6 +356,72 @@ fn run_ez_with_quarantine_unlock_failure(dir: &Path, args: &[&str]) -> Output {
         .expect("run ez with quarantine unlock failure")
 }
 
+fn run_ez_with_fake_delete_integrations(
+    dir: &Path,
+    args: &[&str],
+    remote_log: &Path,
+    gh_log: &Path,
+    fail_remote_delete: bool,
+    fail_pr_edit: bool,
+) -> Output {
+    let fake_bin = dir.join(".fake-delete-integrations-bin");
+    std::fs::create_dir_all(&fake_bin).expect("create fake integration bin");
+    let git = fake_bin.join("git");
+    let gh = fake_bin.join("gh");
+    std::fs::write(
+        &git,
+        "#!/bin/sh\n\
+         if [ \"$1 $3\" = \"push --delete\" ]; then\n\
+         \tprintf '%s\\n' \"$*\" >> \"$EZ_TEST_REMOTE_LOG\"\n\
+         \tif [ \"$EZ_TEST_FAIL_REMOTE_DELETE\" = \"true\" ]; then\n\
+         \t\techo 'simulated remote delete failure' >&2\n\
+         \t\texit 1\n\
+         \tfi\n\
+         \texit 0\n\
+         fi\n\
+         exec \"$EZ_TEST_REAL_GIT\" \"$@\"\n",
+    )
+    .expect("write fake git");
+    std::fs::write(
+        &gh,
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> \"$GH_LOG\"\n\
+         if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"edit\" ]; then\n\
+         \tif [ \"$EZ_TEST_FAIL_PR_EDIT\" = \"true\" ]; then\n\
+         \t\techo 'simulated PR edit failure' >&2\n\
+         \t\texit 1\n\
+         \tfi\n\
+         \texit 0\n\
+         fi\n\
+         printf 'unexpected gh invocation: %s\\n' \"$*\" >&2\n\
+         exit 97\n",
+    )
+    .expect("write fake gh");
+    for script in [&git, &gh] {
+        let mut permissions = std::fs::metadata(script)
+            .expect("stat fake integration tool")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(script, permissions).expect("chmod fake integration tool");
+    }
+    let real_git = stdout_text(&run(dir, "which", &["git"]));
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(&original_path));
+    Command::new(env!("CARGO_BIN_EXE_ez"))
+        .args(args)
+        .current_dir(dir)
+        .env("NO_COLOR", "1")
+        .env("PATH", std::env::join_paths(paths).expect("join fake PATH"))
+        .env("EZ_TEST_REAL_GIT", real_git)
+        .env("EZ_TEST_REMOTE_LOG", remote_log)
+        .env("GH_LOG", gh_log)
+        .env("EZ_TEST_FAIL_REMOTE_DELETE", fail_remote_delete.to_string())
+        .env("EZ_TEST_FAIL_PR_EDIT", fail_pr_edit.to_string())
+        .output()
+        .expect("run ez with fake delete integrations")
+}
+
 fn stdout_json(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("stdout JSON")
 }
@@ -380,6 +446,33 @@ fn current_branch(worktree: &Path) -> String {
 
 fn status_porcelain(worktree: &Path) -> String {
     stdout_text(&run(worktree, "git", &["status", "--porcelain"]))
+}
+
+fn set_pr_number(repo: &TempRepo, branch: &str, pr_number: u64) {
+    let mut state = repo.stack_state();
+    state["branches"][branch]["pr_number"] = Value::from(pr_number);
+    save_stack_state(repo, &state);
+}
+
+fn set_stack_repo(repo: &TempRepo, github_repo: &str) {
+    let mut state = repo.stack_state();
+    state["repo"] = Value::from(github_repo);
+    save_stack_state(repo, &state);
+}
+
+fn save_stack_state(repo: &TempRepo, state: &Value) {
+    let common_dir = stdout_text(&run(&repo.path, "git", &["rev-parse", "--git-common-dir"]));
+    let common_dir = PathBuf::from(common_dir);
+    let common_dir = if common_dir.is_absolute() {
+        common_dir
+    } else {
+        repo.path.join(common_dir)
+    };
+    std::fs::write(
+        common_dir.join("ez/stack.json"),
+        serde_json::to_vec_pretty(state).expect("serialize stack state"),
+    )
+    .expect("write stack state");
 }
 
 fn dev_port(branch: &str) -> u16 {
@@ -749,6 +842,235 @@ fn delete_dirty_linked_worktree_does_not_stop_its_process_or_change_user_state()
         "dirty live edit\n"
     );
     assert_ne!(status_porcelain(&live_worktree), "");
+}
+
+#[test]
+fn delete_defaults_to_current_branch_reparents_child_updates_pr_base_and_deletes_remote() {
+    let repo = TempRepo::new();
+    let target = "feat/default-delete";
+    let child = "feat/default-child";
+    run_ez(
+        &repo.path,
+        &["create", target, "--from", "main", "--no-worktree"],
+    );
+    run(&repo.path, "git", &["switch", target]);
+    commit_file(&repo.path, "target.txt", "target\n", "target");
+    run_ez(
+        &repo.path,
+        &["create", child, "--from", target, "--no-worktree"],
+    );
+    run(&repo.path, "git", &["switch", child]);
+    commit_file(&repo.path, "child.txt", "child\n", "child");
+    run(&repo.path, "git", &["switch", target]);
+    let child_parent_head_before = repo.stack_state()["branches"][child]["parent_head"].clone();
+    set_stack_repo(&repo, "org/repo");
+    set_pr_number(&repo, target, 101);
+    set_pr_number(&repo, child, 202);
+    let remote_log = repo.path.join("remote-delete.log");
+    let gh_log = repo.path.join("gh.log");
+
+    let output = run_ez_with_fake_delete_integrations(
+        &repo.path,
+        &["delete", "--force", "--yes"],
+        &remote_log,
+        &gh_log,
+        false,
+        false,
+    );
+
+    assert!(
+        output.status.success(),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(current_branch(&repo.path), "main");
+    assert!(
+        !run_raw(&repo.path, "git", &["rev-parse", target])
+            .status
+            .success()
+    );
+    let state = repo.stack_state();
+    assert!(state["branches"][target].is_null());
+    assert_eq!(state["branches"][child]["parent"], "main");
+    assert_eq!(
+        state["branches"][child]["parent_head"],
+        child_parent_head_before
+    );
+    assert_eq!(
+        std::fs::read_to_string(&gh_log).expect("read gh log"),
+        "pr edit 202 --base main --repo org/repo\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&remote_log).expect("read remote log"),
+        "push origin --delete feat/default-delete\n"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("\"branch\":\"feat/default-delete\""));
+    assert!(stderr.contains("\"reparented_children\":1"));
+}
+
+#[test]
+fn delete_remote_failure_is_ignored_after_local_branch_delete_succeeds() {
+    let repo = TempRepo::new();
+    let branch = "feat/remote-failure";
+    run_ez(
+        &repo.path,
+        &["create", branch, "--from", "main", "--no-worktree"],
+    );
+    run(&repo.path, "git", &["switch", branch]);
+    commit_file(&repo.path, "remote-failure.txt", "remote\n", "remote");
+    run(&repo.path, "git", &["switch", "main"]);
+    let remote_log = repo.path.join("remote-delete.log");
+    let gh_log = repo.path.join("gh.log");
+
+    let output = run_ez_with_fake_delete_integrations(
+        &repo.path,
+        &["delete", branch, "--force", "--yes"],
+        &remote_log,
+        &gh_log,
+        true,
+        false,
+    );
+
+    assert!(
+        output.status.success(),
+        "remote branch deletion is best-effort:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !run_raw(&repo.path, "git", &["rev-parse", branch])
+            .status
+            .success()
+    );
+    assert!(repo.stack_state()["branches"][branch].is_null());
+    assert_eq!(
+        std::fs::read_to_string(&remote_log).expect("read remote log"),
+        "push origin --delete feat/remote-failure\n"
+    );
+    assert!(
+        !gh_log.exists()
+            || std::fs::read_to_string(&gh_log)
+                .expect("read gh log")
+                .is_empty()
+    );
+}
+
+#[test]
+fn delete_pr_base_update_failure_warns_but_preserves_completed_delete() {
+    let repo = TempRepo::new();
+    let target = "feat/pr-update-fails";
+    let child = "feat/pr-child";
+    run_ez(
+        &repo.path,
+        &["create", target, "--from", "main", "--no-worktree"],
+    );
+    run(&repo.path, "git", &["switch", target]);
+    commit_file(&repo.path, "target.txt", "target\n", "target");
+    run_ez(
+        &repo.path,
+        &["create", child, "--from", target, "--no-worktree"],
+    );
+    run(&repo.path, "git", &["switch", child]);
+    commit_file(&repo.path, "child.txt", "child\n", "child");
+    run(&repo.path, "git", &["switch", "main"]);
+    set_stack_repo(&repo, "org/repo");
+    set_pr_number(&repo, target, 301);
+    set_pr_number(&repo, child, 302);
+    let remote_log = repo.path.join("remote-delete.log");
+    let gh_log = repo.path.join("gh.log");
+
+    let output = run_ez_with_fake_delete_integrations(
+        &repo.path,
+        &["delete", target, "--force", "--yes"],
+        &remote_log,
+        &gh_log,
+        false,
+        true,
+    );
+
+    assert!(
+        output.status.success(),
+        "PR repair warning should not roll back delete:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Failed to update PR base for `feat/pr-child`"));
+    assert!(repo.stack_state()["branches"][target].is_null());
+    assert_eq!(repo.stack_state()["branches"][child]["parent"], "main");
+    assert_eq!(
+        std::fs::read_to_string(&gh_log).expect("read gh log"),
+        "pr edit 302 --base main --repo org/repo\n"
+    );
+}
+
+#[test]
+fn delete_rejects_trunk_without_changing_repository_or_stack_state() {
+    let repo = TempRepo::new();
+    let state_before = repo.stack_state();
+    let branch_before = current_branch(&repo.path);
+
+    let output = run_ez_raw(&repo.path, &["delete", "main", "--yes"]);
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("on trunk"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(current_branch(&repo.path), branch_before);
+    assert_eq!(repo.stack_state(), state_before);
+    assert!(
+        run_raw(&repo.path, "git", &["rev-parse", "main"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn delete_rejects_unmanaged_branch_without_changing_repository_or_stack_state() {
+    let repo = TempRepo::new();
+    run(&repo.path, "git", &["branch", "unmanaged"]);
+    let state_before = repo.stack_state();
+
+    let output = run_ez_raw(&repo.path, &["delete", "unmanaged", "--yes"]);
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not tracked by ez"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(repo.stack_state(), state_before);
+    assert!(
+        run_raw(&repo.path, "git", &["rev-parse", "unmanaged"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn delete_inside_linked_worktree_without_yes_cancel_preserves_everything() {
+    let repo = TempRepo::new();
+    let branch = "feat/confirm-cancel";
+    let worktree = repo.create_worktree(branch, "main");
+    commit_file(&worktree, "confirm.txt", "confirm\n", "confirm");
+    let branch_before = branch_tip(&repo.path, branch);
+    let state_before = repo.stack_state();
+
+    let output = run_ez_raw(&worktree, &["delete"]);
+
+    assert!(
+        output.status.success(),
+        "prompt cancellation is a no-op success:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("You are inside the worktree"));
+    assert!(stderr.contains("Cancelled"));
+    assert!(worktree.exists());
+    assert_eq!(current_branch(&worktree), branch);
+    assert_eq!(branch_tip(&repo.path, branch), branch_before);
+    assert_eq!(repo.stack_state(), state_before);
 }
 
 #[test]
