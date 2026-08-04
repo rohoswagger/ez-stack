@@ -199,6 +199,85 @@ mod tests {
     }
 
     #[test]
+    fn submit_refuses_trunk_before_remote_or_github_work() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("submit-refuses-trunk");
+        let _cwd = CwdGuard::enter(&repo);
+        StackState::new("main".to_string())
+            .save()
+            .expect("save state");
+
+        let err = run(false, false, None, None, None, None, None, None)
+            .expect_err("submit on trunk should fail");
+
+        assert!(
+            err.downcast_ref::<EzError>()
+                .is_some_and(|err| matches!(err, EzError::OnTrunk)),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn submit_refuses_unmanaged_branch_before_remote_or_github_work() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("submit-refuses-unmanaged");
+        let _cwd = CwdGuard::enter(&repo);
+        StackState::new("main".to_string())
+            .save()
+            .expect("save state");
+        run_cmd(&repo, "git", &["checkout", "-b", "feat/unmanaged"]);
+
+        let err = run(false, false, None, None, None, None, None, None)
+            .expect_err("submit on unmanaged branch should fail");
+
+        assert!(
+            err.downcast_ref::<EzError>().is_some_and(
+                |err| matches!(err, EzError::BranchNotInStack(branch) if branch == "feat/unmanaged")
+            ),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn submit_missing_body_file_fails_before_push_or_state_mutation() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("submit-missing-body-file");
+        let _cwd = CwdGuard::enter(&repo);
+
+        let main_head = cmd_output(&repo, "git", &["rev-parse", "HEAD"]);
+        run_cmd(&repo, "git", &["checkout", "-b", "feat/a"]);
+        write_file(&repo, "a.txt", "a\n");
+        run_cmd(&repo, "git", &["add", "a.txt"]);
+        run_cmd(&repo, "git", &["commit", "-m", "add a"]);
+
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/a", "main", &main_head, None, None);
+        state.save().expect("save state");
+        let before = std::fs::read_to_string(StackState::state_path().expect("state path"))
+            .expect("state before");
+
+        let err = run(
+            false,
+            false,
+            None,
+            None,
+            Some("missing-body.md"),
+            None,
+            None,
+            None,
+        )
+        .expect_err("missing body file should fail");
+
+        assert!(
+            err.to_string().contains("missing-body.md"),
+            "unexpected error: {err:#}"
+        );
+        let after = std::fs::read_to_string(StackState::state_path().expect("state path"))
+            .expect("state after");
+        assert_eq!(after, before, "submit state should not change");
+    }
+
+    #[test]
     fn submit_atomic_push_failure_aborts_before_github_mutation() {
         let _guard = take_env_lock();
         let repo = init_git_repo("submit-atomic-abort");
