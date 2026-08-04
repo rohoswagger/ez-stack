@@ -2627,6 +2627,87 @@ cherry main feat/a limit\n\
     }
 
     #[test]
+    fn branch_stage_and_lookup_wrappers_pass_expected_git_arguments() {
+        let _guard = take_env_lock();
+        let log_dir = temp_dir("git-branch-stage-wrapper-args");
+        let log_path = log_dir.join("calls.log");
+        let fake_dir = install_fake_bin(
+            "git-branch-stage-wrapper-args-bin",
+            "git",
+            &format!(
+                r#"#!/bin/sh
+echo "$@" >> "{}"
+case "$*" in
+  "diff --cached --quiet")
+    exit 1
+    ;;
+  "-C /repo/wt diff --cached --quiet")
+    exit 1
+    ;;
+  "diff --cached --name-only")
+    printf 'src/main.rs\n\nREADME.md\n'
+    ;;
+  "diff --cached --name-only -- :(glob)src/** :(literal)README.md")
+    printf 'src/main.rs\nREADME.md\n'
+    ;;
+  "remote get-url origin")
+    printf 'https://github.com/org/repo.git\n'
+    ;;
+  "branch --format=%(refname:short)")
+    printf 'main\nfeat/a\n'
+    ;;
+esac
+exit 0
+"#,
+                log_path.display()
+            ),
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        create_branch("feat/new").expect("create branch");
+        create_branch_at("feat/from-main", "main").expect("create branch at");
+        compare_and_swap_local_branch_ref("feat/from-main", "new-sha", "old-sha").expect("cas ref");
+        checkout("feat/new").expect("checkout branch");
+        commit("message").expect("commit");
+        add_paths(&["src/main.rs".to_string(), "README.md".to_string()]).expect("add paths");
+        assert!(has_staged_changes().expect("staged in current worktree"));
+        assert!(has_staged_changes_at("/repo/wt").expect("staged in linked worktree"));
+        assert_eq!(
+            staged_files().expect("staged files"),
+            vec!["src/main.rs".to_string(), "README.md".to_string()]
+        );
+        let scope_patterns = vec!["src/**".to_string(), ":(literal)README.md".to_string()];
+        assert_eq!(
+            staged_files_matching_scope(&scope_patterns).expect("scope staged files"),
+            vec!["src/main.rs".to_string(), "README.md".to_string()]
+        );
+        assert_eq!(
+            remote_url("origin").expect("remote url"),
+            "https://github.com/org/repo.git"
+        );
+        assert_eq!(
+            branch_list().expect("branch list"),
+            vec!["main".to_string(), "feat/a".to_string()]
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(log_path).expect("call log"),
+            "checkout -b feat/new\n\
+branch feat/from-main main\n\
+update-ref refs/heads/feat/from-main new-sha old-sha\n\
+checkout feat/new\n\
+commit -m message\n\
+add -- src/main.rs README.md\n\
+diff --cached --quiet\n\
+-C /repo/wt diff --cached --quiet\n\
+diff --cached --name-only\n\
+diff --cached --name-only -- :(glob)src/** :(literal)README.md\n\
+remote get-url origin\n\
+branch --format=%(refname:short)\n"
+        );
+    }
+
+    #[test]
     fn working_tree_status_checked_reports_git_failure_and_ignores_short_lines() {
         assert_eq!(parse_working_tree_status("?\n M modified.txt\n"), (0, 1, 0));
 
