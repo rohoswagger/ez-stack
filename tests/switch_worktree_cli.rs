@@ -207,3 +207,51 @@ fn direct_switch_to_managed_branch_without_worktree_refuses_before_creating_it()
     assert_eq!(current_branch(&repo.path), "main");
     assert_eq!(current_branch(&printed_path), "feat/new");
 }
+
+#[test]
+fn switch_by_missing_pr_number_fails_without_changing_branches() {
+    let repo = TempRepo::new();
+    repo.create_managed_branch_without_worktree("feat/topic");
+
+    let output = run_ez_raw(&repo.path, &["switch", "404"]);
+
+    assert_exit_code(&output, 5);
+    assert_eq!(current_branch(&repo.path), "main");
+    assert!(stdout_text(&output).is_empty());
+    assert!(
+        stderr_text(&output).contains("No branch found with PR #404"),
+        "stderr should identify the missing PR mapping:\n{}",
+        stderr_text(&output)
+    );
+}
+
+#[test]
+fn switch_to_current_branch_is_a_noop_without_worktree_handoff() {
+    let repo = TempRepo::new();
+
+    let output = run_ez_raw(&repo.path, &["switch", "main"]);
+
+    assert_exit_code(&output, 0);
+    assert_eq!(current_branch(&repo.path), "main");
+    assert!(stdout_text(&output).is_empty());
+    assert!(
+        stderr_text(&output).contains("Already on `main`"),
+        "stderr should report the noop:\n{}",
+        stderr_text(&output)
+    );
+}
+
+#[test]
+fn switch_to_unknown_branch_fails_before_plain_git_checkout() {
+    let repo = TempRepo::new();
+
+    let output = run_ez_raw(&repo.path, &["checkout", "missing/branch"]);
+
+    assert_exit_code(&output, 5);
+    assert_eq!(current_branch(&repo.path), "main");
+    assert!(
+        stderr_text(&output).contains("branch `missing/branch` is not tracked by ez"),
+        "stderr should explain the unknown branch:\n{}",
+        stderr_text(&output)
+    );
+}
