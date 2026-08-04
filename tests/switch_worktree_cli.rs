@@ -101,6 +101,33 @@ fn git_output(dir: &Path, args: &[&str]) -> String {
     stdout_text(&run(dir, "git", args))
 }
 
+fn git_common_dir(repo: &Path) -> PathBuf {
+    let raw = git_output(repo, &["rev-parse", "--git-common-dir"]);
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        path
+    } else {
+        repo.join(path)
+    }
+}
+
+fn stack_path(repo: &Path) -> PathBuf {
+    git_common_dir(repo).join("ez").join("stack.json")
+}
+
+fn set_pr_number(repo: &Path, branch: &str, pr_number: u64) {
+    let path = stack_path(repo);
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read stack state"))
+            .expect("parse stack state");
+    state["branches"][branch]["pr_number"] = serde_json::json!(pr_number);
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&state).expect("serialize stack state"),
+    )
+    .expect("write stack state");
+}
+
 fn current_branch(worktree: &Path) -> String {
     git_output(worktree, &["branch", "--show-current"])
 }
@@ -184,6 +211,20 @@ fn shell_integration_switch_to_existing_worktree_prints_path_and_preserves_git_s
     assert_eq!(canonical_stdout_path(&output), worktree);
     assert_eq!(current_branch(&repo.path), "main");
     assert_eq!(current_branch(&worktree), "feat/existing");
+}
+
+#[test]
+fn no_cd_required_switch_by_pr_number_prints_existing_worktree_path() {
+    let repo = TempRepo::new();
+    let worktree = repo.ensure_worktree("feat/pr-number");
+    set_pr_number(&repo.path, "feat/pr-number", 303);
+
+    let output = run_ez_raw(&repo.path, &["switch", "303", "--no-cd-required"]);
+
+    assert_exit_code(&output, 0);
+    assert_eq!(canonical_stdout_path(&output), worktree);
+    assert_eq!(current_branch(&repo.path), "main");
+    assert_eq!(current_branch(&worktree), "feat/pr-number");
 }
 
 #[test]

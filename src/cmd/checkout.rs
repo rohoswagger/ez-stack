@@ -316,6 +316,22 @@ mod tests {
     }
 
     #[test]
+    fn worktree_edit_hint_for_plain_path_mentions_only_the_path() {
+        let hint = worktree_edit_hint("/repo/topic");
+
+        assert_eq!(hint, "Edit files under `/repo/topic`.");
+    }
+
+    #[test]
+    fn cd_handoff_allows_plain_checkout_targets_without_shell_integration() {
+        let state = StackState::new("main".to_string());
+        let wt_map = HashMap::new();
+
+        ensure_cd_handoff_allowed(&state, "scratch", &wt_map, false)
+            .expect("plain checkout target should not need cd handoff");
+    }
+
+    #[test]
     fn branch_worktree_map_includes_main_and_linked_worktrees() {
         let wt_map = branch_worktree_map(vec![
             git::WorktreeInfo {
