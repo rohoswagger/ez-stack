@@ -131,7 +131,59 @@ fn ensure_cd_handoff_allowed(
     Ok(())
 }
 
-pub fn run(name: Option<&str>, no_cd_required: bool) -> Result<()> {
+struct InteractiveChoices {
+    branches: Vec<String>,
+    display_items: Vec<String>,
+    default_idx: usize,
+}
+
+fn build_interactive_choices(
+    state: &StackState,
+    current: &str,
+    mut lookup_pr: impl FnMut(u64, Option<&str>) -> Option<github::PrInfo>,
+) -> InteractiveChoices {
+    let mut branches: Vec<String> = state.branches.keys().cloned().collect();
+    branches.sort();
+    branches.insert(0, state.trunk.clone());
+
+    let display_items = branches
+        .iter()
+        .map(|name| {
+            let branch_text = ui::branch_display(name, name == current);
+
+            if let Some(meta) = state.branches.get(name)
+                && let Some(pr_number) = meta.pr_number
+            {
+                if let Some(pr) = lookup_pr(pr_number, state.repo.as_deref()) {
+                    return format!(
+                        "{} {}",
+                        branch_text,
+                        ui::pr_badge(pr.number, &pr.state, pr.is_draft)
+                    );
+                }
+                return format!("{} {}", branch_text, ui::pr_badge(pr_number, "OPEN", false));
+            }
+
+            branch_text
+        })
+        .collect();
+    let default_idx = branches
+        .iter()
+        .position(|branch| branch == current)
+        .unwrap_or(0);
+
+    InteractiveChoices {
+        branches,
+        display_items,
+        default_idx,
+    }
+}
+
+fn run_with_selector(
+    name: Option<&str>,
+    no_cd_required: bool,
+    select: impl FnOnce(&[String], usize) -> Result<usize>,
+) -> Result<()> {
     let state = StackState::load()?;
     let current = git::current_branch()?;
     let wt_map = worktree_map();
@@ -166,51 +218,15 @@ pub fn run(name: Option<&str>, no_cd_required: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Interactive selector (existing code below, unchanged).
-
-    // Collect all managed branches, sorted
-    let mut branches: Vec<String> = state.branches.keys().cloned().collect();
-    branches.sort();
-
-    // Add trunk at the beginning
-    branches.insert(0, state.trunk.clone());
-
-    // Build display items with PR badges
-    let display_items: Vec<String> = branches
-        .iter()
-        .map(|name| {
-            let is_current = name == &current;
-            let branch_text = ui::branch_display(name, is_current);
-
-            if let Some(meta) = state.branches.get(name)
-                && let Some(pr_number) = meta.pr_number
-            {
-                if let Ok(Some(pr)) =
-                    github::get_pr_status(&pr_number.to_string(), state.repo.as_deref())
-                {
-                    return format!(
-                        "{} {}",
-                        branch_text,
-                        ui::pr_badge(pr.number, &pr.state, pr.is_draft)
-                    );
-                }
-                return format!("{} {}", branch_text, ui::pr_badge(pr_number, "OPEN", false));
-            }
-
-            branch_text
-        })
-        .collect();
-
-    // Find the index of the current branch for default selection
-    let default_idx = branches.iter().position(|b| b == &current).unwrap_or(0);
-
-    let selection = Select::new()
-        .with_prompt("Select branch")
-        .items(&display_items)
-        .default(default_idx)
-        .interact()?;
-
-    let selected = &branches[selection];
+    let choices = build_interactive_choices(&state, &current, |pr_number, repo| {
+        github::get_pr_status(&pr_number.to_string(), repo)
+            .ok()
+            .flatten()
+    });
+    let selection = select(&choices.display_items, choices.default_idx)?;
+    let selected = choices.branches.get(selection).ok_or_else(|| {
+        EzError::UserMessage(format!("invalid branch selection index {selection}"))
+    })?;
 
     if selected == &current {
         ui::info(&format!("Already on `{selected}`"));
@@ -223,11 +239,24 @@ pub fn run(name: Option<&str>, no_cd_required: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn run(name: Option<&str>, no_cd_required: bool) -> Result<()> {
+    run_with_selector(name, no_cd_required, |display_items, default_idx| {
+        Ok(Select::new()
+            .with_prompt("Select branch")
+            .items(display_items)
+            .default(default_idx)
+            .interact()?)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::PrInfo;
     use crate::stack::{BranchMeta, StackState};
-    use crate::test_support::{CwdGuard, init_git_repo, take_env_lock, write_file};
+    use crate::test_support::{
+        CwdGuard, PathGuard, init_git_repo, install_fake_bin, take_env_lock, write_file,
+    };
     use std::collections::HashMap;
 
     fn state_with_pr() -> StackState {
@@ -264,6 +293,159 @@ mod tests {
         assert!("99".parse::<u64>().is_ok());
         assert!("feat/x".parse::<u64>().is_err());
         assert!("0".parse::<u64>().is_ok());
+    }
+
+    #[test]
+    fn interactive_choices_sort_trunk_first_and_render_exact_pr_states() {
+        let mut state = state_with_pr();
+        state.add_branch("feat/a", "main", "abc", None, None);
+        state
+            .get_branch_mut("feat/a")
+            .expect("added branch")
+            .pr_number = Some(17);
+
+        let choices = build_interactive_choices(&state, "feat/x", |number, repo| {
+            assert_eq!(repo, None);
+            (number == 99).then(|| PrInfo {
+                number,
+                url: format!("https://example.test/{number}"),
+                state: "MERGED".to_string(),
+                title: "covered".to_string(),
+                base: "main".to_string(),
+                is_draft: false,
+                merged: true,
+            })
+        });
+
+        assert_eq!(choices.branches, ["main", "feat/a", "feat/x"]);
+        assert_eq!(choices.default_idx, 2);
+        assert!(choices.display_items[1].contains(&ui::pr_badge(17, "OPEN", false)));
+        assert!(choices.display_items[2].contains(&ui::pr_badge(99, "MERGED", false)));
+    }
+
+    #[test]
+    fn interactive_choices_default_to_trunk_for_an_unmanaged_checkout() {
+        let state = StackState::new("main".to_string());
+        let choices = build_interactive_choices(&state, "scratch", |_, _| None);
+
+        assert_eq!(choices.branches, ["main"]);
+        assert_eq!(choices.default_idx, 0);
+    }
+
+    #[test]
+    fn run_without_name_can_select_current_branch_without_mutation() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("checkout-interactive-current");
+        let _cwd = CwdGuard::enter(&repo);
+        StackState::new("main".to_string())
+            .save()
+            .expect("save stack state");
+        let before = git::rev_parse("HEAD").expect("head before selection");
+
+        run_with_selector(None, false, |items, default_idx| {
+            assert_eq!(default_idx, 0);
+            assert_eq!(items.len(), 1);
+            Ok(default_idx)
+        })
+        .expect("selecting the current branch should succeed");
+
+        assert_eq!(git::current_branch().expect("branch"), "main");
+        assert_eq!(
+            git::rev_parse("HEAD").expect("head after selection"),
+            before
+        );
+    }
+
+    #[test]
+    fn run_without_name_can_select_managed_branch_and_create_its_worktree() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("checkout-interactive-managed");
+        let _cwd = CwdGuard::enter(&repo);
+        let parent_head = git::rev_parse("main").expect("main head");
+        git::create_branch_at("feat/test", "main").expect("feature branch");
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/test", "main", &parent_head, None, None);
+        state.save().expect("save stack state");
+
+        run_with_selector(None, true, |items, default_idx| {
+            assert_eq!(default_idx, 0);
+            assert_eq!(items.len(), 2);
+            Ok(1)
+        })
+        .expect("selecting a managed branch should create its worktree");
+
+        let worktrees = git::worktree_list().expect("worktree list");
+        assert!(
+            worktrees
+                .iter()
+                .any(|worktree| worktree.branch.as_deref() == Some("feat/test"))
+        );
+        assert_eq!(
+            git::current_branch().expect("main remains checked out"),
+            "main"
+        );
+    }
+
+    #[test]
+    fn run_without_name_rejects_an_invalid_selector_result_without_mutation() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("checkout-interactive-invalid");
+        let _cwd = CwdGuard::enter(&repo);
+        StackState::new("main".to_string())
+            .save()
+            .expect("save stack state");
+        let before = git::rev_parse("HEAD").expect("head before selection");
+
+        let error = run_with_selector(None, false, |_, _| Ok(usize::MAX))
+            .expect_err("an invalid selector index must be rejected");
+
+        assert!(error.to_string().contains("invalid branch selection index"));
+        assert_eq!(git::current_branch().expect("branch"), "main");
+        assert_eq!(
+            git::rev_parse("HEAD").expect("head after selection"),
+            before
+        );
+    }
+
+    #[test]
+    fn run_without_name_uses_github_status_when_rendering_pr_backed_choices() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("checkout-interactive-pr-status");
+        let _cwd = CwdGuard::enter(&repo);
+        let parent_head = git::rev_parse("main").expect("main head");
+        git::create_branch_at("feat/test", "main").expect("feature branch");
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/test", "main", &parent_head, None, None);
+        state
+            .get_branch_mut("feat/test")
+            .expect("added branch")
+            .pr_number = Some(99);
+        state.repo = Some("owner/repo".to_string());
+        state.save().expect("save stack state");
+        let fake_bin = install_fake_bin(
+            "checkout-interactive-gh",
+            "gh",
+            r#"#!/bin/sh
+printf '%s\n' '{"number":99,"url":"https://example.test/99","state":"MERGED","title":"done","baseRefName":"main","isDraft":false,"mergedAt":"2026-01-01T00:00:00Z"}'
+"#,
+        );
+        let _path = PathGuard::install(&fake_bin);
+
+        run_with_selector(None, false, |items, default_idx| {
+            assert_eq!(default_idx, 0);
+            assert!(items[1].contains(&ui::pr_badge(99, "MERGED", false)));
+            Ok(default_idx)
+        })
+        .expect("PR-backed interactive choices should render without mutation");
+
+        assert_eq!(git::current_branch().expect("branch"), "main");
+    }
+
+    #[test]
+    fn cd_handoff_allows_unmanaged_targets_that_need_no_worktree() {
+        let state = StackState::new("main".to_string());
+        ensure_cd_handoff_allowed(&state, "scratch", &HashMap::new(), false)
+            .expect("an unmanaged target does not need a shell handoff");
     }
 
     #[test]
