@@ -479,6 +479,155 @@ mod tests {
     }
 
     #[test]
+    fn merge_fold_extra_validation_rejects_trunk_target() {
+        let input = FoldValidationInput {
+            target: "main",
+            parent: "feat/base",
+            trunk: "main",
+            pr_number: None,
+            parent_is_ancestor: true,
+        };
+
+        let err = validate_fold_input(&input).expect_err("trunk target should abort");
+
+        assert!(matches!(
+            err.downcast_ref::<EzError>(),
+            Some(EzError::OnTrunk)
+        ));
+    }
+
+    #[test]
+    fn merge_fold_extra_run_rejects_trunk_and_unmanaged_targets() {
+        let _lock = take_env_lock();
+        let fixture = FoldRepo::new("merge-fold-extra-fold-input-guards", true, false);
+        let _cwd = CwdGuard::enter(&fixture.repo);
+
+        let trunk = run(Some("main"), true).expect_err("trunk fold should abort");
+        assert!(matches!(
+            trunk.downcast_ref::<EzError>(),
+            Some(EzError::OnTrunk)
+        ));
+
+        run_cmd(&fixture.repo, "git", &["checkout", "-b", "scratch"]);
+        let unmanaged = run(Some("scratch"), true).expect_err("unmanaged fold should abort");
+        assert!(
+            unmanaged.to_string().contains("not tracked by ez"),
+            "unexpected error: {unmanaged:#}"
+        );
+    }
+
+    #[test]
+    fn merge_fold_extra_run_rejects_missing_target_and_parent_branches() {
+        let _lock = take_env_lock();
+        let fixture = FoldRepo::new("merge-fold-extra-fold-missing-branches", true, false);
+        let _cwd = CwdGuard::enter(&fixture.repo);
+
+        run_cmd(
+            &fixture.repo,
+            "git",
+            &[
+                "worktree",
+                "remove",
+                fixture.target_worktree.to_str().expect("target path"),
+            ],
+        );
+        run_cmd(&fixture.repo, "git", &["branch", "-D", "feat/target"]);
+        let missing_target =
+            run(Some("feat/target"), true).expect_err("missing target should abort");
+        assert!(
+            missing_target
+                .to_string()
+                .contains("local branch `feat/target` is missing"),
+            "unexpected error: {missing_target:#}"
+        );
+
+        run_cmd(
+            &fixture.repo,
+            "git",
+            &["branch", "feat/target", &fixture.target_sha],
+        );
+        run_cmd(
+            &fixture.repo,
+            "git",
+            &[
+                "worktree",
+                "remove",
+                fixture.base_worktree.to_str().expect("base path"),
+            ],
+        );
+        run_cmd(&fixture.repo, "git", &["branch", "-D", "feat/base"]);
+        let missing_parent =
+            run(Some("feat/target"), true).expect_err("missing parent should abort");
+        assert!(
+            missing_parent
+                .to_string()
+                .contains("parent branch `feat/base` is missing"),
+            "unexpected error: {missing_parent:#}"
+        );
+    }
+
+    #[test]
+    fn merge_fold_extra_stale_descendant_with_missing_branch_reports_re_adopt() {
+        let _lock = take_env_lock();
+        let fixture = FoldRepo::new("merge-fold-extra-fold-missing-child", true, true);
+        let _cwd = CwdGuard::enter(&fixture.repo);
+        run_cmd(
+            &fixture.repo,
+            "git",
+            &[
+                "worktree",
+                "remove",
+                fixture.child_worktree.to_str().expect("child path"),
+            ],
+        );
+        run_cmd(&fixture.repo, "git", &["branch", "-D", "feat/child"]);
+
+        let err = run(Some("feat/target"), true).expect_err("missing child should abort");
+
+        assert!(
+            err.to_string().contains("Re-adopt the stack"),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(
+            command_output(&fixture.repo, &["rev-parse", "feat/base"]),
+            fixture.base_sha
+        );
+        assert!(git::branch_exists("feat/target"));
+    }
+
+    #[test]
+    fn merge_fold_extra_rollback_reports_parent_and_state_restore_failures() {
+        let _lock = take_env_lock();
+        let fixture = FoldRepo::new("merge-fold-extra-fold-rollback-errors", true, false);
+        let _cwd = CwdGuard::enter(&fixture.repo);
+        let snapshot = FoldSnapshot {
+            original_state_path: fixture.repo.clone(),
+            original_state_bytes: b"not json".to_vec(),
+            target: "feat/target".to_string(),
+            target_sha: fixture.target_sha.clone(),
+            target_worktree: Some(fixture.target_worktree.to_string_lossy().into_owned()),
+            parent: "feat/base".to_string(),
+            parent_sha: fixture.base_sha.clone(),
+            parent_worktree: Some(fixture.base_worktree.to_string_lossy().into_owned()),
+        };
+
+        let errors = rollback_fold(&snapshot);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("restore parent `feat/base`")),
+            "parent restore failure should be reported: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("restore stack metadata")),
+            "state restore failure should be reported: {errors:?}"
+        );
+    }
+
+    #[test]
     fn fold_validation_rejects_pr_backed_and_bottom_layers() {
         let pr_backed = FoldValidationInput {
             target: "feat/child",
