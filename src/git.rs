@@ -2079,4 +2079,277 @@ exit 0
             "{status}"
         );
     }
+
+    #[test]
+    fn default_branch_uses_origin_head_before_local_fallbacks() {
+        let _guard = take_env_lock();
+        let remote = temp_dir("git-default-branch-origin-head-remote");
+        run_cmd(
+            &remote,
+            "git",
+            &["init", "--bare", "--initial-branch=trunk"],
+        );
+
+        let seed = temp_dir("git-default-branch-origin-head-seed");
+        run_cmd(
+            &seed,
+            "git",
+            &["clone", remote.to_str().expect("remote"), "."],
+        );
+        run_cmd(&seed, "git", &["config", "user.name", "Test User"]);
+        run_cmd(&seed, "git", &["config", "user.email", "test@example.com"]);
+        write_file(&seed, "tracked.txt", "hello\n");
+        run_cmd(&seed, "git", &["add", "tracked.txt"]);
+        run_cmd(&seed, "git", &["commit", "-m", "initial"]);
+        run_cmd(&seed, "git", &["push", "-u", "origin", "trunk"]);
+
+        let repo = temp_dir("git-default-branch-origin-head");
+        run_cmd(
+            &std::env::temp_dir(),
+            "git",
+            &[
+                "clone",
+                remote.to_str().expect("remote"),
+                repo.to_str().expect("repo"),
+            ],
+        );
+        let _cwd = CwdGuard::enter(&repo);
+
+        assert_eq!(default_branch().expect("default branch"), "trunk");
+    }
+
+    #[test]
+    fn default_branch_errors_when_remote_head_and_common_branches_are_absent() {
+        let _guard = take_env_lock();
+        let repo = temp_dir("git-default-branch-missing");
+        run_cmd(&repo, "git", &["init", "-b", "develop"]);
+        run_cmd(&repo, "git", &["config", "user.name", "Test User"]);
+        run_cmd(&repo, "git", &["config", "user.email", "test@example.com"]);
+        write_file(&repo, "tracked.txt", "hello\n");
+        run_cmd(&repo, "git", &["add", "tracked.txt"]);
+        run_cmd(&repo, "git", &["commit", "-m", "initial"]);
+        let _cwd = CwdGuard::enter(&repo);
+
+        let error = default_branch().expect_err("default branch should be unknown");
+
+        assert!(
+            error
+                .to_string()
+                .contains("could not detect default branch"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn align_branch_to_target_rejects_stale_expected_ref() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-align-stale-expected");
+        let _cwd = CwdGuard::enter(&repo);
+
+        let expected_old = rev_parse("main").expect("old main");
+        create_branch_at("target", "main").expect("create target");
+        checkout("target").expect("checkout target");
+        write_file(&repo, "target.txt", "target\n");
+        add_all_including_untracked().expect("stage target");
+        commit("target advance").expect("commit target");
+        let target = rev_parse("target").expect("target sha");
+        checkout("main").expect("checkout main");
+        write_file(&repo, "local.txt", "local\n");
+        add_all_including_untracked().expect("stage local");
+        commit("local advance").expect("commit local");
+
+        let error =
+            align_branch_to_target("main", &target, &expected_old, &repo_root().expect("root"))
+                .expect_err("stale expected ref should fail");
+
+        assert!(
+            matches!(
+                error.downcast_ref::<EzError>(),
+                Some(EzError::StaleRemoteRef(branch)) if branch == "main"
+            ),
+            "unexpected error: {error:#}"
+        );
+        assert_ne!(rev_parse("main").expect("main"), target);
+    }
+
+    #[test]
+    fn align_branch_to_target_refuses_to_overwrite_dirty_checked_out_file() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-align-dirty-current");
+        let _cwd = CwdGuard::enter(&repo);
+
+        let expected_old = rev_parse("main").expect("old main");
+        create_branch_at("target", "main").expect("create target");
+        checkout("target").expect("checkout target");
+        write_file(&repo, "tracked.txt", "target version\n");
+        add_paths(&["tracked.txt".to_string()]).expect("stage target");
+        commit("target edits tracked").expect("commit target");
+        let target = rev_parse("target").expect("target sha");
+        checkout("main").expect("checkout main");
+        write_file(&repo, "tracked.txt", "dirty local version\n");
+
+        let error =
+            align_branch_to_target("main", &target, &expected_old, &repo_root().expect("root"))
+                .expect_err("dirty checked out file should block reset --keep");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Entry 'tracked.txt' not uptodate")
+                || error.to_string().contains("local changes"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(rev_parse("main").expect("main"), expected_old);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("tracked.txt")).expect("tracked"),
+            "dirty local version\n"
+        );
+    }
+
+    #[test]
+    fn align_branch_to_target_moves_unchecked_out_branch_with_compare_and_swap() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-align-unchecked-branch");
+        let _cwd = CwdGuard::enter(&repo);
+
+        create_branch_at("feat/unowned", "main").expect("create feature");
+        let expected_old = rev_parse("feat/unowned").expect("feature old");
+        write_file(&repo, "target.txt", "target\n");
+        add_all_including_untracked().expect("stage target");
+        commit("advance main").expect("commit target");
+        let target = rev_parse("main").expect("target");
+
+        align_branch_to_target(
+            "feat/unowned",
+            &target,
+            &expected_old,
+            &repo_root().expect("root"),
+        )
+        .expect("align unchecked branch");
+
+        assert_eq!(rev_parse("feat/unowned").expect("feature"), target);
+        assert_eq!(current_branch().expect("current branch"), "main");
+    }
+
+    #[test]
+    fn align_branch_to_target_moves_branch_in_linked_worktree_without_detaching_it() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-align-linked-worktree");
+        let _cwd = CwdGuard::enter(&repo);
+
+        create_branch_at("feat/linked", "main").expect("create feature");
+        let expected_old = rev_parse("feat/linked").expect("feature old");
+        let wt_path = worktree_path("feat/linked").expect("worktree path");
+        worktree_add(&wt_path, "feat/linked").expect("worktree add");
+        write_file(&repo, "target.txt", "target\n");
+        add_all_including_untracked().expect("stage target");
+        commit("advance main").expect("commit target");
+        let target = rev_parse("main").expect("target");
+
+        align_branch_to_target(
+            "feat/linked",
+            &target,
+            &expected_old,
+            &repo_root().expect("root"),
+        )
+        .expect("align linked worktree branch");
+
+        assert_eq!(rev_parse("feat/linked").expect("feature"), target);
+        assert_eq!(
+            rev_parse_at(&wt_path, "HEAD").expect("worktree head"),
+            target
+        );
+        assert_eq!(
+            run_git(&["-C", &wt_path, "branch", "--show-current"]).expect("worktree branch"),
+            "feat/linked"
+        );
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(&wt_path).join("target.txt"))
+                .expect("target file"),
+            "target\n"
+        );
+    }
+
+    #[test]
+    fn current_linked_worktree_root_returns_none_in_main_and_some_in_linked_worktree() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("git-current-linked-worktree");
+        let _cwd = CwdGuard::enter(&repo);
+
+        create_branch_at("feat/current-linked", "main").expect("create feature");
+        let wt_path = worktree_path("feat/current-linked").expect("worktree path");
+        worktree_add(&wt_path, "feat/current-linked").expect("worktree add");
+
+        assert_eq!(
+            current_linked_worktree_root().expect("main linked root"),
+            None
+        );
+
+        let _linked_cwd = CwdGuard::enter(std::path::Path::new(&wt_path));
+        assert_eq!(
+            std::fs::canonicalize(
+                current_linked_worktree_root()
+                    .expect("linked root")
+                    .expect("linked worktree")
+            )
+            .expect("canonical actual"),
+            std::fs::canonicalize(&wt_path).expect("canonical expected")
+        );
+    }
+
+    #[test]
+    fn push_maps_stale_rejection_to_branch_error() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "git-push-stale-bin",
+            "git",
+            r#"#!/bin/sh
+if [ "$1" = "push" ]; then
+  printf '%s\n' '! [rejected] feat/a -> feat/a (stale info)' >&2
+  exit 1
+fi
+exit 0
+"#,
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        let error = push("origin", "feat/a", true).expect_err("stale push");
+
+        assert!(
+            matches!(
+                error.downcast_ref::<EzError>(),
+                Some(EzError::StaleRemoteRef(branch)) if branch == "feat/a"
+            ),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn stash_pop_index_at_falls_back_to_plain_pop_when_index_restore_fails() {
+        let _guard = take_env_lock();
+        let log_dir = temp_dir("git-stash-pop-index-fallback");
+        let log_path = log_dir.join("calls.log");
+        let fake_dir = install_fake_bin(
+            "git-stash-pop-index-fallback-bin",
+            "git",
+            &format!(
+                r#"#!/bin/sh
+echo "$@" >> "{}"
+if [ "$1" = "-C" ] && [ "$3" = "stash" ] && [ "$4" = "pop" ] && [ "$5" = "--index" ]; then
+  exit 1
+fi
+exit 0
+"#,
+                log_path.display()
+            ),
+        );
+        let _path = PathGuard::install(&fake_dir);
+
+        stash_pop_index_at("/repo/worktree").expect("fallback pop");
+
+        assert_eq!(
+            std::fs::read_to_string(log_path).expect("call log"),
+            "-C /repo/worktree stash pop --index\n-C /repo/worktree stash pop\n"
+        );
+    }
 }
