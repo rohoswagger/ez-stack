@@ -532,6 +532,47 @@ fn sync_blocks_merge_commit_before_rewriting_feature_branch_or_state() {
 }
 
 #[test]
+fn sync_repair_native_stack_never_mutates_github_after_preflight_block() {
+    let repo = init_repo("sync-repair-preflight-block");
+    add_branch(&repo, "feat/base", "main", "base.txt", 101);
+    add_branch(&repo, "feat/child", "feat/base", "child.txt", 102);
+    add_merge_commit_on_branch(&repo, "feat/base");
+
+    let clone = temp_dir("sync-repair-preflight-remote-writer");
+    run(
+        &clone,
+        "git",
+        &[
+            "clone",
+            "--branch",
+            "main",
+            repo.remote.to_str().expect("remote path"),
+            ".",
+        ],
+    );
+    run(&clone, "git", &["config", "user.name", "Remote User"]);
+    run(
+        &clone,
+        "git",
+        &["config", "user.email", "remote@example.com"],
+    );
+    commit_file(&clone, "remote.txt", "remote\n", "remote main");
+    run(&clone, "git", &["push", "origin", "main"]);
+    std::fs::remove_dir_all(clone).expect("remove remote writer");
+
+    let output = run_ez(&repo, &repo.path, &["sync", "--repair-native-stack"]);
+
+    assert_preflight_blocked(&output, "sync");
+    let gh_log = std::fs::read_to_string(&repo.gh_log).expect("gh log");
+    assert!(
+        !gh_log.contains("stacks?pull_request=")
+            && !gh_log.contains("/unstack")
+            && !gh_log.contains("-X POST repos/org/repo/stacks"),
+        "preflight-blocked sync must not reach native stack APIs:\n{gh_log}"
+    );
+}
+
+#[test]
 fn sync_force_allows_merge_commit_linearization() {
     let repo = init_repo("sync-force-merge");
     add_branch(&repo, "feat/base", "main", "base.txt", 101);

@@ -147,7 +147,19 @@ against the upstream GitHub repo.
 | Sync with trunk | `ez sync` |
 | Sync with dirty working tree | `ez sync --autostash` |
 | Preview sync | `ez sync --dry-run` |
+| Repair a divergent GitHub native stack | `ez sync --repair-native-stack` |
 | Restack children | `ez restack` |
+
+Default sync reconciles representable 2+ PR chains without overwriting a
+divergent GitHub native stack. `--repair-native-stack` is the explicit,
+destructive opt-in: a truly divergent stack may be dissolved and recreated in
+ez's local order, while an existing prefix is extended in place. Fork workflows,
+PR-less segments, and branching graphs are skipped without stack mutation.
+
+GitHub concurrency conflicts are re-read with bounded backoff before retrying.
+If queued or locked PRs keep a divergent stack intact, or recreation fails after
+dissolve, explicit repair returns nonzero with an actionable receipt. Use
+`ez sync --dry-run --repair-native-stack` for a network-free preview.
 
 ## Stack Operations
 

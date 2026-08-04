@@ -61,7 +61,7 @@ fn skipped_native_stack_receipt(component: &SkippedNativeStackComponent) -> serd
     })
 }
 
-fn reconcile_native_stacks(state: &StackState) {
+fn reconcile_native_stacks(state: &StackState, repair_native_stack: bool) -> Result<()> {
     if state.is_fork_workflow() {
         let outcome = github::NativeStackOutcome::NotApplicable {
             reason: "GitHub native stacks require pull requests in one repository; fork/cross-repository workflows keep the ez stack local".to_string(),
@@ -73,7 +73,7 @@ fn reconcile_native_stacks(state: &StackState) {
             &outcome,
         ));
         crate::cmd::native_stack::report_outcome(&outcome);
-        return;
+        return Ok(());
     }
 
     let plan = native_stack::native_stack_plan(state);
@@ -95,15 +95,26 @@ fn reconcile_native_stacks(state: &StackState) {
             &[],
             &github::NativeStackOutcome::NotNeeded,
         ));
-        return;
+        return Ok(());
     }
 
+    let mut repair_error = None;
     for chain in chains {
-        match github::reconcile_native_stack_exact(
-            &chain.pr_numbers,
-            "ez sync",
-            state.repo.as_deref(),
-        ) {
+        let outcome = if repair_native_stack {
+            github::repair_native_stack_exact(
+                &chain.pr_numbers,
+                "ez sync --repair-native-stack",
+                state.repo.as_deref(),
+            )
+        } else {
+            github::reconcile_native_stack_exact(
+                &chain.pr_numbers,
+                "ez sync",
+                state.repo.as_deref(),
+            )
+        };
+
+        match outcome {
             Ok(outcome) => {
                 crate::cmd::native_stack::report_outcome(&outcome);
                 ui::receipt(&crate::cmd::native_stack::receipt_value(
@@ -121,9 +132,19 @@ fn reconcile_native_stacks(state: &StackState) {
                     &chain.pr_numbers,
                     &err.to_string(),
                 ));
+                if repair_native_stack {
+                    repair_error = Some(err);
+                    break;
+                }
             }
         }
     }
+
+    if let Some(err) = repair_error {
+        return Err(err);
+    }
+
+    Ok(())
 }
 
 fn update_reparented_pr_bases(
@@ -182,6 +203,7 @@ struct SyncFinalize<'a> {
     skipped: usize,
     reparented_branches: &'a std::collections::BTreeSet<String>,
     reconcile_native: bool,
+    repair_native_stack: bool,
 }
 
 fn finalize_sync_after_mutations(state: &StackState, finalize: SyncFinalize<'_>) -> Result<()> {
@@ -236,7 +258,7 @@ fn finalize_sync_after_mutations(state: &StackState, finalize: SyncFinalize<'_>)
 
     if update_reparented_pr_bases(state, finalize.reparented_branches) && finalize.reconcile_native
     {
-        reconcile_native_stacks(state);
+        reconcile_native_stacks(state, finalize.repair_native_stack)?;
     } else if finalize.reconcile_native {
         ui::warn(
             "GitHub native stack update skipped because one or more PR bases could not be updated",
@@ -251,7 +273,7 @@ fn finalize_sync_after_mutations(state: &StackState, finalize: SyncFinalize<'_>)
     Ok(())
 }
 
-pub fn run(dry_run: bool, autostash: bool, force: bool) -> Result<()> {
+pub fn run(dry_run: bool, autostash: bool, force: bool, repair_native_stack: bool) -> Result<()> {
     let state = StackState::load()?;
     let _lease_guard = if dry_run {
         None
@@ -272,10 +294,18 @@ pub fn run(dry_run: bool, autostash: bool, force: bool) -> Result<()> {
             state.trunk
         ));
 
+        let main_root = git::main_worktree_root().unwrap_or_else(|_| {
+            git::repo_root().ok().unwrap_or_else(|| {
+                std::env::current_dir()
+                    .unwrap_or_default()
+                    .display()
+                    .to_string()
+            })
+        });
         let dry_worktree_map: std::collections::HashMap<String, String> = git::worktree_list()
             .unwrap_or_default()
             .into_iter()
-            .filter(|wt| wt.path.contains("/.worktrees/"))
+            .filter(|wt| wt.path != main_root)
             .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
             .collect();
 
@@ -315,11 +345,19 @@ pub fn run(dry_run: bool, autostash: bool, force: bool) -> Result<()> {
         } else {
             let native_plan = native_stack::native_stack_plan(&state);
             for chain in native_stack::linkable_chains(&native_plan) {
-                ui::info(&format!(
-                    "Would reconcile GitHub native stack for PRs {:?} ({})",
-                    chain.pr_numbers,
-                    chain.branches.join(" -> ")
-                ));
+                if repair_native_stack {
+                    ui::info(&format!(
+                        "Would repair GitHub native stack for PRs {:?} ({})",
+                        chain.pr_numbers,
+                        chain.branches.join(" -> ")
+                    ));
+                } else {
+                    ui::info(&format!(
+                        "Would reconcile GitHub native stack for PRs {:?} ({})",
+                        chain.pr_numbers,
+                        chain.branches.join(" -> ")
+                    ));
+                }
             }
             for component in &native_plan.skipped {
                 ui::info(&format!(
@@ -329,7 +367,13 @@ pub fn run(dry_run: bool, autostash: bool, force: bool) -> Result<()> {
             }
         }
 
-        ui::hint("Run `ez sync` (without --dry-run) to apply these changes");
+        if repair_native_stack {
+            ui::hint(
+                "Run `ez sync --repair-native-stack` (without --dry-run) to apply these changes",
+            );
+        } else {
+            ui::hint("Run `ez sync` (without --dry-run) to apply these changes");
+        }
         return Ok(());
     }
 
@@ -344,7 +388,7 @@ pub fn run(dry_run: bool, autostash: bool, force: bool) -> Result<()> {
         false
     };
 
-    let result = run_sync_inner(force);
+    let result = run_sync_inner(force, repair_native_stack);
 
     if stashed {
         if let Err(e) = git::stash_pop() {
@@ -357,7 +401,7 @@ pub fn run(dry_run: bool, autostash: bool, force: bool) -> Result<()> {
     result
 }
 
-fn run_sync_inner(force: bool) -> Result<()> {
+fn run_sync_inner(force: bool, repair_native_stack: bool) -> Result<()> {
     let mut state = StackState::load()?;
     let original_branch = git::current_branch()?;
     let original_root = git::repo_root()?;
@@ -652,7 +696,8 @@ fn run_sync_inner(force: bool) -> Result<()> {
                 restacked: 0,
                 skipped: candidates.len(),
                 reparented_branches: &reparented_branches,
-                reconcile_native: true,
+                reconcile_native: false,
+                repair_native_stack,
             },
         )?;
         return Err(err);
@@ -682,6 +727,7 @@ fn run_sync_inner(force: bool) -> Result<()> {
             skipped: report.failures.len(),
             reparented_branches: &reparented_branches,
             reconcile_native: report.is_clean(),
+            repair_native_stack,
         },
     )?;
 
@@ -699,7 +745,7 @@ mod tests {
     #[test]
     fn run_signatures_compile() {
         // Verifies the public API is correct at compile time.
-        let f: fn(bool, bool, bool) -> anyhow::Result<()> = super::run;
+        let f: fn(bool, bool, bool, bool) -> anyhow::Result<()> = super::run;
         let _ = std::mem::size_of_val(&f);
     }
 

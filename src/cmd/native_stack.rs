@@ -502,6 +502,14 @@ pub(crate) fn report_outcome(outcome: &github::NativeStackOutcome) {
         github::NativeStackOutcome::Unchanged { number } => {
             ui::info(&format!("GitHub native stack #{number} is up to date"));
         }
+        github::NativeStackOutcome::Repaired {
+            previous_number,
+            number,
+        } => {
+            ui::info(&format!(
+                "Repaired GitHub native stack #{previous_number} as #{number}"
+            ));
+        }
         github::NativeStackOutcome::Unavailable => {
             ui::info("GitHub native stacks unavailable; ordinary PR chain succeeded");
         }
@@ -536,6 +544,15 @@ pub(crate) fn receipt_value(
         github::NativeStackOutcome::Unchanged { number } => serde_json::json!({
             "cmd": command,
             "native_stack_action": "unchanged",
+            "native_stack_number": number,
+        }),
+        github::NativeStackOutcome::Repaired {
+            previous_number,
+            number,
+        } => serde_json::json!({
+            "cmd": command,
+            "native_stack_action": "repaired",
+            "native_stack_previous_number": previous_number,
             "native_stack_number": number,
         }),
         github::NativeStackOutcome::Unavailable => serde_json::json!({
