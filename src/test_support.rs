@@ -2,6 +2,37 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+pub(crate) struct EnvVarGuard {
+    name: &'static str,
+    old_value: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    pub(crate) fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let old_value = std::env::var_os(name);
+        // SAFETY: callers must hold the shared test environment mutex while
+        // mutating process-global environment variables.
+        unsafe {
+            std::env::set_var(name, value);
+        }
+        Self { name, old_value }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: paired with EnvVarGuard::set under the same test environment
+        // mutex held by the caller for the lifetime of this guard.
+        unsafe {
+            if let Some(value) = &self.old_value {
+                std::env::set_var(self.name, value);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
+    }
+}
+
 pub(crate) fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
