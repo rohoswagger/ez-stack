@@ -120,6 +120,102 @@ fn commit_file(dir: &Path, file: &str, contents: &str, message: &str) {
 }
 
 #[test]
+fn worktree_create_alias_uses_the_normal_create_worktree_flow() {
+    let repo = TempRepo::new();
+    let output = run_ez(
+        &repo.path,
+        &["worktree", "create", "feat/alias", "--from", "main"],
+    );
+    let created_path = PathBuf::from(stdout_text(&output));
+
+    assert!(created_path.is_dir(), "created path should exist");
+    assert_eq!(
+        stdout_text(&run(&created_path, "git", &["branch", "--show-current"])),
+        "feat/alias"
+    );
+    assert_eq!(
+        repo.stack_state_json()["branches"]["feat/alias"]["parent"],
+        "main"
+    );
+    assert!(
+        worktree_porcelain(&repo.path).contains(created_path.to_string_lossy().as_ref()),
+        "new worktree should be registered"
+    );
+}
+
+#[test]
+fn leases_human_output_classifies_available_claimed_stale_and_foreign_worktrees() {
+    let repo = TempRepo::new();
+    let available = "feat/available-human";
+    let claimed = "feat/claimed-human";
+    let stale = "feat/stale-human";
+    let foreign = "feat/foreign-human";
+    repo.create_worktree(available);
+    repo.create_worktree(claimed);
+    let stale_worktree = repo.create_worktree(stale);
+    let foreign_worktree = repo.create_worktree(foreign);
+
+    run_ez(
+        &repo.path,
+        &["worktree", "claim", claimed, "--owner", "agent-human"],
+    );
+    let stale_reason = format!(
+        "ez-lease:{}",
+        serde_json::json!({
+            "version": 1,
+            "owner": "gone-human",
+            "branch": stale,
+            "created_at": 1,
+            "expires_at": 2,
+        })
+    );
+    run(
+        &repo.path,
+        "git",
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            &stale_reason,
+            &stale_worktree.to_string_lossy(),
+        ],
+    );
+    run(
+        &repo.path,
+        "git",
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "manual maintenance",
+            &foreign_worktree.to_string_lossy(),
+        ],
+    );
+
+    let output = run_ez(&repo.path, &["worktree", "leases"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(stderr.contains(available), "unexpected stderr: {stderr}");
+    assert!(stderr.contains("available"), "unexpected stderr: {stderr}");
+    assert!(stderr.contains(claimed), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("claimed: agent-human"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(stderr.contains(stale), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("stale lease: gone-human"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(stderr.contains(foreign), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("foreign lock: manual maintenance"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(stderr.contains(r#""cmd":"worktree.leases""#));
+}
+
+#[test]
 fn claim_and_release_are_visible_without_mutating_stack_state() {
     let repo = TempRepo::new();
     let branch = "feat/owned";
