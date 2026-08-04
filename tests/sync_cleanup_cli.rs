@@ -88,6 +88,10 @@ if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  if [ -n "$GH_FAIL_PR_EDIT" ]; then
+    printf 'simulated pr edit failure\n' >&2
+    exit 9
+  fi
   exit 0
 fi
 printf 'unexpected gh invocation: %s\n' "$*" >&2
@@ -160,8 +164,19 @@ fn init_repo(prefix: &str, trunk: &str, branches: Value) -> CleanupRepo {
 }
 
 fn run_ez(repo: &CleanupRepo, dir: &Path, args: &[&str], graphql_response: &str) -> Output {
+    run_ez_with_env(repo, dir, args, graphql_response, &[])
+}
+
+fn run_ez_with_env(
+    repo: &CleanupRepo,
+    dir: &Path,
+    args: &[&str],
+    graphql_response: &str,
+    extra_env: &[(&str, &str)],
+) -> Output {
     let inherited_path = std::env::var("PATH").unwrap_or_default();
-    Command::new(env!("CARGO_BIN_EXE_ez"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ez"));
+    command
         .args(args)
         .current_dir(dir)
         .env("NO_COLOR", "1")
@@ -170,9 +185,11 @@ fn run_ez(repo: &CleanupRepo, dir: &Path, args: &[&str], graphql_response: &str)
             format!("{}:{inherited_path}", repo.fake_bin.display()),
         )
         .env("GH_LOG", &repo.gh_log)
-        .env("GH_GRAPHQL_RESPONSE", graphql_response)
-        .output()
-        .expect("run ez")
+        .env("GH_GRAPHQL_RESPONSE", graphql_response);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    command.output().expect("run ez")
 }
 
 fn stack_state(repo: &CleanupRepo) -> Value {
@@ -762,4 +779,137 @@ fn sync_skips_cleanup_for_leased_worktree_and_preserves_retryable_state() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(r#""action":"cleanup_skipped""#), "{stderr}");
     assert!(stderr.contains(r#""reason":"worktree_locked""#), "{stderr}");
+}
+
+#[test]
+fn sync_preserves_current_branch_when_trunk_checkout_is_blocked_by_another_worktree() {
+    let repo = init_repo(
+        "sync-cleanup-current-branch-checkout-blocked",
+        "main",
+        serde_json::json!({}),
+    );
+    add_branch(&repo, "feat/base", "main", "base.txt", 101);
+    run(&repo.path, "git", &["checkout", "feat/base"]);
+    let trunk_worktree = add_external_worktree(&repo, "main");
+    let before = stack_state(&repo);
+
+    let output = run_ez(&repo, &repo.path, &["sync"], merged_base_graphql());
+
+    assert!(
+        output.status.success(),
+        "sync should preserve retryable cleanup state when checkout is blocked:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(current_branch(&repo.path), "feat/base");
+    assert!(branch_exists(&repo, "feat/base"));
+    assert_eq!(
+        stack_state(&repo),
+        before,
+        "blocked checkout must not remove the branch from stack state"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(r#""action":"cleanup_skipped""#), "{stderr}");
+    assert!(stderr.contains(r#""reason":"checkout_failed""#), "{stderr}");
+    assert!(
+        stderr.contains("Could not switch to trunk"),
+        "expected checkout failure explanation:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(trunk_worktree);
+}
+
+#[test]
+fn sync_preserves_branch_when_delete_is_blocked_by_main_worktree_checkout() {
+    let repo = init_repo(
+        "sync-cleanup-delete-blocked-main-worktree",
+        "main",
+        serde_json::json!({}),
+    );
+    add_branch(&repo, "feat/base", "main", "base.txt", 101);
+    run(&repo.path, "git", &["checkout", "feat/base"]);
+    let trunk_worktree = add_external_worktree(&repo, "main");
+    let before = stack_state(&repo);
+
+    let output = run_ez(&repo, &trunk_worktree, &["sync"], merged_base_graphql());
+
+    assert!(
+        output.status.success(),
+        "sync should preserve retryable cleanup state when branch deletion is blocked:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(current_branch(&repo.path), "feat/base");
+    assert!(branch_exists(&repo, "feat/base"));
+    assert_eq!(
+        stack_state(&repo),
+        before,
+        "failed branch deletion must not remove the branch from stack state"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(r#""action":"cleanup_skipped""#), "{stderr}");
+    assert!(
+        stderr.contains(r#""reason":"branch_delete_failed""#),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Could not delete local branch `feat/base`"),
+        "expected branch delete failure explanation:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(trunk_worktree);
+}
+
+#[test]
+fn sync_skips_native_stack_reconcile_when_reparented_pr_base_update_fails() {
+    let repo = init_repo(
+        "sync-cleanup-pr-base-update-fails",
+        "main",
+        serde_json::json!({}),
+    );
+    add_branch(&repo, "feat/base", "main", "base.txt", 101);
+    add_branch(&repo, "feat/child", "feat/base", "child.txt", 102);
+
+    let output = run_ez_with_env(
+        &repo,
+        &repo.path,
+        &["sync"],
+        merged_base_open_child_graphql(),
+        &[("GH_FAIL_PR_EDIT", "1")],
+    );
+
+    assert!(
+        output.status.success(),
+        "PR base update failure should not fail local sync cleanup:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!branch_exists(&repo, "feat/base"));
+    assert_eq!(
+        stack_state(&repo)["branches"]["feat/child"]["parent"],
+        "main"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#""action":"pr_base_update_error""#),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(r#""native_stack_reason":"pr_base_update_failed""#),
+        "{stderr}"
+    );
+    let log = std::fs::read_to_string(&repo.gh_log).expect("gh log");
+    assert!(
+        log.contains("pr edit 102 --base main"),
+        "sync should attempt to repair the child PR base:\n{log}"
+    );
+    let calls_after_pr_edit = log
+        .lines()
+        .skip_while(|line| !line.starts_with("pr edit "))
+        .skip(1)
+        .collect::<Vec<_>>();
+    assert!(
+        calls_after_pr_edit
+            .iter()
+            .all(|line| !line.starts_with("api ")),
+        "native stack reconciliation must not run after PR base update failure:\n{log}"
+    );
 }
