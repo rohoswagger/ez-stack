@@ -74,4 +74,14 @@ mod tests {
             "CONFLICT (content): Merge conflict in src/a.rs"
         );
     }
+
+    #[test]
+    fn report_handles_file_and_multiline_git_details() {
+        let conflict = RebaseConflict {
+            conflicting_files: vec!["src/a.rs".to_string(), "src/b.rs".to_string()],
+            stderr: "first line\nsecond line".to_string(),
+        };
+
+        report("sync", "feat/test", "main", &conflict, "ez restack");
+    }
 }
