@@ -695,6 +695,43 @@ fn run_sync_inner(force: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{
+        CwdGuard, PathGuard, cmd_output, init_git_repo, install_fake_bin, run_cmd, take_env_lock,
+        temp_dir, write_file,
+    };
+    use std::collections::BTreeSet;
+    use std::ffi::{OsStr, OsString};
+
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &OsStr) -> Self {
+            let old = std::env::var_os(key);
+            // SAFETY: these tests hold the process-wide environment mutex via
+            // take_env_lock before mutating environment variables.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: paired with EnvGuard::set while the same environment
+            // mutex is held by the owning test.
+            unsafe {
+                if let Some(value) = self.old.as_ref() {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
 
     #[test]
     fn run_signatures_compile() {
@@ -787,5 +824,156 @@ mod tests {
         assert_eq!(value["native_stack_action"], "skipped");
         assert_eq!(value["native_stack_reason"], "branching_component");
         assert_eq!(value["native_stack_root"], "feat/a");
+    }
+
+    fn init_sync_finalize_repo(name: &str) -> (std::path::PathBuf, StackState) {
+        let repo = init_git_repo(name);
+        let _cwd = CwdGuard::enter(&repo);
+        let mut state = StackState::new("main".to_string());
+        state.repo = Some("owner/repo".to_string());
+        state.save().expect("save initial state");
+        (repo, state)
+    }
+
+    fn commit_sync_file(
+        repo: &std::path::Path,
+        name: &str,
+        contents: &str,
+        message: &str,
+    ) -> String {
+        write_file(repo, name, contents);
+        run_cmd(repo, "git", &["add", name]);
+        run_cmd(repo, "git", &["commit", "-m", message]);
+        cmd_output(repo, "git", &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn finalize_sync_reports_everything_up_to_date_without_native_reconcile() {
+        let _guard = take_env_lock();
+        let (repo, state) = init_sync_finalize_repo("sync-finalize-up-to-date");
+        let _cwd = CwdGuard::enter(&repo);
+        let reparented = BTreeSet::new();
+
+        finalize_sync_after_mutations(
+            &state,
+            SyncFinalize {
+                original_branch: "main",
+                shell_cd_path: None,
+                cleaned_current_worktree: false,
+                cleaned: &[],
+                restacked: 0,
+                skipped: 0,
+                reparented_branches: &reparented,
+                reconcile_native: false,
+            },
+        )
+        .expect("finalize should succeed");
+    }
+
+    #[test]
+    fn finalize_sync_reports_success_with_cleaned_and_restacked_counts() {
+        let _guard = take_env_lock();
+        let (repo, state) = init_sync_finalize_repo("sync-finalize-success-counts");
+        let _cwd = CwdGuard::enter(&repo);
+        let cleaned = vec!["feat/merged".to_string()];
+        let reparented = BTreeSet::new();
+
+        finalize_sync_after_mutations(
+            &state,
+            SyncFinalize {
+                original_branch: "main",
+                shell_cd_path: None,
+                cleaned_current_worktree: false,
+                cleaned: &cleaned,
+                restacked: 2,
+                skipped: 0,
+                reparented_branches: &reparented,
+                reconcile_native: false,
+            },
+        )
+        .expect("finalize should succeed");
+    }
+
+    #[test]
+    fn finalize_sync_skips_native_reconcile_when_pr_base_update_fails() {
+        let _guard = take_env_lock();
+        let (repo, mut state) = init_sync_finalize_repo("sync-finalize-pr-base-failure");
+        let _cwd = CwdGuard::enter(&repo);
+        let gh_log = temp_dir("sync-finalize-pr-base-failure-gh-log").join("gh.log");
+        let fake_bin = install_fake_bin(
+            "sync-finalize-pr-base-failure-gh",
+            "gh",
+            "#!/bin/sh\n\
+if [ -n \"$EZ_FAKE_GH_LOG\" ]; then\n\
+  first=1\n\
+  for arg in \"$@\"; do\n\
+    if [ \"$first\" = 1 ]; then first=0; else printf '\\t' >> \"$EZ_FAKE_GH_LOG\"; fi\n\
+    printf '%s' \"$arg\" >> \"$EZ_FAKE_GH_LOG\"\n\
+  done\n\
+  printf '\\n' >> \"$EZ_FAKE_GH_LOG\"\n\
+fi\n\
+if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"edit\" ] && [ \"$3\" = \"42\" ]; then\n\
+  echo simulated pr base failure >&2\n\
+  exit 1\n\
+fi\n\
+if [ \"$1\" = \"api\" ]; then\n\
+  echo unexpected native stack api call >&2\n\
+  exit 2\n\
+fi\n\
+exit 0\n",
+        );
+        let _path = PathGuard::install(&fake_bin);
+        let _gh_log = EnvGuard::set("EZ_FAKE_GH_LOG", gh_log.as_os_str());
+        let parent_head = git::rev_parse("main").expect("main tip");
+        run_cmd(&repo, "git", &["checkout", "-b", "feat/base"]);
+        let base_tip = commit_sync_file(&repo, "base.txt", "base\n", "base");
+        run_cmd(&repo, "git", &["checkout", "-b", "feat/child"]);
+        commit_sync_file(&repo, "child.txt", "child\n", "child");
+        run_cmd(&repo, "git", &["checkout", "main"]);
+        state.add_branch("feat/base", "main", &parent_head, None, None);
+        state
+            .get_branch_mut("feat/base")
+            .expect("base meta")
+            .pr_number = Some(41);
+        state.add_branch("feat/child", "feat/base", &base_tip, None, None);
+        state
+            .get_branch_mut("feat/child")
+            .expect("child meta")
+            .pr_number = Some(42);
+        state.save().expect("save child state");
+        let plan = native_stack::native_stack_plan(&state);
+        let chains = native_stack::linkable_chains(&plan);
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0].pr_numbers, vec![41, 42]);
+        let reparented = BTreeSet::from(["feat/child".to_string()]);
+
+        finalize_sync_after_mutations(
+            &state,
+            SyncFinalize {
+                original_branch: "main",
+                shell_cd_path: None,
+                cleaned_current_worktree: false,
+                cleaned: &[],
+                restacked: 1,
+                skipped: 0,
+                reparented_branches: &reparented,
+                reconcile_native: true,
+            },
+        )
+        .expect("PR base failure should only skip native reconciliation");
+        let calls = std::fs::read_to_string(&gh_log)
+            .expect("fake gh log")
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls,
+            vec!["pr\tedit\t42\t--base\tfeat/base\t--repo\towner/repo".to_string()],
+            "sync should attempt the PR base update and stop before native reconciliation"
+        );
+        assert!(
+            calls.iter().all(|call| !call.starts_with("api")),
+            "native stack reconciliation must be skipped after PR base update failure: {calls:?}"
+        );
     }
 }

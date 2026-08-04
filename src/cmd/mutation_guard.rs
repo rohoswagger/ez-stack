@@ -320,6 +320,21 @@ mod tests {
     }
 
     #[test]
+    fn commit_with_guard_rejects_empty_commits_without_if_changed() {
+        let _guard = take_env_lock();
+        let repo = init_managed_feature_repo("mutation-empty-commit", None, None);
+        let _cwd = CwdGuard::enter(&repo);
+
+        let err = commit_with_guard("msg", None, false, &[])
+            .expect_err("empty commit without --if-changed should fail");
+
+        assert!(matches!(
+            err.downcast_ref::<EzError>(),
+            Some(EzError::NothingToCommit)
+        ));
+    }
+
+    #[test]
     fn commit_with_guard_blocks_out_of_scope_files_in_strict_mode() {
         let _guard = take_env_lock();
         let repo = init_managed_feature_repo(
@@ -341,6 +356,33 @@ mod tests {
             err.to_string()
                 .contains("staged files are outside the scope for `feat/test`"),
             "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn commit_with_guard_warn_scope_reports_but_allows_out_of_scope_files() {
+        let _guard = take_env_lock();
+        let repo = init_managed_feature_repo(
+            "mutation-scope-warn",
+            Some(vec!["src/auth/**".to_string()]),
+            Some(ScopeMode::Warn),
+        );
+        let _cwd = CwdGuard::enter(&repo);
+        write_file(&repo, "src/billing/invoice.rs", "pub fn invoice() {}\n");
+
+        let outcome = commit_with_guard(
+            "feat: warn for wrong scope",
+            None,
+            false,
+            &["src/billing/invoice.rs".to_string()],
+        )
+        .expect("warn mode should allow out-of-scope commit")
+        .expect("commit outcome");
+
+        assert_eq!(outcome.scope.scope_mode.as_deref(), Some("warn"));
+        assert_eq!(
+            outcome.scope.out_of_scope_files,
+            vec!["src/billing/invoice.rs".to_string()]
         );
     }
 
@@ -374,6 +416,31 @@ mod tests {
     }
 
     #[test]
+    fn commit_with_guard_tracked_mode_leaves_untracked_files_unstaged() {
+        let _guard = take_env_lock();
+        let repo = init_managed_feature_repo("mutation-tracked-mode", None, None);
+        let _cwd = CwdGuard::enter(&repo);
+        write_file(&repo, "tracked.txt", "changed\n");
+        write_file(&repo, "untracked.txt", "untracked\n");
+
+        let outcome =
+            commit_with_guard("feat: update tracked", Some(StageMode::Tracked), false, &[])
+                .expect("tracked-mode commit should succeed")
+                .expect("commit outcome");
+
+        assert_eq!(outcome.files_changed, 1);
+        assert_eq!(
+            cmd_output(
+                &repo,
+                "git",
+                &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]
+            ),
+            "tracked.txt"
+        );
+        assert_eq!(git::working_tree_status(), (0, 0, 1));
+    }
+
+    #[test]
     fn commit_with_guard_all_files_stages_untracked_files() {
         let _guard = take_env_lock();
         let repo = init_managed_feature_repo("mutation-all-files", None, None);
@@ -394,5 +461,55 @@ mod tests {
             "new.txt"
         );
         assert_eq!(git::working_tree_status(), (0, 0, 0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_with_guard_reports_files_modified_by_failed_hook() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = take_env_lock();
+        let repo = init_managed_feature_repo("mutation-hook-failure", None, None);
+        let _cwd = CwdGuard::enter(&repo);
+        let hooks = repo.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).expect("create hooks directory");
+        let hook = hooks.join("pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nprintf 'hook changed\\n' > tracked.txt\nexit 1\n",
+        )
+        .expect("write pre-commit hook");
+        let mut perms = std::fs::metadata(&hook)
+            .expect("hook metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook, perms).expect("chmod hook");
+        write_file(&repo, "selected.txt", "selected\n");
+        assert!(
+            git::modified_files().is_empty(),
+            "fixture should start without unstaged tracked changes"
+        );
+
+        let err = commit_with_guard(
+            "feat: trigger hook failure",
+            None,
+            false,
+            &["selected.txt".to_string()],
+        )
+        .expect_err("failing hook should fail commit");
+
+        assert!(
+            err.to_string().contains("git command failed"),
+            "unexpected hook error: {err:#}"
+        );
+        assert_eq!(
+            git::modified_files(),
+            vec!["tracked.txt".to_string()],
+            "tracked hook edits should be visible to the warning reporter"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("tracked.txt")).unwrap(),
+            "hook changed\n"
+        );
     }
 }
