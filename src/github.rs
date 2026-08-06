@@ -634,6 +634,19 @@ pub fn merge_pr(pr_number: u64, method: &str, repo: Option<&str>) -> Result<Merg
     merge_pr_with_poll_interval(pr_number, method, Duration::from_secs(1), repo)
 }
 
+/// Merge a GitHub native stack through the async stack endpoint only.
+///
+/// The ordinary PR path retains its legacy fallback for older GitHub
+/// installations, but a native stack must never silently degrade to a
+/// single-PR merge because that would leave the remote stack inconsistent.
+pub fn merge_native_stack_pr(
+    pr_number: u64,
+    method: &str,
+    repo: Option<&str>,
+) -> Result<MergePrOutcome> {
+    merge_native_stack_pr_with_poll_interval(pr_number, method, Duration::from_secs(1), repo)
+}
+
 fn merge_pr_with_poll_interval(
     pr_number: u64,
     method: &str,
@@ -641,10 +654,42 @@ fn merge_pr_with_poll_interval(
     repo: Option<&str>,
 ) -> Result<MergePrOutcome> {
     let repo = repo_name(repo)?;
+    let response = match merge_pr_async_request(&repo, pr_number, method) {
+        Ok(response) => response,
+        Err(err) if is_not_found_gh_error(&err) => {
+            return merge_pr_legacy(&repo, pr_number, method);
+        }
+        Err(err) => return Err(err),
+    };
+
+    handle_merge_async_response(&repo, pr_number, &response, poll_interval)
+}
+
+fn merge_native_stack_pr_with_poll_interval(
+    pr_number: u64,
+    method: &str,
+    poll_interval: Duration,
+    repo: Option<&str>,
+) -> Result<MergePrOutcome> {
+    let repo = repo_name(repo)?;
+    let response = match merge_pr_async_request(&repo, pr_number, method) {
+        Ok(response) => response,
+        Err(err) if is_not_found_gh_error(&err) => {
+            bail!(EzError::GhError(format!(
+                "GitHub native stack merge API is unavailable for PR #{pr_number}; stacked PRs must be merged through merge-async, so ez will not fall back to the legacy single-PR merge endpoint"
+            )));
+        }
+        Err(err) => return Err(err),
+    };
+
+    handle_merge_async_response(&repo, pr_number, &response, poll_interval)
+}
+
+fn merge_pr_async_request(repo: &str, pr_number: u64, method: &str) -> Result<String> {
     let route = format!("repos/{repo}/pulls/{pr_number}/merge-async");
     let method_json = serde_json::to_string(method)?;
     let payload = format!(r#"{{"merge_method":{method_json},"merge_action":"default"}}"#);
-    let response = match run_gh_with_stdin(
+    run_gh_with_stdin(
         &[
             "api",
             "-X",
@@ -656,15 +701,7 @@ fn merge_pr_with_poll_interval(
             GITHUB_API_VERSION_HEADER,
         ],
         &payload,
-    ) {
-        Ok(response) => response,
-        Err(err) if is_not_found_gh_error(&err) => {
-            return merge_pr_legacy(&repo, pr_number, method);
-        }
-        Err(err) => return Err(err),
-    };
-
-    handle_merge_async_response(&repo, pr_number, &response, poll_interval)
+    )
 }
 
 fn merge_pr_legacy(repo: &str, pr_number: u64, method: &str) -> Result<MergePrOutcome> {
@@ -1832,6 +1869,52 @@ exit 2
         assert_eq!(
             std::fs::read_to_string(log_path).expect("legacy"),
             "legacy\n"
+        );
+    }
+
+    #[test]
+    fn merge_native_stack_async_404_does_not_fall_back_to_legacy_merge() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "gh-native-merge-async-404",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "PUT" ] && [ "$4" = "repos/org/repo/pulls/77/merge-async" ]; then
+  echo "HTTP 404: Not Found" >&2
+  exit 1
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "PUT" ] && [ "$4" = "repos/org/repo/pulls/77/merge" ]; then
+  echo legacy >> "$EZ_FAKE_GH_LOG"
+  echo '{"merged":true,"message":"merged"}'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let log_path = fake_dir.join("legacy.log");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &log_path);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let err =
+            merge_native_stack_pr_with_poll_interval(77, "squash", std::time::Duration::ZERO, None)
+                .expect_err("native stack merge should require merge-async");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+        }
+        assert!(
+            err.to_string().contains("will not fall back"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            !log_path.exists(),
+            "legacy merge endpoint must not be called"
         );
     }
 

@@ -308,7 +308,7 @@ fn merge_native_stack(
         "Merging native stack via PR #{}...",
         top.pr_number
     ));
-    let status = github::merge_pr(top.pr_number, method, repo)?;
+    let status = github::merge_native_stack_pr(top.pr_number, method, repo)?;
     sp.finish_and_clear();
 
     if status == github::MergePrOutcome::Enqueued {
@@ -1524,6 +1524,75 @@ exit 0
             gh_log_put_count(&gh_log),
             2,
             "empty native stack lookup should merge each target sequentially"
+        );
+    }
+
+    #[test]
+    fn native_stack_merge_404_preserves_local_state_without_legacy_fallback() {
+        let _guard = take_env_lock();
+        let fake_dir = install_fake_bin(
+            "merge-native-async-404",
+            "gh",
+            r#"#!/bin/sh
+if [ "$1" = "repo" ]; then
+  echo "org/repo"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "PUT" ] && [ "$4" = "repos/org/repo/pulls/2/merge-async" ]; then
+  echo "HTTP 404: Not Found" >&2
+  exit 1
+fi
+if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "PUT" ] && [ "$4" = "repos/org/repo/pulls/2/merge" ]; then
+  echo legacy >> "$EZ_FAKE_GH_LOG"
+  echo '{"merged":true}'
+  exit 0
+fi
+exit 2
+"#,
+        );
+        let legacy_log = fake_dir.join("legacy.log");
+        unsafe {
+            std::env::set_var("EZ_FAKE_GH_LOG", &legacy_log);
+        }
+        let _path = PathGuard::install(&fake_dir);
+
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/a", "main", "aaa", None, None);
+        state.add_branch("feat/b", "feat/a", "bbb", None, None);
+        let targets = vec![
+            MergeTarget {
+                branch: "feat/a".to_string(),
+                pr_number: 1,
+                title: "A".to_string(),
+            },
+            MergeTarget {
+                branch: "feat/b".to_string(),
+                pr_number: 2,
+                title: "B".to_string(),
+            },
+        ];
+
+        let err = merge_native_stack(
+            &mut state,
+            &targets,
+            "squash",
+            &HashMap::new(),
+            "/tmp",
+            "/tmp",
+            None,
+        )
+        .err()
+        .expect("native stack merge must reject unavailable async API");
+
+        unsafe {
+            std::env::remove_var("EZ_FAKE_GH_LOG");
+        }
+        assert!(err.to_string().contains("will not fall back"));
+        assert!(state.branches.contains_key("feat/a"));
+        assert!(state.branches.contains_key("feat/b"));
+        assert!(
+            !legacy_log.exists(),
+            "legacy merge endpoint must not be called"
         );
     }
 
