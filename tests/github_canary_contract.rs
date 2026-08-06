@@ -113,12 +113,54 @@ fn job_needs(job: &str, dependency: &str) -> bool {
     false
 }
 
+fn step_after_checkout(job: &str) -> String {
+    let lines: Vec<&str> = job.lines().collect();
+    let checkout = lines
+        .iter()
+        .position(|line| line.trim() == "- uses: actions/checkout@v4")
+        .unwrap_or_else(|| panic!("job is missing actions/checkout@v4\njob block:\n{job}"));
+    let step_start = lines[checkout + 1..]
+        .iter()
+        .position(|line| line.trim_start().starts_with("- "))
+        .map(|offset| checkout + 1 + offset)
+        .unwrap_or_else(|| panic!("job has no step after checkout\njob block:\n{job}"));
+    let step_indent = leading_spaces(lines[step_start]);
+    let step_end = lines[step_start + 1..]
+        .iter()
+        .position(|line| {
+            !line.trim().is_empty()
+                && leading_spaces(line) == step_indent
+                && line.trim_start().starts_with("- ")
+        })
+        .map(|offset| step_start + 1 + offset)
+        .unwrap_or(lines.len());
+
+    lines[step_start..step_end].join("\n")
+}
+
 fn assert_job_needs(workflow: &str, job_name: &str, dependency: &str) {
     let job = job_block(workflow, job_name);
     assert!(
         job_needs(&job, dependency),
         "expected job {job_name} to declare needs: {dependency}\njob block:\n{job}"
     );
+}
+
+fn assert_release_tag_guard_after_checkout(workflow: &str, job_name: &str) {
+    let job = job_block(workflow, job_name);
+    let guard = step_after_checkout(&job);
+    for expected in [
+        "- name: Verify release tag matches Cargo version",
+        "VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*\"\\(.*\\)\"/\\1/')",
+        "TAG_VERSION=\"${GITHUB_REF_NAME#v}\"",
+        "[[ \"$TAG_VERSION\" != \"$VERSION\" ]]",
+        "exit 1",
+    ] {
+        assert!(
+            guard.contains(expected),
+            "expected {job_name} post-checkout step to contain {expected:?}\nstep block:\n{guard}"
+        );
+    }
 }
 
 #[test]
@@ -196,6 +238,15 @@ fn release_workflows_run_canary_before_build_jobs() {
         "python-wheel.yml must invoke the github canary reusable workflow"
     );
     assert_job_needs(&python_wheel, "build-wheel", "canary");
+}
+
+#[test]
+fn release_build_jobs_verify_tag_matches_cargo_version_after_checkout() {
+    let release = read_repo_file(".github/workflows/release.yml");
+    assert_release_tag_guard_after_checkout(&release, "build");
+
+    let python_wheel = read_repo_file(".github/workflows/python-wheel.yml");
+    assert_release_tag_guard_after_checkout(&python_wheel, "build-wheel");
 }
 
 #[test]
