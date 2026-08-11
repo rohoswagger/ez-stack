@@ -331,6 +331,17 @@ fn merge_native_stack(
 
     move_to_main_root_for_targets(targets, worktree_map, current_dir, main_root)?;
 
+    // Same ordering rule as the sequential path: the merged branches are cleaned up before the
+    // restack, so a restack failure cannot strand them without metadata.
+    for target in targets {
+        cleanup_merged_branch(
+            state,
+            &target.branch,
+            worktree_map.get(&target.branch).map(String::as_str),
+            &trunk,
+        )?;
+    }
+
     let fetch_remote = state.fetch_remote().to_string();
     let push_remote = state.remote.clone();
     let (restacked, pushed) = fetch_restack_and_push_remaining(state, &fetch_remote, &push_remote)?;
@@ -342,15 +353,6 @@ fn merge_native_stack(
             "Updated {} remote branch(es) after restack",
             pushed.len()
         ));
-    }
-
-    for target in targets {
-        cleanup_merged_branch(
-            state,
-            &target.branch,
-            worktree_map.get(&target.branch).map(String::as_str),
-            &trunk,
-        )?;
     }
 
     Ok(NativeMergeOutcome {
@@ -423,10 +425,14 @@ fn merge_branch(
         main_root,
     )?;
 
+    // Clean up before restacking the rest of the stack. The branch is already merged and its
+    // stack entry is already gone, so nothing about deleting it depends on whether some sibling
+    // rebases cleanly — and if the restack fails, a `?` here would strand the branch and its
+    // worktree with no metadata left for `ez sync` to find them by.
+    cleanup_merged_branch(state, branch, linked_worktree, &trunk)?;
+
     let (restacked, restacked_for_push) =
         fetch_restack_and_push_remaining(state, &fetch_remote, &push_remote)?;
-
-    cleanup_merged_branch(state, branch, linked_worktree, &trunk)?;
 
     Ok(MergeOutcome {
         branch: branch.to_string(),
@@ -1245,6 +1251,79 @@ exit 0
         assert!(
             !state.branches.contains_key(branch),
             "branch should be removed from stack state"
+        );
+    }
+
+    #[test]
+    fn merged_branch_is_cleaned_up_even_when_the_post_merge_restack_fails() {
+        let _guard = take_env_lock();
+        let branch = "feat/linked";
+        let pr_number = 42;
+        let merge_repo = init_merge_repo("merge-cleanup-before-restack", branch, pr_number);
+
+        // A sibling that cannot be replayed onto the new trunk: both touch the same line.
+        run_cmd(&merge_repo.repo, "git", &["checkout", "main"]);
+        let main_head = {
+            let _cwd = CwdGuard::enter(&merge_repo.repo);
+            git::rev_parse("main").expect("main head")
+        };
+        run_cmd(&merge_repo.repo, "git", &["checkout", "-b", "feat/sibling"]);
+        write_file(&merge_repo.repo, "clash.txt", "sibling\n");
+        run_cmd(&merge_repo.repo, "git", &["add", "clash.txt"]);
+        run_cmd(&merge_repo.repo, "git", &["commit", "-m", "sibling"]);
+        run_cmd(
+            &merge_repo.repo,
+            "git",
+            &["push", "-u", "origin", "feat/sibling"],
+        );
+
+        run_cmd(&merge_repo.repo, "git", &["checkout", "main"]);
+        write_file(&merge_repo.repo, "clash.txt", "trunk\n");
+        run_cmd(&merge_repo.repo, "git", &["add", "clash.txt"]);
+        run_cmd(&merge_repo.repo, "git", &["commit", "-m", "trunk clash"]);
+        run_cmd(&merge_repo.repo, "git", &["push", "origin", "main"]);
+
+        {
+            let _cwd = CwdGuard::enter(&merge_repo.repo);
+            let mut state = StackState::load().expect("load state");
+            state.add_branch("feat/sibling", "main", &main_head, None, None);
+            state.save().expect("save state");
+        }
+
+        let (fake_dir, gh_log) =
+            install_logging_fake_gh("merge-cleanup-before-restack-gh", pr_number);
+        let _path = PathGuard::install(&fake_dir);
+        unsafe {
+            std::env::set_var("GH_LOG", &gh_log);
+        }
+        let _cwd = CwdGuard::enter(&merge_repo.worktree);
+
+        let result = run("squash", true, false);
+
+        assert!(
+            result.is_err(),
+            "the conflicting sibling should still surface as a restack failure"
+        );
+
+        // ...but the merge itself is done, so its branch must not be left behind with no stack
+        // entry to find it by. That combination is unrecoverable: `ez sync` only walks tracked
+        // branches, so an orphan here would never be cleaned up again.
+        assert!(
+            !merge_repo.worktree.exists(),
+            "merged branch's worktree should be removed despite the restack failure"
+        );
+        assert_eq!(
+            cmd_output(&merge_repo.repo, "git", &["branch", "--list", branch]),
+            "",
+            "merged branch should be deleted despite the restack failure"
+        );
+        let state = {
+            let _main_cwd = CwdGuard::enter(&merge_repo.repo);
+            StackState::load().expect("load state")
+        };
+        assert!(
+            !state.branches.contains_key(branch),
+            "merged branch should be out of stack state"
         );
     }
 

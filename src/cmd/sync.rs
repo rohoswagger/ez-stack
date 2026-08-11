@@ -61,6 +61,116 @@ fn skipped_native_stack_receipt(component: &SkippedNativeStackComponent) -> serd
     })
 }
 
+/// Worktrees ez created that no longer have a stack entry pointing at them.
+///
+/// A branch normally leaves the stack and its worktree in the same step. When something fails in
+/// between — a merge that drops the entry and then hits a restack error before cleanup — the
+/// worktree survives with no metadata left to find it by, so neither the cleanup loop above (which
+/// only walks `state.branches`) nor `ez log` will ever mention it again.
+///
+/// Scope is deliberately narrow: only worktrees under `.worktrees/`, which ez creates and owns.
+/// A branch checked out in an external worktree, or a plain local branch with no worktree at all,
+/// is somebody else's and is left alone no matter how merged it looks.
+fn orphaned_ez_worktrees(
+    state: &StackState,
+    worktree_map: &std::collections::HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut orphans: Vec<(String, String)> = worktree_map
+        .iter()
+        .filter(|(branch, path)| {
+            !state.branches.contains_key(*branch)
+                && !state.is_trunk(branch)
+                && path.contains("/.worktrees/")
+        })
+        .map(|(branch, path)| (branch.clone(), path.clone()))
+        .collect();
+    orphans.sort();
+    orphans
+}
+
+/// Delete the worktree, branch, and remote branch for orphans whose work already landed on trunk.
+///
+/// Returns the branches it cleaned. Anything that is not provably merged is left untouched and
+/// reported, because an orphan with unmerged commits is lost work, not litter.
+fn prune_orphaned_ez_worktrees(
+    state: &StackState,
+    worktree_map: &std::collections::HashMap<String, String>,
+    fetch_remote: &str,
+    force: bool,
+) -> Vec<String> {
+    let orphans = orphaned_ez_worktrees(state, worktree_map);
+    if orphans.is_empty() {
+        return Vec::new();
+    }
+
+    let branch_refs: Vec<&str> = orphans.iter().map(|(branch, _)| branch.as_str()).collect();
+    let pr_statuses =
+        github::get_pr_statuses_for(fetch_remote, state.repo.as_deref(), &branch_refs);
+
+    let mut cleaned = Vec::new();
+    for (branch, path) in &orphans {
+        let pr_info = pr_statuses.get(branch.as_str());
+        // A PR is authoritative when there is one; fall back to git for orphans that never had
+        // one. A closed-but-unmerged PR is not merged — that branch keeps its work.
+        let merged = match pr_info {
+            Some(pr) => pr.merged,
+            None => git::is_ancestor(branch, &state.trunk),
+        };
+        if !merged {
+            ui::warn(&format!(
+                "`{branch}` has a worktree at `{path}` but is not tracked by ez and is not merged"
+            ));
+            ui::hint(&format!(
+                "Run `ez track {branch}` to manage it again, or `ez worktree delete {branch} --force` to discard it"
+            ));
+            ui::receipt(&serde_json::json!({
+                "cmd": "sync",
+                "branch": branch,
+                "action": "cleanup_skipped",
+                "reason": "orphaned_worktree_unmerged",
+                "worktree": path,
+            }));
+            continue;
+        }
+
+        let removed = if force {
+            git::worktree_remove_force(path)
+        } else {
+            git::worktree_remove(path)
+        };
+        if let Err(e) = removed {
+            ui::warn(&format!(
+                "Could not remove orphaned worktree at `{path}`: {e}"
+            ));
+            ui::hint("Use `ez sync --force` to discard uncommitted changes");
+            ui::receipt(&serde_json::json!({
+                "cmd": "sync",
+                "branch": branch,
+                "action": "cleanup_skipped",
+                "reason": "orphaned_worktree_remove_failed",
+                "worktree": path,
+            }));
+            continue;
+        }
+
+        let _ = git::delete_branch(branch, true);
+        let _ = git::delete_remote_branch(&state.remote, branch);
+        ui::info(&format!(
+            "Cleaned up orphaned worktree for `{branch}` (merged, no longer tracked)"
+        ));
+        ui::receipt(&serde_json::json!({
+            "cmd": "sync",
+            "branch": branch,
+            "action": "cleaned",
+            "reason": "orphaned_merged_worktree",
+            "worktree": path,
+        }));
+        cleaned.push(branch.clone());
+    }
+
+    cleaned
+}
+
 fn reconcile_native_stacks(state: &StackState, repair_native_stack: bool) -> Result<()> {
     if state.is_fork_workflow() {
         let outcome = github::NativeStackOutcome::NotApplicable {
@@ -682,6 +792,16 @@ fn run_sync_inner(force: bool, repair_native_stack: bool) -> Result<()> {
         cleaned.push(branch_name.clone());
     }
 
+    // Safety net for worktrees whose stack entry disappeared without them — see
+    // `prune_orphaned_ez_worktrees`. Runs after the tracked pass so a branch cleaned above is
+    // already out of `state.branches` and is not considered twice.
+    cleaned.extend(prune_orphaned_ez_worktrees(
+        &state,
+        &worktree_map,
+        &fetch_remote,
+        force,
+    ));
+
     let order = state.topo_order();
     let candidates = crate::cmd::preflight::restack_candidates(&state, &order);
     let preflight_error = crate::cmd::preflight::run("sync", force, &candidates).err();
@@ -747,6 +867,42 @@ mod tests {
         // Verifies the public API is correct at compile time.
         let f: fn(bool, bool, bool, bool) -> anyhow::Result<()> = super::run;
         let _ = std::mem::size_of_val(&f);
+    }
+
+    #[test]
+    fn orphaned_ez_worktrees_only_claims_untracked_branches_in_ez_owned_worktrees() {
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/tracked", "main", "aaa", None, None);
+
+        let worktrees = std::collections::HashMap::from([
+            // Orphan: ez created the worktree, but nothing in the stack points at it anymore.
+            (
+                "feat/orphan".to_string(),
+                "/repo/.worktrees/feat-orphan".to_string(),
+            ),
+            // Still tracked — the normal cleanup loop owns this one.
+            (
+                "feat/tracked".to_string(),
+                "/repo/.worktrees/feat-tracked".to_string(),
+            ),
+            // Someone else's worktree (Superconductor, a manual `git worktree add`). Not ours.
+            (
+                "feat/external".to_string(),
+                "/elsewhere/feat-external".to_string(),
+            ),
+            // Trunk checked out in a second worktree is never litter.
+            ("main".to_string(), "/repo/.worktrees/main".to_string()),
+        ]);
+
+        let orphans = orphaned_ez_worktrees(&state, &worktrees);
+
+        assert_eq!(
+            orphans,
+            vec![(
+                "feat/orphan".to_string(),
+                "/repo/.worktrees/feat-orphan".to_string()
+            )]
+        );
     }
 
     #[test]
