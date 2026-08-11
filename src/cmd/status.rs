@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::cmd::native_stack;
+use crate::cmd::restack;
 use crate::error::EzError;
 use crate::git;
 use crate::github;
@@ -61,9 +62,7 @@ pub fn run(json: bool, native_stack: bool) -> Result<()> {
         let commits = git::log_oneline(&range, 50)?;
         let commit_count = commits.len();
 
-        let needs_restack = git::rev_parse(&meta.parent)
-            .map(|tip| tip != meta.parent_head)
-            .unwrap_or(false);
+        let needs_restack = restack::branch_needs_restack(&current, &meta.parent);
 
         let pr_status = meta.pr_number.and_then(|number| {
             github::get_pr_status(&number.to_string(), state.repo.as_deref())
@@ -280,8 +279,7 @@ pub fn run(json: bool, native_stack: bool) -> Result<()> {
     }
 
     // Check if needs restack
-    let parent_actual_head = git::rev_parse(&meta.parent)?;
-    if meta.parent_head != parent_actual_head {
+    if restack::branch_needs_restack(&current, &meta.parent) {
         ui::warn("Branch may need restacking — parent has moved.");
         ui::hint("Run `ez restack` to update.");
     }

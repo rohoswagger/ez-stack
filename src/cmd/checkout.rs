@@ -2,6 +2,7 @@ use anyhow::Result;
 use dialoguer::Select;
 use std::collections::HashMap;
 
+use crate::cmd::restack;
 use crate::error::EzError;
 use crate::git;
 use crate::github;
@@ -57,7 +58,7 @@ pub(crate) fn stale_switch_target_warning(
         }
     }
 
-    if git::is_ancestor(&parent, target) {
+    if !restack::branch_needs_restack(target, &parent) {
         return Ok(None);
     }
 
