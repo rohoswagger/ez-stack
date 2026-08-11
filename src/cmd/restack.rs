@@ -141,6 +141,21 @@ pub(crate) fn effective_old_base(
     (stored_parent_head.to_string(), false)
 }
 
+/// Whether `branch` actually needs a restack — asked of git, not of stack metadata.
+///
+/// The recorded `parent_head` is only a cache of where the branch forked from its parent, so it
+/// goes stale whenever history moves outside ez (a hand-rolled `git rebase`, an amend in another
+/// worktree, a parent that was force-pushed). Comparing it against the parent tip therefore
+/// reports a restack for a branch that is already sitting on top of its parent. The real question
+/// is whether the parent tip is in the branch's history. A parent that no longer resolves is not
+/// answerable here — `restack` heals that case by re-deriving the parent — so report no restack.
+pub(crate) fn branch_needs_restack(branch: &str, parent: &str) -> bool {
+    if git::rev_parse(parent).is_err() {
+        return false;
+    }
+    !git::is_ancestor(parent, branch)
+}
+
 /// Leave the repo usable after a failed rebase so the next branch starts from a clean slate.
 fn recover_after_failure(branch: &str, current_root: &str) {
     match git::abort_rebase_for_branch(branch, current_root) {
@@ -573,6 +588,53 @@ mod tests {
         run_cmd(repo, "git", &["add", file]);
         run_cmd(repo, "git", &["commit", "-m", message]);
         git::rev_parse(branch).expect("rev-parse")
+    }
+
+    #[test]
+    fn branch_needs_restack_reads_git_not_stale_metadata() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("needs-restack-stale-metadata");
+        let _cwd = CwdGuard::enter(&repo);
+
+        let main_sha = git::rev_parse("main").expect("main sha");
+        git::create_branch_at("feat/topic", "main").expect("branch");
+        commit_file(&repo, "feat/topic", "topic.txt");
+
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/topic", "main", &main_sha, None, None);
+        state.save().expect("save state");
+
+        assert!(!branch_needs_restack("feat/topic", "main"));
+
+        // main moves: the branch genuinely needs a restack.
+        commit_file(&repo, "main", "trunk.txt");
+        assert!(branch_needs_restack("feat/topic", "main"));
+
+        // Rebase by hand, outside ez, so `parent_head` is left pointing at the old main.
+        git::checkout("feat/topic").expect("checkout topic");
+        run_cmd(&repo, "git", &["rebase", "main"]);
+        assert_eq!(
+            state.get_branch("feat/topic").expect("topic").parent_head,
+            main_sha,
+            "metadata should still be stale for this test to mean anything"
+        );
+
+        assert!(
+            !branch_needs_restack("feat/topic", "main"),
+            "a branch sitting on top of its parent does not need a restack, stale cache or not"
+        );
+    }
+
+    #[test]
+    fn branch_needs_restack_is_quiet_when_the_parent_is_gone() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("needs-restack-missing-parent");
+        let _cwd = CwdGuard::enter(&repo);
+
+        git::create_branch_at("feat/topic", "main").expect("branch");
+        commit_file(&repo, "feat/topic", "topic.txt");
+
+        assert!(!branch_needs_restack("feat/topic", "feat/vanished"));
     }
 
     #[test]

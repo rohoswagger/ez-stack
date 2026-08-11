@@ -533,14 +533,27 @@ fn status_json_reports_warn_scope_mode() {
 }
 
 #[test]
-fn status_json_marks_branch_as_needing_restack_when_parent_head_is_stale() {
+fn status_json_marks_branch_as_needing_restack_when_the_parent_moved() {
     let (repo, base, _middle, _top) = init_linear_stack("status-needs-restack");
-    make_parent_head_stale(&repo.path, "feat/base");
+    commit_file(&repo.path, "trunk.txt", "trunk\n", "advance trunk");
 
     let status = stdout_json(&run_ez(&base, &["status", "--json"]));
 
     assert_eq!(status["branch"], "feat/base");
     assert_eq!(status["needs_restack"], true);
+}
+
+#[test]
+fn status_json_ignores_a_stale_parent_head_when_git_says_the_branch_is_restacked() {
+    let (repo, base, _middle, _top) = init_linear_stack("status-stale-metadata-only");
+    // Metadata is a cache of git, not the source of truth: `parent_head` goes stale whenever
+    // history moves outside ez (a hand-rolled `git rebase`), and that alone is not a restack.
+    make_parent_head_stale(&repo.path, "feat/base");
+
+    let status = stdout_json(&run_ez(&base, &["status", "--json"]));
+
+    assert_eq!(status["branch"], "feat/base");
+    assert_eq!(status["needs_restack"], false);
 }
 
 #[test]
@@ -645,9 +658,9 @@ fn status_human_reports_plural_commits_and_all_dirty_categories() {
 }
 
 #[test]
-fn status_human_warns_when_parent_head_is_stale() {
+fn status_human_warns_when_the_parent_moved() {
     let (repo, base, _middle, _top) = init_linear_stack("status-human-stale");
-    make_parent_head_stale(&repo.path, "feat/base");
+    commit_file(&repo.path, "trunk.txt", "trunk\n", "advance trunk");
 
     let output = run_ez(&base, &["status"]);
 
@@ -655,6 +668,18 @@ fn status_human_warns_when_parent_head_is_stale() {
     let stderr = stderr_text(&output);
     assert!(stderr.contains("Branch may need restacking"), "{stderr}");
     assert!(stderr.contains("Run `ez restack`"), "{stderr}");
+}
+
+#[test]
+fn status_human_stays_quiet_when_only_the_parent_head_cache_is_stale() {
+    let (repo, base, _middle, _top) = init_linear_stack("status-human-stale-cache-only");
+    make_parent_head_stale(&repo.path, "feat/base");
+
+    let output = run_ez(&base, &["status"]);
+
+    assert_success(&output);
+    let stderr = stderr_text(&output);
+    assert!(!stderr.contains("Branch may need restacking"), "{stderr}");
 }
 
 #[test]
