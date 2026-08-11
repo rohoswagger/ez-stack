@@ -535,7 +535,7 @@ if [ "$1" = "repo" ] && [ "$2" = "view" ] && [ "$3" = "--json" ] && [ "$4" = "na
   printf 'org/repo\n'
   exit 0
 fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "feat/topic" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName" ]; then
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "feat/topic" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid" ]; then
   printf 'no pull request found\n' >&2
   exit 1
 fi
@@ -568,11 +568,9 @@ fi
     );
     let log = gh_log(&repo);
     assert!(log.contains("repo view --json nameWithOwner -q .nameWithOwner"));
-    assert!(
-        log.contains(
-            "pr view feat/topic --json number,url,state,title,isDraft,mergedAt,baseRefName"
-        )
-    );
+    assert!(log.contains(
+        "pr view feat/topic --json number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid"
+    ));
     assert!(
         log.contains("pr create --title feat/topic --body "),
         "expected pr create with derived title:\n{log}"
@@ -587,7 +585,7 @@ if [ "$1" = "repo" ] && [ "$2" = "view" ] && [ "$3" = "--json" ] && [ "$4" = "na
   printf 'org/repo\n'
   exit 0
 fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "feat/topic" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName" ]; then
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "feat/topic" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid" ]; then
   printf 'no pull request found\n' >&2
   exit 1
 fi
@@ -673,7 +671,7 @@ if [ "$1" = "repo" ] && [ "$2" = "view" ] && [ "$3" = "--json" ] && [ "$4" = "na
   printf 'repo unavailable\n' >&2
   exit 1
 fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName" ]; then
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid" ]; then
   printf '{"number":42,"url":"https://github.com/org/repo/pull/42","state":"OPEN","title":"feat/topic","isDraft":false,"mergedAt":null,"baseRefName":"main"}\n'
   exit 0
 fi
@@ -690,7 +688,7 @@ fi
         gh_log(&repo).lines().collect::<Vec<_>>(),
         vec![
             "repo view --json nameWithOwner -q .nameWithOwner",
-            "pr view 42 --json number,url,state,title,isDraft,mergedAt,baseRefName",
+            "pr view 42 --json number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid",
         ]
     );
     assert_eq!(stack_state_bytes(&repo.path), stack_before);
@@ -730,7 +728,7 @@ fn pr_edit_explicit_fields_calls_github_and_preserves_local_state() {
 if [ "$1" = "pr" ] && [ "$2" = "edit" ] && [ "$3" = "42" ] && [ "$4" = "--title" ] && [ "$5" = "New title" ] && [ "$6" = "--body" ] && [ "$7" = "New body" ]; then
   exit 0
 fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName" ]; then
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid" ]; then
   printf '{"number":42,"url":"https://github.com/org/repo/pull/42","state":"OPEN","title":"New title","isDraft":false,"mergedAt":null,"baseRefName":"main"}\n'
   exit 0
 fi
@@ -751,7 +749,7 @@ fi
         gh_log(&repo).lines().collect::<Vec<_>>(),
         vec![
             "pr edit 42 --title New title --body New body",
-            "pr view 42 --json number,url,state,title,isDraft,mergedAt,baseRefName",
+            "pr view 42 --json number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid",
         ]
     );
     assert_eq!(stack_state_bytes(&repo.path), stack_before);

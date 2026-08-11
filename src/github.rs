@@ -73,6 +73,12 @@ pub struct PrInfo {
     pub base: String,
     pub is_draft: bool,
     pub merged: bool,
+    /// The PR's head commit SHA, empty when the source did not report one.
+    ///
+    /// Branch-name lookups (`headRefName`) return whatever PR most recently used a name, which is
+    /// not proof that the PR describes the branch in front of you. Comparing this against the
+    /// local tip is what turns a name match into an identity match.
+    pub head_oid: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,6 +182,7 @@ pub fn create_pr(
         base: base.to_string(),
         is_draft: draft,
         merged: false,
+        head_oid: String::new(),
     })
 }
 
@@ -194,7 +201,7 @@ pub fn get_pr_status(branch: &str, repo: Option<&str>) -> Result<Option<PrInfo>>
             "view",
             branch,
             "--json",
-            "number,url,state,title,isDraft,mergedAt,baseRefName",
+            "number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid",
         ],
         repo,
     );
@@ -210,6 +217,7 @@ pub fn get_pr_status(branch: &str, repo: Option<&str>) -> Result<Option<PrInfo>>
                 base: v["baseRefName"].as_str().unwrap_or("").to_string(),
                 is_draft: v["isDraft"].as_bool().unwrap_or(false),
                 merged: v["mergedAt"].as_str().is_some_and(|s| !s.is_empty()),
+                head_oid: v["headRefOid"].as_str().unwrap_or("").to_string(),
             }))
         }
         Err(_) => Ok(None),
@@ -282,6 +290,7 @@ fn pr_info_from_rest_value(value: &serde_json::Value) -> Option<(String, PrInfo)
             base: value["base"]["ref"].as_str().unwrap_or("").to_string(),
             is_draft: value["draft"].as_bool().unwrap_or(false),
             merged: !value["merged_at"].is_null(),
+            head_oid: value["head"]["sha"].as_str().unwrap_or("").to_string(),
         },
     ))
 }
@@ -581,7 +590,7 @@ fn build_pr_statuses_query(branches: &[&str]) -> String {
     for (i, branch) in branches.iter().enumerate() {
         let escaped = serde_json::to_string(branch).unwrap_or_else(|_| "\"\"".to_string());
         q.push_str(&format!(
-            "b{i}:pullRequests(headRefName:{escaped},first:1,orderBy:{{field:CREATED_AT,direction:DESC}}){{nodes{{number url state title baseRefName isDraft mergedAt}}}}"
+            "b{i}:pullRequests(headRefName:{escaped},first:1,orderBy:{{field:CREATED_AT,direction:DESC}}){{nodes{{number url state title baseRefName isDraft mergedAt headRefOid}}}}"
         ));
     }
     q.push_str("}}");
@@ -627,6 +636,7 @@ fn pr_info_from_graphql_node(node: &serde_json::Value) -> Option<PrInfo> {
         base: node["baseRefName"].as_str().unwrap_or("").to_string(),
         is_draft: node["isDraft"].as_bool().unwrap_or(false),
         merged,
+        head_oid: node["headRefOid"].as_str().unwrap_or("").to_string(),
     })
 }
 
@@ -1527,7 +1537,7 @@ exit 0
             "pr create --title Title --body Body --base main --head fork-owner:feature --draft --repo upstream/repo"
         ));
         assert!(log.contains(
-            "pr view feature --json number,url,state,title,isDraft,mergedAt,baseRefName --repo upstream/repo"
+            "pr view feature --json number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid --repo upstream/repo"
         ));
     }
 

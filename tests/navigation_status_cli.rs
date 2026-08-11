@@ -499,7 +499,7 @@ fi
     assert_eq!(
         gh_log(&repo).lines().collect::<Vec<_>>(),
         vec![
-            "pr view 42 --json number,url,state,title,isDraft,mergedAt,baseRefName",
+            "pr view 42 --json number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid",
             "repo view --json nameWithOwner -q .nameWithOwner",
         ]
     );

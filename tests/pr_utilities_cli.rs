@@ -308,7 +308,7 @@ fn pr_edit_explicit_title_body_sends_exact_call_and_reports_status() {
 if [ "$1" = "pr" ] && [ "$2" = "edit" ] && [ "$3" = "42" ] && [ "$4" = "--title" ] && [ "$5" = "New title" ] && [ "$6" = "--body" ] && [ "$7" = "New body" ]; then
   exit 0
 fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName" ]; then
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid" ]; then
   printf '{"number":42,"url":"https://github.com/org/repo/pull/42","state":"OPEN","title":"Topic","isDraft":false,"mergedAt":null,"baseRefName":"main"}\n'
   exit 0
 fi
@@ -325,7 +325,7 @@ fi
     assert!(stderr_text(&output).contains("https://github.com/org/repo/pull/42"));
     assert_eq!(
         gh_log(&repo),
-        "pr edit 42 --title New title --body New body\npr view 42 --json number,url,state,title,isDraft,mergedAt,baseRefName\n"
+        "pr edit 42 --title New title --body New body\npr view 42 --json number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid\n"
     );
     assert_clean(&repo.path);
 }
@@ -340,7 +340,7 @@ if [ "$1" = "pr" ] && [ "$2" = "edit" ] && [ "$3" = "42" ] && [ "$4" = "--body" 
   cmp -s "$CAPTURED_BODY" "$EXPECTED_BODY"
   exit $?
 fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName" ]; then
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid" ]; then
   printf '{"number":42,"url":"https://github.com/org/repo/pull/42","state":"OPEN","title":"Topic","isDraft":false,"mergedAt":null,"baseRefName":"main"}\n'
   exit 0
 fi
@@ -368,7 +368,7 @@ fi
     );
     assert_eq!(
         gh_log(&repo),
-        "pr edit 42 --body Body from file\nSecond line\n\npr view 42 --json number,url,state,title,isDraft,mergedAt,baseRefName\n"
+        "pr edit 42 --body Body from file\nSecond line\n\npr view 42 --json number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid\n"
     );
 }
 
@@ -428,7 +428,7 @@ fi
 if [ "$1" = "pr" ] && [ "$2" = "edit" ] && [ "$3" = "44" ] && [ "$4" = "--body" ] && [ "$5" = "Edited body" ]; then
   exit 0
 fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "44" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName" ]; then
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "44" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid" ]; then
   printf '{"number":44,"url":"https://github.com/org/repo/pull/44","state":"OPEN","title":"Topic","isDraft":false,"mergedAt":null,"baseRefName":"main"}\n'
   exit 0
 fi
@@ -458,7 +458,7 @@ printf 'Edited body' > "$1"
     assert!(stderr_text(&output).contains("https://github.com/org/repo/pull/44"));
     assert_eq!(
         gh_log(&repo),
-        "pr view 44 --json body -q .body\npr edit 44 --body Edited body\npr view 44 --json number,url,state,title,isDraft,mergedAt,baseRefName\n"
+        "pr view 44 --json body -q .body\npr edit 44 --body Edited body\npr view 44 --json number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid\n"
     );
     assert_edit_buffer_was_unique_and_cleaned(&repo, &edit_path_log);
 }
@@ -554,7 +554,7 @@ fi
 if [ "$1" = "pr" ] && [ "$2" = "edit" ] && [ "$3" = "47" ] && [ "$4" = "--body" ] && [ "$5" = "Edited body" ]; then
   exit 0
 fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "47" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName" ]; then
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "47" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid" ]; then
   exit 1
 fi
 "#,
@@ -638,7 +638,7 @@ fn pr_edit_success_falls_back_when_post_edit_status_lookup_fails() {
 if [ "$1" = "pr" ] && [ "$2" = "edit" ] && [ "$3" = "42" ] && [ "$4" = "--title" ] && [ "$5" = "Fallback title" ]; then
   exit 0
 fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName" ]; then
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid" ]; then
   printf 'lookup failed\n' >&2
   exit 1
 fi
@@ -652,7 +652,7 @@ fi
     assert!(stderr_text(&output).contains("Updated PR #42"));
     assert_eq!(
         gh_log(&repo),
-        "pr edit 42 --title Fallback title\npr view 42 --json number,url,state,title,isDraft,mergedAt,baseRefName\n"
+        "pr edit 42 --title Fallback title\npr view 42 --json number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid\n"
     );
 }
 
@@ -751,7 +751,7 @@ if [ "$1" = "repo" ] && [ "$2" = "view" ] && [ "$3" = "--json" ] && [ "$4" = "na
   printf 'repo unavailable\n' >&2
   exit 1
 fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName" ]; then
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ] && [ "$5" = "number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid" ]; then
   printf '{"number":42,"url":"https://github.com/from/status/pull/42","state":"OPEN","title":"Topic","isDraft":false,"mergedAt":null,"baseRefName":"main"}\n'
   exit 0
 fi
@@ -768,7 +768,7 @@ fi
     );
     assert_eq!(
         gh_log(&repo),
-        "repo view --json nameWithOwner -q .nameWithOwner\npr view 42 --json number,url,state,title,isDraft,mergedAt,baseRefName\n"
+        "repo view --json nameWithOwner -q .nameWithOwner\npr view 42 --json number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid\n"
     );
 }
 
