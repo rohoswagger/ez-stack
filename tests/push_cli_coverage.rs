@@ -477,7 +477,7 @@ fi
     assert_eq!(
         gh_log(&repo).lines().collect::<Vec<_>>(),
         vec![
-            "pr view fork-owner:feat/topic --json number,url,state,title,isDraft,mergedAt,baseRefName --repo upstream-owner/project",
+            "pr view fork-owner:feat/topic --json number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid --repo upstream-owner/project",
             "pr create --title Explicit title --body Body from file --base main --head fork-owner:feat/topic --draft --repo upstream-owner/project",
         ]
     );
@@ -511,7 +511,7 @@ fi
         gh_log(&repo).lines().collect::<Vec<_>>(),
         vec![
             "repo view --json nameWithOwner -q .nameWithOwner",
-            "pr view 41 --json number,url,state,title,isDraft,mergedAt,baseRefName",
+            "pr view 41 --json number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid",
             "pr edit 41 --base main",
         ]
     );
@@ -539,7 +539,7 @@ fi
         gh_log(&repo).lines().collect::<Vec<_>>(),
         vec![
             "repo view --json nameWithOwner -q .nameWithOwner",
-            "pr view 41 --json number,url,state,title,isDraft,mergedAt,baseRefName",
+            "pr view 41 --json number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid",
             "pr edit 41 --title New title",
         ]
     );
@@ -566,7 +566,7 @@ fi
         gh_log(&repo).lines().collect::<Vec<_>>(),
         vec![
             "repo view --json nameWithOwner -q .nameWithOwner",
-            "pr view 41 --json number,url,state,title,isDraft,mergedAt,baseRefName",
+            "pr view 41 --json number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid",
             "pr edit 41 --body Updated body",
         ]
     );
@@ -592,7 +592,7 @@ fi
         gh_log(&repo).lines().collect::<Vec<_>>(),
         vec![
             "repo view --json nameWithOwner -q .nameWithOwner",
-            "pr view 41 --json number,url,state,title,isDraft,mergedAt,baseRefName",
+            "pr view 41 --json number,url,state,title,isDraft,mergedAt,baseRefName,headRefOid",
         ]
     );
 }

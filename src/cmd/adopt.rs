@@ -814,6 +814,7 @@ mod tests {
                 base: base.to_string(),
                 is_draft: false,
                 merged: false,
+                head_oid: String::new(),
             },
         )
     }

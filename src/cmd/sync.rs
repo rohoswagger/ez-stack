@@ -92,6 +92,31 @@ fn orphaned_ez_worktrees(
     orphans
 }
 
+/// Whether an orphaned branch's work is provably already in trunk, and so safe to delete.
+///
+/// An orphan has no recorded PR number, so its PR can only be found by `headRefName` — which
+/// returns whatever PR most recently used that branch *name*. After a name is recycled, or in a
+/// fork workflow where several contributors use the same name, that is somebody else's merged PR,
+/// and its `merged` flag says nothing about the branch in front of us. Comparing the PR's head
+/// commit against the local tip turns a name match into an identity match.
+///
+/// `tip_in_trunk` is proof on its own — that is an ordinary merge. The PR arm is what covers a
+/// squash merge, where the commits are rewritten and ancestry no longer holds. A diff against
+/// trunk cannot stand in for it: an orphan is by definition not restacked, so its diff still
+/// shows its own changes long after they landed on trunk.
+fn orphan_work_is_in_trunk(
+    pr_info: Option<&github::PrInfo>,
+    tip_in_trunk: bool,
+    local_tip: &str,
+) -> bool {
+    if tip_in_trunk {
+        return true;
+    }
+    pr_info.is_some_and(|pr| {
+        pr.merged && !pr.head_oid.is_empty() && !local_tip.is_empty() && pr.head_oid == local_tip
+    })
+}
+
 /// Delete the worktree and local branch for orphans whose work already landed on trunk.
 ///
 /// Returns the branches it cleaned. Anything that is not provably merged is left untouched and
@@ -133,22 +158,9 @@ fn prune_orphaned_ez_worktrees(
     for (branch, path) in &orphans {
         let pr_info = pr_statuses.get(branch.as_str());
 
-        // Git has to agree before anything is deleted. An orphan has no recorded PR number, so
-        // the only way to find its PR is `headRefName` — which returns the most recent PR that
-        // ever used that branch *name*. After a name is recycled, or in a fork workflow where
-        // several contributors use the same name, that is somebody else's merged PR, and trusting
-        // its `merged` flag alone would delete live work. The tracked cleanup path sidesteps this
-        // by looking PRs up by number; here git is the corroboration instead.
-        //
-        // Tip already in trunk covers a normal merge; an empty diff against trunk covers a squash
-        // merge, where the commits are rewritten and ancestry no longer holds.
         let tip_in_trunk = git::is_ancestor(branch, &state.trunk);
-        let content_in_trunk = || {
-            git::diff(&format!("{}...{}", state.trunk, branch), true, false)
-                .map(|stat| stat.trim().is_empty())
-                .unwrap_or(false)
-        };
-        let merged = tip_in_trunk || (pr_info.is_some_and(|pr| pr.merged) && content_in_trunk());
+        let local_tip = git::rev_parse(branch).unwrap_or_default();
+        let merged = orphan_work_is_in_trunk(pr_info, tip_in_trunk, local_tip.trim());
         if !merged {
             ui::warn(&format!(
                 "`{branch}` has a worktree at `{path}` but is not tracked by ez and is not merged"
@@ -963,6 +975,58 @@ mod tests {
     }
 
     #[test]
+    fn orphan_work_is_in_trunk_requires_the_merged_pr_to_be_this_branch() {
+        let merged_pr = |head_oid: &str| github::PrInfo {
+            number: 7,
+            url: String::new(),
+            state: "MERGED".to_string(),
+            title: String::new(),
+            base: "main".to_string(),
+            is_draft: false,
+            merged: true,
+            head_oid: head_oid.to_string(),
+        };
+
+        // Ordinary merge: ancestry alone settles it, no PR needed.
+        assert!(orphan_work_is_in_trunk(None, true, "abc123"));
+
+        // Squash merge: ancestry fails, but the merged PR's head is this branch's tip.
+        assert!(orphan_work_is_in_trunk(
+            Some(&merged_pr("abc123")),
+            false,
+            "abc123"
+        ));
+
+        // The dangerous case — a merged PR that only shares the branch *name*. Its head is some
+        // other commit, so it is not evidence about the branch sitting in this worktree.
+        assert!(!orphan_work_is_in_trunk(
+            Some(&merged_pr("deadbeef")),
+            false,
+            "abc123"
+        ));
+
+        // A source that reports no head SHA proves nothing either way.
+        assert!(!orphan_work_is_in_trunk(
+            Some(&merged_pr("")),
+            false,
+            "abc123"
+        ));
+        assert!(!orphan_work_is_in_trunk(
+            Some(&merged_pr("abc123")),
+            false,
+            ""
+        ));
+
+        // An open PR is not a merge, however well it matches.
+        let open = github::PrInfo {
+            merged: false,
+            state: "OPEN".to_string(),
+            ..merged_pr("abc123")
+        };
+        assert!(!orphan_work_is_in_trunk(Some(&open), false, "abc123"));
+    }
+
+    #[test]
     fn orphaned_ez_worktrees_anchors_ownership_to_this_repo_root() {
         let state = StackState::new("main".to_string());
 
@@ -1092,6 +1156,7 @@ mod tests {
             base: "main".to_string(),
             is_draft: false,
             merged: false,
+            head_oid: String::new(),
         };
         let merged = github::PrInfo {
             merged: true,
