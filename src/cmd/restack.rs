@@ -45,12 +45,20 @@ pub struct RestackFailure {
 #[derive(Debug, Default)]
 pub struct RestackReport {
     pub restacked: usize,
+    /// The branches whose tips actually moved, in the order they were restacked. Callers that
+    /// have to follow up per branch — `ez merge` force-pushes them — need the names, not a count.
+    pub restacked_branches: Vec<String>,
     pub failures: Vec<RestackFailure>,
 }
 
 impl RestackReport {
     pub fn is_clean(&self) -> bool {
         self.failures.is_empty()
+    }
+
+    fn record_restacked(&mut self, branch: &str) {
+        self.restacked += 1;
+        self.restacked_branches.push(branch.to_string());
     }
 
     fn branch_list(&self) -> String {
@@ -330,7 +338,7 @@ pub fn restack_branches_with_options(
                     if let Ok(meta) = state.get_branch_mut(branch_name) {
                         meta.parent_head = current_parent_tip;
                     }
-                    report.restacked += 1;
+                    report.record_restacked(branch_name);
                     let after_sha = git::rev_parse(branch_name).unwrap_or_default();
                     ui::receipt(&serde_json::json!({
                         "cmd": cmd,
@@ -368,7 +376,7 @@ pub fn restack_branches_with_options(
                 if let Ok(meta) = state.get_branch_mut(branch_name) {
                     meta.parent_head = current_parent_tip;
                 }
-                report.restacked += 1;
+                report.record_restacked(branch_name);
                 ui::info(&format!("Restacked `{branch_name}` onto `{parent}`"));
 
                 let after_sha = git::rev_parse(branch_name).unwrap_or_default();

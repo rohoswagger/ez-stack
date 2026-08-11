@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use std::collections::{HashMap, HashSet};
 
-use crate::cmd::rebase_conflict;
+use crate::cmd::restack;
 use crate::error::EzError;
 use crate::git;
 use crate::github;
@@ -195,64 +195,48 @@ fn fetch_restack_and_push_remaining(
     git::fetch(fetch_remote)?;
     sp.finish_and_clear();
 
-    let order = state.topo_order();
     let current_root = git::repo_root()?;
-    let mut restacked = 0;
-    let mut restacked_for_push = Vec::<String>::new();
+    let current_branch = git::current_branch()?;
 
-    for branch_name in &order {
-        let meta = state.get_branch(branch_name)?;
-        let parent = meta.parent.clone();
-        let stored_parent_head = meta.parent_head.clone();
-
-        let current_parent_tip = if state.is_trunk(&parent) {
-            git::rev_parse(&format!("{fetch_remote}/{parent}"))?
-        } else {
-            git::rev_parse(&parent)?
-        };
-
-        if current_parent_tip == stored_parent_head {
-            continue;
-        }
-
-        let sp = ui::spinner(&format!("Restacking `{branch_name}` onto `{parent}`..."));
-        let outcome = git::rebase_onto_for_branch(
-            &current_parent_tip,
-            &stored_parent_head,
-            branch_name,
-            &current_root,
-        )?;
-        sp.finish_and_clear();
-
-        match outcome {
-            git::RebaseOutcome::RebasingComplete => {
-                let meta = state.get_branch_mut(branch_name)?;
-                meta.parent_head = current_parent_tip;
-                restacked += 1;
-                restacked_for_push.push(branch_name.clone());
-                ui::info(&format!("Restacked `{branch_name}` onto `{parent}`"));
-            }
-            git::RebaseOutcome::Conflict(conflict) => {
-                state.save()?;
-                rebase_conflict::report("merge", branch_name, &parent, &conflict, "ez restack");
-                bail!(EzError::RebaseConflict(branch_name.clone()));
-            }
-        }
+    // The shared restack engine reads local refs, so bring local trunk up to the tip that was
+    // just merged before asking it what has drifted.
+    match git::update_branch_to_latest_remote(
+        fetch_remote,
+        &state.trunk,
+        &current_branch,
+        &current_root,
+    ) {
+        Ok(true) => ui::info(&format!("Updated `{}` to latest", state.trunk)),
+        Ok(false) => {}
+        Err(e) => ui::warn(&format!("Could not update `{}` — {e}", state.trunk)),
     }
 
-    if !restacked_for_push.is_empty() {
-        for branch_name in &restacked_for_push {
-            let sp = ui::spinner(&format!("Pushing restacked `{branch_name}` after merge..."));
-            git::fetch_branch(push_remote, branch_name)?;
-            git::push(push_remote, branch_name, true)?;
-            sp.finish_and_clear();
-            ui::info(&format!("Pushed `{branch_name}`"));
-        }
+    let order = state.topo_order();
+    let report = restack::restack_branches_with_options(
+        &mut *state,
+        &order,
+        &current_root,
+        "merge",
+        restack::RestackOptions::default(),
+    );
+
+    for branch_name in &report.restacked_branches {
+        let sp = ui::spinner(&format!("Pushing restacked `{branch_name}` after merge..."));
+        git::fetch_branch(push_remote, branch_name)?;
+        git::push(push_remote, branch_name, true)?;
+        sp.finish_and_clear();
+        ui::info(&format!("Pushed `{branch_name}`"));
     }
 
     state.save()?;
 
-    Ok((restacked, restacked_for_push))
+    // The merge itself is done and recorded. Branches that could not be replayed are reported
+    // individually and surface as exit 3, exactly as they do for `ez sync` and `ez restack`.
+    if !report.is_clean() {
+        bail!(restack::incomplete_error("merge", &report));
+    }
+
+    Ok((report.restacked, report.restacked_branches))
 }
 
 fn reparent_external_children_after_native_merge(
@@ -1148,6 +1132,54 @@ exit 0
         assert_eq!(
             state.get_branch("feat/child").expect("child").parent_head,
             base_head
+        );
+    }
+
+    #[test]
+    fn fetch_restack_survives_a_stack_entry_whose_branch_is_gone_from_git() {
+        let _guard = take_env_lock();
+        let repo = init_git_repo("merge-fetch-restack-missing-branch");
+        let bare = crate::test_support::temp_dir("merge-fetch-restack-missing-branch-remote")
+            .join("origin.git");
+        std::fs::create_dir_all(&bare).expect("create bare remote dir");
+        run_cmd(&bare, "git", &["init", "--bare"]);
+        run_cmd(
+            &repo,
+            "git",
+            &["remote", "add", "origin", bare.to_str().expect("bare path")],
+        );
+        run_cmd(&repo, "git", &["push", "-u", "origin", "main"]);
+        run_cmd(&repo, "git", &["checkout", "-b", "feat/live"]);
+        write_file(&repo, "live.txt", "live\n");
+        run_cmd(&repo, "git", &["add", "live.txt"]);
+        run_cmd(&repo, "git", &["commit", "-m", "live"]);
+        run_cmd(&repo, "git", &["push", "-u", "origin", "feat/live"]);
+        run_cmd(&repo, "git", &["checkout", "main"]);
+        let _cwd = CwdGuard::enter(&repo);
+
+        let main_head = git::rev_parse("main").expect("main head");
+        let mut state = StackState::new("main".to_string());
+        // A stack entry left behind for a branch that no longer exists in git — deleted by hand,
+        // or cleaned up in another worktree. Metadata is a cache, so this must not be fatal.
+        state.add_branch("feat/ghost", "main", &main_head, None, None);
+        state.add_branch("feat/live", "main", &main_head, None, None);
+
+        // Advance trunk so there is real restack work to do behind the ghost entry.
+        write_file(&repo, "trunk.txt", "trunk\n");
+        run_cmd(&repo, "git", &["add", "trunk.txt"]);
+        run_cmd(&repo, "git", &["commit", "-m", "trunk moves"]);
+        run_cmd(&repo, "git", &["push", "origin", "main"]);
+        let main_head2 = git::rev_parse("main").expect("main head 2");
+
+        let (restacked, pushed) = fetch_restack_and_push_remaining(&mut state, "origin", "origin")
+            .expect("a missing branch must not fail the post-merge restack");
+
+        assert_eq!(restacked, 1, "the live branch should still be restacked");
+        assert_eq!(pushed, vec!["feat/live".to_string()]);
+        assert!(git::is_ancestor("main", "feat/live"));
+        assert_eq!(
+            state.get_branch("feat/live").expect("live").parent_head,
+            main_head2
         );
     }
 
