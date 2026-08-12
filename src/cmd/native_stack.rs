@@ -589,6 +589,114 @@ pub(crate) fn error_receipt_value(
     })
 }
 
+/// The receipt for an ez component that cannot be expressed as one linear GitHub stack.
+pub(crate) fn skipped_receipt(
+    cmd: &str,
+    component: &SkippedNativeStackComponent,
+) -> serde_json::Value {
+    serde_json::json!({
+        "cmd": cmd,
+        "branches": component.branches,
+        "native_stack_action": "skipped",
+        "native_stack_reason": component.reason,
+        "native_stack_root": component.root,
+    })
+}
+
+/// Bring GitHub's native stack objects in line with ez's current topology.
+///
+/// `repair` chooses how much force to use. Without it, a stack that diverges from the desired PR
+/// chain is reported and left alone. With it, the divergent stack is dissolved and recreated —
+/// which is the only supported way to insert a PR into the middle of an existing stack, since
+/// GitHub refuses a plain base change for a PR that belongs to one.
+///
+/// `retry_command` is what the user is told to rerun if a concurrent change wins the race.
+pub(crate) fn reconcile_stacks(
+    state: &StackState,
+    cmd: &str,
+    retry_command: &str,
+    repair: bool,
+) -> anyhow::Result<()> {
+    if state.is_fork_workflow() {
+        let outcome = github::NativeStackOutcome::NotApplicable {
+            reason: "GitHub native stacks require pull requests in one repository; fork/cross-repository workflows keep the ez stack local".to_string(),
+        };
+        ui::receipt(&receipt_value(cmd, &[], &[], &outcome));
+        report_outcome(&outcome);
+        return Ok(());
+    }
+
+    let plan = native_stack_plan(state);
+
+    for component in &plan.skipped {
+        ui::warn(&format!(
+            "GitHub native stack skipped for `{}`: ez's {} branch component cannot be represented as one linear GitHub stack",
+            component.root,
+            component.branches.len()
+        ));
+        ui::receipt(&skipped_receipt(cmd, component));
+    }
+
+    let chains = linkable_chains(&plan);
+    if chains.is_empty() && plan.skipped.is_empty() {
+        ui::receipt(&receipt_value(
+            cmd,
+            &[],
+            &[],
+            &github::NativeStackOutcome::NotNeeded,
+        ));
+        return Ok(());
+    }
+
+    let mut repair_error = None;
+    for chain in chains {
+        let outcome = if repair {
+            github::repair_native_stack_exact(
+                &chain.pr_numbers,
+                retry_command,
+                state.repo.as_deref(),
+            )
+        } else {
+            github::reconcile_native_stack_exact(
+                &chain.pr_numbers,
+                retry_command,
+                state.repo.as_deref(),
+            )
+        };
+
+        match outcome {
+            Ok(outcome) => {
+                report_outcome(&outcome);
+                ui::receipt(&receipt_value(
+                    cmd,
+                    &chain.branches,
+                    &chain.pr_numbers,
+                    &outcome,
+                ));
+            }
+            Err(err) => {
+                ui::warn(&format!("GitHub native stack update skipped: {err}"));
+                ui::receipt(&error_receipt_value(
+                    cmd,
+                    &chain.branches,
+                    &chain.pr_numbers,
+                    &err.to_string(),
+                ));
+                if repair {
+                    repair_error = Some(err);
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(err) = repair_error {
+        return Err(err);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
