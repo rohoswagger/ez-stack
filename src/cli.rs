@@ -475,6 +475,36 @@ Examples:
         yes: bool,
     },
 
+    /// Split a multi-commit branch into a stack with one branch per commit
+    #[command(after_help = "\
+Examples:
+  ez split
+  ez split --dry-run
+  ez split feat/auth
+  ez split --prefix feat/auth-part
+
+Commit freely on one branch, then split it into a stack and `ez submit` to open
+a PR per commit. Nothing is rewritten: the commits already form a chain, so each
+layer is a branch pointed at a commit that is already in place.
+
+The branch you split keeps its name, its tip, and any PR it already has — it
+becomes the top layer, and its PR narrows to the final commit. New branches are
+named <branch>-1, <branch>-2, ... below it (override the base name with
+--prefix). Merge commits are refused, since they cannot become single-commit
+layers without rewriting history.")]
+    Split {
+        /// Branch to split (defaults to current branch)
+        branch: Option<String>,
+
+        /// Base name for the created branches (defaults to the branch name)
+        #[arg(long)]
+        prefix: Option<String>,
+
+        /// Print the resulting stack without creating anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Fold one local stack layer down into its parent without rewriting commits
     #[command(after_help = "\
 Examples:

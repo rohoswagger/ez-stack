@@ -67,6 +67,7 @@ parent
 track
 delete
 fold
+split
 move
 merge
 pr-edit
@@ -365,6 +366,19 @@ switch_to "${PREFIX}/base"
 run "$EZ_BIN_CANON" move --onto "$TRUNK_BRANCH"
 run "$EZ_BIN_CANON" restack
 run "$EZ_BIN_CANON" sync --dry-run
+run "$EZ_BIN_CANON" create "${PREFIX}/split-src" --from "$TRUNK_BRANCH" --no-worktree
+switch_to "${PREFIX}/split-src"
+mkdir -p "$FIXTURE_DIR"
+printf 'split one\n' > "${FIXTURE_DIR}/split-one.txt"
+run "$EZ_BIN_CANON" commit -Am "canary: split commit one"
+printf 'split two\n' > "${FIXTURE_DIR}/split-two.txt"
+run "$EZ_BIN_CANON" commit -Am "canary: split commit two"
+run "$EZ_BIN_CANON" split --dry-run
+run "$EZ_BIN_CANON" split
+run "$EZ_BIN_CANON" log
+navigate_to_output delete "${PREFIX}/split-src" --force --yes
+navigate_to_output delete "${PREFIX}/split-src-1" --force --yes
+
 run "$EZ_BIN_CANON" create "${PREFIX}/fold-parent" --from "$TRUNK_BRANCH" --no-worktree
 switch_to "${PREFIX}/fold-parent"
 mkdir -p "$FIXTURE_DIR"

@@ -29,6 +29,7 @@ pub mod scope;
 pub mod setup;
 pub mod shell_init;
 pub mod skill;
+pub mod split;
 pub mod status;
 pub mod submit;
 pub mod sync;
