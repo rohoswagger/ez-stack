@@ -377,7 +377,8 @@ run "$EZ_BIN_CANON" split --dry-run
 run "$EZ_BIN_CANON" split
 run "$EZ_BIN_CANON" log
 navigate_to_output delete "${PREFIX}/split-src" --force --yes
-navigate_to_output delete "${PREFIX}/split-src-1" --force --yes
+# Not the current branch, so `ez delete` prints no path to cd into.
+run "$EZ_BIN_CANON" delete "${PREFIX}/split-src-1" --force --yes
 
 run "$EZ_BIN_CANON" create "${PREFIX}/fold-parent" --from "$TRUNK_BRANCH" --no-worktree
 switch_to "${PREFIX}/fold-parent"
