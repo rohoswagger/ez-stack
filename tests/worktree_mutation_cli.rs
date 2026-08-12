@@ -843,9 +843,12 @@ fn move_warns_when_pr_base_update_fails_but_persists_local_move() {
         stderr.contains("Failed to update PR base"),
         "move should warn about the failed GitHub update:\n{stderr}"
     );
+    // The repo lookup is the native-stack probe: `ez move` asks whether this PR belongs to a
+    // GitHub stack *before* it touches local state, because a stacked PR cannot have its base
+    // edited directly. Here it resolves to no stack, so the plain base edit still happens.
     assert_eq!(
         std::fs::read_to_string(&gh_log).expect("read gh log"),
-        "pr edit 123 --base main\n"
+        "repo view --json nameWithOwner -q .nameWithOwner\npr edit 123 --base main\n"
     );
     let state = repo.stack_state();
     assert_eq!(state["branches"]["feat/topic"]["parent"], "main");

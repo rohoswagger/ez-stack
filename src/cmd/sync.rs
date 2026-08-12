@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::cmd::native_stack::{self, SkippedNativeStackComponent};
+use crate::cmd::native_stack;
 use crate::cmd::restack;
 use crate::error::EzError;
 use crate::git;
@@ -49,16 +49,6 @@ fn inside_worktree_path(current_dir: &str, worktree_path: &str) -> bool {
     let current = normalize(current_dir);
     let worktree = normalize(worktree_path);
     current == worktree || current.starts_with(&worktree)
-}
-
-fn skipped_native_stack_receipt(component: &SkippedNativeStackComponent) -> serde_json::Value {
-    serde_json::json!({
-        "cmd": "sync",
-        "branches": component.branches,
-        "native_stack_action": "skipped",
-        "native_stack_reason": component.reason,
-        "native_stack_root": component.root,
-    })
 }
 
 /// Worktrees ez created that no longer have a stack entry pointing at them.
@@ -237,90 +227,15 @@ fn prune_orphaned_ez_worktrees(
     cleaned
 }
 
+/// Delegates to the shared reconciler so `ez sync` and `ez move` restructure GitHub stacks the
+/// same way. `--repair-native-stack` is what allows a divergent stack to be dissolved and rebuilt.
 fn reconcile_native_stacks(state: &StackState, repair_native_stack: bool) -> Result<()> {
-    if state.is_fork_workflow() {
-        let outcome = github::NativeStackOutcome::NotApplicable {
-            reason: "GitHub native stacks require pull requests in one repository; fork/cross-repository workflows keep the ez stack local".to_string(),
-        };
-        ui::receipt(&crate::cmd::native_stack::receipt_value(
-            "sync",
-            &[],
-            &[],
-            &outcome,
-        ));
-        crate::cmd::native_stack::report_outcome(&outcome);
-        return Ok(());
-    }
-
-    let plan = native_stack::native_stack_plan(state);
-
-    for component in &plan.skipped {
-        ui::warn(&format!(
-            "GitHub native stack skipped for `{}`: ez's {} branch component cannot be represented as one linear GitHub stack",
-            component.root,
-            component.branches.len()
-        ));
-        ui::receipt(&skipped_native_stack_receipt(component));
-    }
-
-    let chains = native_stack::linkable_chains(&plan);
-    if chains.is_empty() && plan.skipped.is_empty() {
-        ui::receipt(&crate::cmd::native_stack::receipt_value(
-            "sync",
-            &[],
-            &[],
-            &github::NativeStackOutcome::NotNeeded,
-        ));
-        return Ok(());
-    }
-
-    let mut repair_error = None;
-    for chain in chains {
-        let outcome = if repair_native_stack {
-            github::repair_native_stack_exact(
-                &chain.pr_numbers,
-                "ez sync --repair-native-stack",
-                state.repo.as_deref(),
-            )
-        } else {
-            github::reconcile_native_stack_exact(
-                &chain.pr_numbers,
-                "ez sync",
-                state.repo.as_deref(),
-            )
-        };
-
-        match outcome {
-            Ok(outcome) => {
-                crate::cmd::native_stack::report_outcome(&outcome);
-                ui::receipt(&crate::cmd::native_stack::receipt_value(
-                    "sync",
-                    &chain.branches,
-                    &chain.pr_numbers,
-                    &outcome,
-                ));
-            }
-            Err(err) => {
-                ui::warn(&format!("GitHub native stack update skipped: {err}"));
-                ui::receipt(&crate::cmd::native_stack::error_receipt_value(
-                    "sync",
-                    &chain.branches,
-                    &chain.pr_numbers,
-                    &err.to_string(),
-                ));
-                if repair_native_stack {
-                    repair_error = Some(err);
-                    break;
-                }
-            }
-        }
-    }
-
-    if let Some(err) = repair_error {
-        return Err(err);
-    }
-
-    Ok(())
+    let retry_command = if repair_native_stack {
+        "ez sync --repair-native-stack"
+    } else {
+        "ez sync"
+    };
+    native_stack::reconcile_stacks(state, "sync", retry_command, repair_native_stack)
 }
 
 fn update_reparented_pr_bases(
@@ -1202,16 +1117,19 @@ mod tests {
 
     #[test]
     fn skipped_native_stack_receipt_explains_branching_component() {
-        let value = skipped_native_stack_receipt(&SkippedNativeStackComponent {
-            root: "feat/a".to_string(),
-            branches: vec![
-                "feat/a".to_string(),
-                "feat/b".to_string(),
-                "feat/c".to_string(),
-            ],
-            pr_numbers: vec![101, 102, 103],
-            reason: "branching_component",
-        });
+        let value = native_stack::skipped_receipt(
+            "sync",
+            &crate::cmd::native_stack::SkippedNativeStackComponent {
+                root: "feat/a".to_string(),
+                branches: vec![
+                    "feat/a".to_string(),
+                    "feat/b".to_string(),
+                    "feat/c".to_string(),
+                ],
+                pr_numbers: vec![101, 102, 103],
+                reason: "branching_component",
+            },
+        );
 
         assert_eq!(value["cmd"], "sync");
         assert_eq!(value["native_stack_action"], "skipped");

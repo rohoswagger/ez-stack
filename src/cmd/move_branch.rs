@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 
+use crate::cmd::native_stack;
 use crate::cmd::rebase_conflict;
 use crate::error::EzError;
 use crate::git;
@@ -52,6 +53,12 @@ pub fn run(onto: Option<&str>, force: bool) -> Result<()> {
     let old_parent = meta.parent.clone();
     let old_parent_head = meta.parent_head.clone();
     let pr_number = meta.pr_number;
+
+    // Look GitHub up before touching anything local. A PR that belongs to a native stack cannot
+    // have its base changed directly — GitHub rejects it with "Cannot change the base branch
+    // because the pull request is part of a stack" — so knowing this up front is what lets the
+    // move restructure the stack instead of reporting a success it did not achieve.
+    let native_stack_before = detect_native_stack(pr_number, state.repo.as_deref(), &state);
 
     let new_parent_head = git::rev_parse(onto)?;
     let candidates = crate::cmd::preflight::move_candidates(&state, &current, onto)?;
@@ -107,17 +114,27 @@ pub fn run(onto: Option<&str>, force: bool) -> Result<()> {
     meta.parent = onto.to_string();
     meta.parent_head = new_parent_head;
 
-    // Update PR base if a PR exists.
-    if let Some(pr) = pr_number {
-        let base = if state.is_trunk(onto) {
-            state.trunk.clone()
-        } else {
-            onto.to_string()
-        };
-        if let Err(e) = github::update_pr_base(pr, &base, state.repo.as_deref()) {
-            ui::warn(&format!("Failed to update PR base: {e}"));
+    // Update the PR base directly only when the PR stands alone. For a PR inside a native stack
+    // GitHub refuses the edit, and the stack restructure below is what moves the base instead —
+    // attempting it here would only emit a warning for an operation that was never going to work.
+    let pr_base_outcome = match (pr_number, native_stack_before.is_some()) {
+        (None, _) => PrBaseOutcome::NoPr,
+        (Some(_), true) => PrBaseOutcome::DeferredToNativeStack,
+        (Some(pr), false) => {
+            let base = if state.is_trunk(onto) {
+                state.trunk.clone()
+            } else {
+                onto.to_string()
+            };
+            match github::update_pr_base(pr, &base, state.repo.as_deref()) {
+                Ok(()) => PrBaseOutcome::Updated,
+                Err(e) => {
+                    ui::warn(&format!("Failed to update PR base: {e}"));
+                    PrBaseOutcome::Failed(e.to_string())
+                }
+            }
         }
-    }
+    };
 
     // Restack the whole subtree onto the moved branch — descendants beyond direct
     // children also need to follow, or they're left detached from the stack.
@@ -136,19 +153,100 @@ pub fn run(onto: Option<&str>, force: bool) -> Result<()> {
 
     state.save()?;
 
-    ui::success(&format!("Moved `{current}` onto `{onto}`"));
+    // Report the local half on its own. Whatever happens to GitHub next, the rebase and the stack
+    // metadata are already done, and an agent reading the receipts needs to see that separately
+    // from the remote outcome rather than inferring both from a single "Moved".
+    ui::success(&format!("Moved `{current}` onto `{onto}` locally"));
     if restacked > 0 {
         ui::info(&format!("Restacked {restacked} branch(es)"));
     }
-
     ui::receipt(&serde_json::json!({
         "cmd": "move",
         "branch": current,
         "from": old_parent,
         "onto": onto,
+        "local": "moved",
+        "restacked": restacked,
+        "pr_base": pr_base_outcome.receipt_value(),
+        "native_stack_before": match &native_stack_before {
+            Some(info) => serde_json::json!({
+                "number": info.number,
+                "size": info.pull_requests.len(),
+            }),
+            None => serde_json::Value::Null,
+        },
     }));
 
+    // Restructure the GitHub stack to match the new topology. Inserting a PR into the middle of an
+    // existing native stack is only supported by dissolving and recreating it, which is what
+    // `repair` does — a plain base change is what GitHub rejected in the first place.
+    //
+    // Only when the branch was actually in a stack. A move that involves no native stack has no
+    // business reconciling every other chain in the repo, and doing so would make `ez move` start
+    // failing on repos and GitHub installations that have nothing to do with this move.
+    if let Some(info) = &native_stack_before {
+        ui::info(&format!(
+            "PR #{} belongs to GitHub native stack #{} ({} PRs) — restructuring it to match",
+            pr_number.unwrap_or_default(),
+            info.number,
+            info.pull_requests.len()
+        ));
+        native_stack::reconcile_stacks(&state, "move", &format!("ez move --onto {onto}"), true)?;
+    }
+
     Ok(())
+}
+
+/// What happened to the PR's base branch, kept distinct from the local move in the receipt.
+enum PrBaseOutcome {
+    NoPr,
+    Updated,
+    Failed(String),
+    /// The PR is in a native stack, so its base moves as part of restructuring that stack.
+    DeferredToNativeStack,
+}
+
+impl PrBaseOutcome {
+    fn receipt_value(&self) -> serde_json::Value {
+        match self {
+            PrBaseOutcome::NoPr => serde_json::Value::Null,
+            PrBaseOutcome::Updated => serde_json::Value::String("updated".to_string()),
+            PrBaseOutcome::Failed(detail) => serde_json::json!({
+                "status": "failed",
+                "detail": detail,
+            }),
+            PrBaseOutcome::DeferredToNativeStack => {
+                serde_json::Value::String("deferred_to_native_stack".to_string())
+            }
+        }
+    }
+}
+
+/// The GitHub native stack a PR belongs to, or `None` when it has none, has no PR, or GitHub
+/// cannot answer.
+///
+/// A lookup failure deliberately reads as "no native stack" rather than aborting: `ez move` is
+/// primarily a local operation, and it should not start refusing to work because GitHub is
+/// unreachable. The restructure afterwards is what surfaces a genuine remote problem.
+fn detect_native_stack(
+    pr_number: Option<u64>,
+    repo: Option<&str>,
+    state: &StackState,
+) -> Option<github::NativeStackInfo> {
+    let pr = pr_number?;
+    if state.is_fork_workflow() {
+        return None;
+    }
+    match github::lookup_native_stack_for_pr(pr, repo) {
+        Ok(github::NativeStackLookup::Found(info)) => Some(info),
+        Ok(_) => None,
+        Err(e) => {
+            ui::warn(&format!(
+                "Could not check whether PR #{pr} is in a GitHub native stack: {e}"
+            ));
+            None
+        }
+    }
 }
 
 fn missing_onto_message(state: &StackState) -> String {
@@ -173,6 +271,44 @@ mod tests {
         state.add_branch("feat/base", "main", "aaa", None, None);
         state.add_branch("feat/top", "feat/base", "bbb", None, None);
         state
+    }
+
+    #[test]
+    fn pr_base_receipt_distinguishes_every_remote_outcome() {
+        // The point of these values: "Moved" on its own told an agent nothing about whether the
+        // PR's base actually followed the branch. Each state has to be separately readable.
+        assert_eq!(PrBaseOutcome::NoPr.receipt_value(), serde_json::Value::Null);
+        assert_eq!(PrBaseOutcome::Updated.receipt_value(), "updated");
+        assert_eq!(
+            PrBaseOutcome::DeferredToNativeStack.receipt_value(),
+            "deferred_to_native_stack"
+        );
+
+        let failed = PrBaseOutcome::Failed(
+            "Cannot change the base branch because the pull request is part of a stack".to_string(),
+        )
+        .receipt_value();
+        assert_eq!(failed["status"], "failed");
+        assert!(
+            failed["detail"]
+                .as_str()
+                .expect("detail")
+                .contains("part of a stack"),
+            "the reason has to survive into the receipt: {failed}"
+        );
+    }
+
+    #[test]
+    fn detect_native_stack_is_none_without_a_pr_or_in_a_fork_workflow() {
+        let state = sample_state();
+        // No PR: nothing to look up, and no GitHub call should be attempted.
+        assert!(detect_native_stack(None, None, &state).is_none());
+
+        // Fork workflows keep the ez stack local — GitHub native stacks need one repository.
+        let mut fork_state = sample_state();
+        fork_state.upstream_remote = Some("upstream".to_string());
+        assert!(fork_state.is_fork_workflow());
+        assert!(detect_native_stack(Some(42), None, &fork_state).is_none());
     }
 
     #[test]
