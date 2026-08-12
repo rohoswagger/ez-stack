@@ -77,6 +77,8 @@ src/
     status.rs      — ez status
     delete.rs      — ez delete
     move_branch.rs — ez move
+    split.rs       — ez split
+    fold.rs        — ez fold
     merge.rs       — ez merge
     pr_edit.rs     — ez pr-edit
     draft.rs       — ez draft / ez ready
@@ -193,7 +195,7 @@ Every commit must pass:
 These have been discussed and intentionally deferred:
 
 - **`ez rename`** — GitHub ties PRs to branch names; renaming requires deleting the old remote branch which may close the PR. Complex to do correctly.
-- **`ez split`** — Multi-commit splitting is high-complexity, high-risk.
+- **Interactive (hunk-level) split** — Breaking a *single* commit into several by selecting hunks needs a TUI or a scripted `git add -p` dance, and is genuinely high-risk. Per-commit splitting shipped as `ez split` once `ez track` made it a metadata operation; this is the part that stayed deferred.
 - **`ez absorb`** — Requires semantic commit analysis.
 - **`ez land`** — `ez merge` + `ez sync` already covers this flow.
 - **CI status in `ez log`** — Requires `gh run list` per branch (slow, extra API calls). Separate feature.

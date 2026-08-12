@@ -177,7 +177,18 @@ ez submit --remote fork --repo upstream-owner/project --fork-repo my-user/projec
 ez merge --yes                           # merge bottom PR non-interactively
 ez merge --stack --yes                   # atomically land a native stack; sequential fallback
 ez fold feat/child --yes                 # locally fold one PR-less layer into its parent
+ez split                                 # turn N commits on this branch into a stack of N branches
+ez split --dry-run                       # preview the resulting stack first
 ```
+
+`ez split` is the "commit freely, ship as a stack" path: make N ordinary commits
+on one branch, then split it and `ez submit` to open a PR per commit. It rewrites
+nothing — the commits already form a chain, so each layer is just a branch ref
+plus metadata. The branch you split keeps its name, its tip, and any PR it
+already has, becoming the top layer; new branches are named `<branch>-1`,
+`<branch>-2`, ... below it (`--prefix` overrides the base name). It refuses
+before creating anything if a name is taken or the range contains a merge commit,
+and no-ops on a single-commit branch.
 
 `ez merge` uses GitHub's asynchronous merge API when available. After a direct
 merge, ez removes each merged branch's clean linked worktree and returns the

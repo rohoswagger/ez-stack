@@ -2359,3 +2359,19 @@ exit 0
         );
     }
 }
+
+/// Commits in `range`, oldest first, as (full sha, subject).
+///
+/// Oldest-first is the order a stack is built in — the bottom layer is the first commit — and full
+/// SHAs are what stack metadata records, so callers do not have to re-resolve abbreviations.
+pub fn log_commits_oldest_first(range: &str) -> Result<Vec<(String, String)>> {
+    let output = run_git(&["log", "--reverse", "--format=%H%x1f%s", range])?;
+    Ok(output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let (sha, subject) = line.split_once('\x1f').unwrap_or((line, ""));
+            (sha.trim().to_string(), subject.to_string())
+        })
+        .collect())
+}
