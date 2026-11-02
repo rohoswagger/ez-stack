@@ -21,6 +21,16 @@ pub fn run(message: Option<&str>, all: bool) -> Result<()> {
         bail!(EzError::BranchNotInStack(current.clone()));
     }
 
+    // A branch with no commits of its own has HEAD on (or behind) its parent's
+    // tip, so `git commit --amend` would rewrite a commit that belongs to the
+    // parent and fork this branch off the stack.
+    let parent = state.get_branch(&current)?.parent.clone();
+    if git::branch_exists(&parent) && git::is_ancestor("HEAD", &parent) {
+        bail!(EzError::UserMessage(format!(
+            "`{current}` has no commits of its own yet — amending would rewrite a commit from `{parent}`\n  → Use `ez commit -m \"msg\"` to make the first commit on `{current}`"
+        )));
+    }
+
     if all {
         git::add_all()?;
     }
@@ -84,11 +94,32 @@ mod tests {
         let parent_head =
             git::rev_parse_at(repo.to_str().expect("repo path"), "main").expect("main head");
         run_cmd(&repo, "git", &["checkout", "-b", "feat/topic"]);
+        write_file(&repo, "topic.txt", "topic\n");
+        run_cmd(&repo, "git", &["add", "topic.txt"]);
+        run_cmd(&repo, "git", &["commit", "-m", "topic"]);
         let cwd = CwdGuard::enter(&repo);
         let mut state = StackState::new("main".to_string());
         state.add_branch("feat/topic", "main", &parent_head, None, None);
         state.save().expect("save stack");
         (repo, cwd)
+    }
+
+    #[test]
+    fn refuses_to_amend_parent_commit_on_branch_without_own_commits() {
+        let _lock = take_env_lock();
+        let repo = init_git_repo("amend-no-own-commits");
+        let main_head =
+            git::rev_parse_at(repo.to_str().expect("repo path"), "main").expect("main head");
+        run_cmd(&repo, "git", &["checkout", "-b", "feat/empty"]);
+        let _cwd = CwdGuard::enter(&repo);
+        let mut state = StackState::new("main".to_string());
+        state.add_branch("feat/empty", "main", &main_head, None, None);
+        state.save().expect("save stack");
+        write_file(&repo, "tracked.txt", "change\n");
+
+        let err = run(None, true).expect_err("amend must refuse");
+        assert!(err.to_string().contains("no commits of its own"), "{err}");
+        assert_eq!(git::rev_parse("HEAD").expect("head"), main_head);
     }
 
     #[test]

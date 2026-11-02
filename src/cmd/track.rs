@@ -138,6 +138,22 @@ pub fn infer_parent(branch: &str, state: &StackState) -> Result<String> {
     Ok(best.0)
 }
 
+/// The parent recorded for `branch`, or — when that branch no longer exists
+/// (deleted outside ez) — the parent derived from the commit graph. Read-only:
+/// metadata is repaired by the next restack/sync, not here.
+pub fn effective_parent(branch: &str, state: &StackState) -> Result<String> {
+    let recorded = &state.get_branch(branch)?.parent;
+    if state.is_trunk(recorded) || git::branch_exists(recorded) {
+        return Ok(recorded.clone());
+    }
+    let inferred = infer_parent(branch, state)?;
+    ui::warn(&format!(
+        "recorded parent `{recorded}` of `{branch}` no longer exists — using `{inferred}` from the commit graph"
+    ));
+    ui::hint("Run `ez restack` to repair the stack metadata");
+    Ok(inferred)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

@@ -20,11 +20,10 @@ pub fn run(stat: bool, name_only: bool) -> Result<()> {
         bail!(EzError::BranchNotInStack(current));
     }
 
-    let meta = state.get_branch(&current)?;
-    let parent = &meta.parent;
+    let parent = crate::cmd::track::effective_parent(&current, &state)?;
 
     // Three-dot diff: what this branch changed relative to where it forked from parent.
-    let range = diff_range(parent);
+    let range = diff_range(&parent);
     let output = git::diff(&range, stat, name_only)?;
     if !output.is_empty() {
         print!("{output}");

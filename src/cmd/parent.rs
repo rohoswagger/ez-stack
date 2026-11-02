@@ -16,9 +16,9 @@ pub fn run() -> Result<()> {
         bail!(EzError::BranchNotInStack(current));
     }
 
-    let meta = state.get_branch(&current)?;
+    let parent = crate::cmd::track::effective_parent(&current, &state)?;
     // Machine output to stdout — pipeable.
-    println!("{}", meta.parent);
+    println!("{parent}");
 
     Ok(())
 }

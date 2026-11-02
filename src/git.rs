@@ -143,6 +143,19 @@ pub fn create_branch(name: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn is_valid_branch_name(name: &str) -> bool {
+    run_git_with_status(&["check-ref-format", "--branch", name])
+        .map(|(ok, _, _)| ok)
+        .unwrap_or(false)
+}
+
+/// Create a new branch at `base` and check it out, carrying uncommitted changes
+/// over the way `git checkout -b` does.
+pub fn create_branch_at_and_checkout(name: &str, base: &str) -> Result<()> {
+    run_git(&["checkout", "-b", name, base])?;
+    Ok(())
+}
+
 /// Create a new branch at the tip of `base` without switching branches.
 pub fn create_branch_at(name: &str, base: &str) -> Result<()> {
     run_git(&["branch", name, base])?;
@@ -352,6 +365,26 @@ pub fn staged_files() -> Result<Vec<String>> {
         .filter(|line| !line.is_empty())
         .map(|line| line.to_string())
         .collect())
+}
+
+/// Staged files limited to `paths` (pathspecs).
+pub fn staged_files_in(paths: &[String]) -> Result<Vec<String>> {
+    let mut args = vec!["diff", "--cached", "--name-only", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    Ok(run_git(&args)?
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect())
+}
+
+/// `git commit -m <message> -- <paths>`: commit only `paths`, leaving any other
+/// staged changes staged.
+pub fn commit_paths(message: &str, paths: &[String]) -> Result<()> {
+    let mut args = vec!["commit", "-m", message, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    run_git(&args)?;
+    Ok(())
 }
 
 pub fn staged_files_matching_scope(patterns: &[String]) -> Result<Vec<String>> {

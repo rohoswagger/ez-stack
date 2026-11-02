@@ -71,7 +71,11 @@ pub fn commit_with_guard(
     }
 
     if !paths.is_empty() {
-        git::add_paths(paths)?;
+        if let Err(e) = git::add_paths(paths) {
+            bail!(EzError::UserMessage(format!(
+                "could not stage the given paths: {e}\n  → Check the paths with `git status --short`, then rerun `ez commit -m \"msg\" -- <paths>`"
+            )));
+        }
     } else if let Some(stage_mode) = stage_mode {
         match stage_mode {
             StageMode::Tracked => git::add_all()?,
@@ -79,22 +83,34 @@ pub fn commit_with_guard(
         }
     }
 
-    if if_changed && !git::has_staged_changes()? {
+    // With `-- <paths>`, only those paths are committed; anything else that was
+    // already staged stays staged for a later commit.
+    let staged_files = if paths.is_empty() {
+        git::staged_files()?
+    } else {
+        git::staged_files_in(paths)?
+    };
+
+    if if_changed && staged_files.is_empty() {
         return Ok(None);
     }
 
-    if !git::has_staged_changes()? {
+    if staged_files.is_empty() {
         bail!(EzError::NothingToCommit);
     }
 
     let meta = state.get_branch(&current)?;
-    let staged_files = git::staged_files()?;
     let scope = scope_preflight(&current, meta, &staged_files)?;
 
     let before = git::rev_parse("HEAD")?;
     let pre_modified = git::modified_files();
 
-    if let Err(e) = git::commit(message) {
+    let committed = if paths.is_empty() {
+        git::commit(message)
+    } else {
+        git::commit_paths(message, paths)
+    };
+    if let Err(e) = committed {
         report_hook_changes(&pre_modified);
         return Err(e);
     }

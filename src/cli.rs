@@ -91,7 +91,7 @@ Examples:
         #[arg(long, alias = "on", conflicts_with = "message")]
         from: Option<String>,
 
-        /// Create a branch only (no worktree)
+        /// Create the branch in this checkout and switch to it, keeping uncommitted changes (with --from: create without switching)
         #[arg(long)]
         no_worktree: bool,
 

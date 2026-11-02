@@ -167,7 +167,15 @@ pub fn run(name: Option<&str>, no_cd_required: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Interactive selector (existing code below, unchanged).
+    // Interactive selector. Without a terminal it can only fail with an opaque
+    // IO error, so point at the non-interactive form instead.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin())
+        || !std::io::IsTerminal::is_terminal(&std::io::stderr())
+    {
+        anyhow::bail!(EzError::UserMessage(
+            "no branch given and no terminal for the interactive picker\n  → Run `ez checkout <branch>` or `ez checkout <pr-number>`\n  → Run `ez list` to see branches".to_string()
+        ));
+    }
 
     // Collect all managed branches, sorted
     let mut branches: Vec<String> = state.branches.keys().cloned().collect();

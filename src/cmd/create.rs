@@ -73,6 +73,12 @@ pub fn run(
         current.clone()
     };
 
+    if !git::is_valid_branch_name(name) {
+        bail!(EzError::UserMessage(format!(
+            "`{name}` is not a valid branch name\n  → Use letters, digits, `-`, `_`, and `/` (see `git check-ref-format --branch`)"
+        )));
+    }
+
     if git::branch_exists(name) {
         ui::hint(&format!(
             "Use `ez switch {name}` to switch, or `ez delete {name}` to recreate"
@@ -232,18 +238,38 @@ pub fn run(
 
         println!("{wt_path}");
     } else {
-        // --no-worktree: create branch only, no worktree, no checkout.
+        // --no-worktree without --from: create the branch here and check it out,
+        // carrying uncommitted changes over (like `git checkout -b`). Staying on
+        // the parent would send the next `ez commit` to the parent (#165).
+        // With --from: create the branch without switching.
         // `-m` is rejected above, so no commit logic is needed here.
-        git::create_branch_at(name, &parent_head)?;
+        let switch = from.is_none();
+        if switch {
+            if let Err(e) = git::create_branch_at_and_checkout(name, &parent_head) {
+                if git::has_uncommitted_changes().unwrap_or(false) {
+                    ui::hint(
+                        "Commit or stash your changes, or run `ez create <name>` without --no-worktree to get a new worktree",
+                    );
+                }
+                return Err(e);
+            }
+        } else {
+            git::create_branch_at(name, &parent_head)?;
+        }
         state.add_branch(name, &parent, &parent_head, scope.clone(), scope_mode);
         if let Err(e) = state.save() {
+            if switch {
+                let _ = git::checkout(&current);
+            }
             let _ = git::delete_branch(name, true);
             return Err(e);
         }
         if from.is_some() {
             ui::success(&format!("Created `{name}` from `{parent}`"));
         } else {
-            ui::success(&format!("Created `{name}` on `{parent}`"));
+            ui::success(&format!(
+                "Created `{name}` on `{parent}` and switched to it"
+            ));
         }
 
         hooks::emit_hook("post-create", hook);
@@ -456,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn create_no_worktree_without_from_does_not_switch_branch() {
+    fn create_no_worktree_without_from_switches_to_new_branch() {
         let _guard = take_env_lock();
         let repo = init_git_repo("create-no-wt-no-switch");
         let _cwd = CwdGuard::enter(&repo);
@@ -467,16 +493,15 @@ mod tests {
         // Should be on main before create.
         assert_eq!(git::current_branch().expect("branch"), "main");
 
-        // --no-worktree without --from should NOT switch to the new branch.
+        // --no-worktree without --from checks out the new branch here (#165).
         run("feat/test", None, false, false, None, true, &[], None, None)
             .expect("create --no-worktree should succeed");
 
-        // Branch exists but we're still on main.
         assert!(git::branch_exists("feat/test"));
         assert_eq!(
             git::current_branch().expect("branch"),
-            "main",
-            "should still be on main after --no-worktree create"
+            "feat/test",
+            "--no-worktree create should switch to the new branch"
         );
     }
 

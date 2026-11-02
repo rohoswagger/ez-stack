@@ -268,13 +268,15 @@ fn create_scope_and_named_hook_are_recorded_for_branch_only_create() {
         serde_json::json!(["src/**"])
     );
     assert_eq!(state["branches"]["feat/scoped"]["scope_mode"], "strict");
-    assert_eq!(current_branch(&repo.path), "main");
+    // `--no-worktree` without `--from` checks out the new branch here (#165).
+    assert_eq!(current_branch(&repo.path), "feat/scoped");
 }
 
 #[test]
 fn create_on_trunk_uses_valid_default_from_parent() {
     let repo = init_repo("default-from-valid");
     run_ez(&repo.path, &["create", "feat/base", "--no-worktree"]);
+    run(&repo.path, "git", &["checkout", "main"]);
     let mut state = stack_state(&repo.path);
     state["default_from"] = Value::from("feat/base");
     write_stack_state(&repo.path, &state);
