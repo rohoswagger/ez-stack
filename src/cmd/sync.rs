@@ -528,7 +528,11 @@ pub fn run(dry_run: bool, autostash: bool, force: bool, repair_native_stack: boo
             } else {
                 parent.as_str()
             };
-            if moving.contains(parent) || restack::branch_needs_restack(branch_name, parent_ref) {
+            // Same trigger as the restack engine: the parent tip moved off the recorded base.
+            let parent_moved = git::rev_parse(parent_ref)
+                .map(|tip| tip.trim() != meta.parent_head)
+                .unwrap_or(false);
+            if moving.contains(parent) || parent_moved {
                 ui::info(&format!("Would restack `{branch_name}` onto `{parent}`"));
                 moving.insert(branch_name.clone());
                 any_restack = true;
@@ -577,6 +581,7 @@ pub fn run(dry_run: bool, autostash: bool, force: bool, repair_native_stack: boo
     }
 
     // Autostash: stash before any mutations.
+    let stash_root = git::repo_root().ok();
     let stashed = if autostash {
         let did_stash = git::stash_push()?;
         if did_stash {
@@ -589,7 +594,17 @@ pub fn run(dry_run: bool, autostash: bool, force: bool, repair_native_stack: boo
 
     let result = run_sync_inner(force, repair_native_stack);
 
-    if stashed {
+    if stashed && git::repo_root().ok() != stash_root {
+        // The worktree the changes were stashed from was cleaned up. Popping here would drop
+        // them into a different checkout, so leave them in the stash for the user to place.
+        ui::warn(&format!(
+            "Kept your autostashed changes in the stash: the worktree they came from (`{}`) was removed",
+            stash_root.as_deref().unwrap_or("unknown")
+        ));
+        ui::hint(
+            "Run `git stash list`, then `git stash apply <entry>` in the checkout where you want them",
+        );
+    } else if stashed {
         if let Err(e) = git::stash_pop() {
             ui::warn(&format!("Failed to pop autostash: {e}"));
         } else {

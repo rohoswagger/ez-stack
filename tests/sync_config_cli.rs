@@ -381,13 +381,11 @@ fn sync_dry_run_reports_fork_workflow_preview_without_fetching_or_calling_github
     let stderr = stderr_text(&output);
     assert!(stderr.contains("Sync preview (--dry-run"), "{stderr}");
     assert!(stderr.contains("Would fetch from `origin`"), "{stderr}");
-    assert!(
-        stderr.contains("Would check if PR for `feat/topic` is merged or closed"),
-        "{stderr}"
-    );
+    assert!(!stderr.contains("Would clean up `feat/topic`"), "{stderr}");
     let worktree = std::fs::canonicalize(worktree).expect("canonical worktree");
+    // #167: a worktree is only planned for removal when its branch is being cleaned up.
     assert!(
-        stderr.contains(&format!(
+        !stderr.contains(&format!(
             "Would remove worktree at `{}`",
             worktree.display()
         )),
@@ -414,7 +412,14 @@ fn sync_dry_run_reports_fork_workflow_preview_without_fetching_or_calling_github
         git_output(&repo.remote, &["rev-parse", "main"]),
         remote_head
     );
-    assert_eq!(gh_log(&repo), "");
+    // Dry runs may read PR state, but never call anything else on GitHub.
+    assert!(
+        gh_log(&repo)
+            .lines()
+            .all(|line| line.starts_with("api graphql") || line.starts_with("repo view")),
+        "{}",
+        gh_log(&repo)
+    );
 }
 
 #[test]
@@ -445,7 +450,14 @@ fn sync_dry_run_reports_native_stack_chain_without_calling_github() {
         git_output(&repo.remote, &["rev-parse", "main"]),
         remote_head
     );
-    assert_eq!(gh_log(&repo), "");
+    // Dry runs may read PR state, but never call anything else on GitHub.
+    assert!(
+        gh_log(&repo)
+            .lines()
+            .all(|line| line.starts_with("api graphql") || line.starts_with("repo view")),
+        "{}",
+        gh_log(&repo)
+    );
 }
 
 #[test]
@@ -467,5 +479,12 @@ fn sync_autostash_without_dirty_changes_runs_cleanly_and_leaves_no_stash() {
             .as_slice(),
         b""
     );
-    assert_eq!(gh_log(&repo), "");
+    // Dry runs may read PR state, but never call anything else on GitHub.
+    assert!(
+        gh_log(&repo)
+            .lines()
+            .all(|line| line.starts_with("api graphql") || line.starts_with("repo view")),
+        "{}",
+        gh_log(&repo)
+    );
 }

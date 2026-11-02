@@ -631,9 +631,13 @@ fn sync_dry_run_reports_native_stack_not_applicable_for_fork_workflow() {
         stderr.contains("not applicable") || stderr.contains("not_applicable"),
         "{stderr}"
     );
-    assert_eq!(
-        std::fs::read_to_string(&repo.gh_log).unwrap_or_default(),
-        ""
+    // The dry run reads PR state (to plan cleanup like the real run) but calls nothing else.
+    let gh_log = std::fs::read_to_string(&repo.gh_log).unwrap_or_default();
+    assert!(
+        gh_log
+            .lines()
+            .all(|line| line.starts_with("api graphql") || line.starts_with("repo view")),
+        "{gh_log}"
     );
 }
 

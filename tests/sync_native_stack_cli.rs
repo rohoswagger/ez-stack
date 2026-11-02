@@ -726,7 +726,13 @@ fn sync_dry_run_previews_native_chain_without_fetching_or_calling_github() {
         String::from_utf8_lossy(&output.stderr)
             .contains("Would reconcile GitHub native stack for PRs [101, 102]")
     );
-    assert!(!repo.gh_log.exists(), "dry-run must not invoke gh");
+    assert!(
+        std::fs::read_to_string(&repo.gh_log)
+            .unwrap_or_default()
+            .lines()
+            .all(|line| line.starts_with("api graphql") || line.starts_with("repo view")),
+        "dry-run may only read PR state from gh"
+    );
     assert!(!repo.payload.exists(), "dry-run must not mutate GitHub");
 }
 
@@ -753,7 +759,13 @@ fn sync_dry_run_repair_previews_without_fetching_or_calling_github() {
         String::from_utf8_lossy(&output.stderr)
             .contains("Run `ez sync --repair-native-stack` (without --dry-run)")
     );
-    assert!(!repo.gh_log.exists(), "dry-run must not invoke gh");
+    assert!(
+        std::fs::read_to_string(&repo.gh_log)
+            .unwrap_or_default()
+            .lines()
+            .all(|line| line.starts_with("api graphql") || line.starts_with("repo view")),
+        "dry-run may only read PR state from gh"
+    );
     assert!(!repo.payload.exists(), "dry-run must not mutate GitHub");
 }
 
@@ -783,10 +795,11 @@ fn sync_dry_run_previews_registered_external_worktree_outside_dot_worktrees() {
         "dry-run failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // #167: the PRs are open, so no worktree — internal or external — is planned for removal.
     assert!(
-        String::from_utf8_lossy(&output.stderr)
+        !String::from_utf8_lossy(&output.stderr)
             .contains(&format!("Would remove worktree at `{}`", expected_worktree)),
-        "dry-run should trust Git's worktree registry:\n{}",
+        "dry-run must not plan removing an open branch's worktree:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let _ = run_raw(

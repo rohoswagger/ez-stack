@@ -240,10 +240,14 @@ fn delete_with_worktree(
                  → Preserve `{quarantine_str}` and inspect `git worktree list` before retrying"
             );
         }
-        bail!(
-            "Could not remove worktree at `{wt_path}`: {error}\n\
-             Use `ez delete {target} --force` to discard uncommitted changes"
+        let message = format!(
+            "Could not remove worktree at `{wt_path}`: {error}\n  \
+             → Use `ez delete {target} --force` to discard uncommitted changes"
         );
+        if error.to_string().contains("modified or untracked files") {
+            return Err(EzError::UserMessage(message).into());
+        }
+        bail!(message);
     }
     ui::info(&format!("Removed worktree at `{wt_path}`"));
 

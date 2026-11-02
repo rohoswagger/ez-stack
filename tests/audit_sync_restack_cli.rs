@@ -413,3 +413,86 @@ fn restack_skips_squash_merged_branches_and_moves_open_children_onto_main() {
     assert!(again.status.success(), "{}", stderr(&again));
     assert_c_and_d_restacked_onto_main(&repo);
 }
+
+#[test]
+fn sync_dry_run_plans_the_restack_a_branch_deleted_outside_ez_forces() {
+    let repo = squash_merged_stack("dry-deleted");
+    for branch in ["A", "B"] {
+        set_pr(&repo, branch, 1, "OPEN", "main");
+    }
+    run(&repo.path, "git", &["branch", "-D", "B"]);
+
+    let dry = run_ez(&repo, &repo.path, &["sync", "--dry-run"]);
+    let dry_err = stderr(&dry);
+    assert!(dry.status.success(), "{dry_err}");
+    assert!(
+        dry_err.contains("Would clean up `B` (deleted outside ez)"),
+        "{dry_err}"
+    );
+    assert!(dry_err.contains("Would restack `C` onto `A`"), "{dry_err}");
+
+    let real = run_ez(&repo, &repo.path, &["sync"]);
+    let real_err = stderr(&real);
+    assert!(
+        real_err.contains("Restacked `C` onto `A`"),
+        "dry run promised this restack:\n{real_err}"
+    );
+}
+
+#[test]
+fn sync_autostash_does_not_pop_changes_into_another_checkout_when_their_worktree_is_removed() {
+    let repo = squash_merged_stack("autostash-removed");
+    let a_worktree = repo.path.join(".worktrees").join("A");
+    run(
+        &repo.path,
+        "git",
+        &[
+            "worktree",
+            "add",
+            "-q",
+            a_worktree.to_str().expect("wt"),
+            "A",
+        ],
+    );
+    std::fs::write(a_worktree.join("tracked.txt"), "uncommitted work\n").expect("dirty");
+
+    let output = run_ez(&repo, &a_worktree, &["sync", "--autostash"]);
+    let err = stderr(&output);
+    assert!(output.status.success(), "{err}");
+    assert_eq!(
+        git(&repo.path, &["status", "--porcelain"]),
+        "",
+        "A's uncommitted work landed in the main checkout:\n{err}"
+    );
+    let stash = git(&repo.path, &["stash", "show", "-p", "stash@{0}"]);
+    assert!(stash.contains("uncommitted work"), "{stash}");
+    assert!(
+        err.contains("Kept your autostashed changes in the stash"),
+        "{err}"
+    );
+}
+
+#[test]
+fn delete_of_a_dirty_worktree_without_force_is_a_usage_error() {
+    let repo = squash_merged_stack("delete-dirty");
+    let d_worktree = repo.path.join(".worktrees").join("D");
+    run(
+        &repo.path,
+        "git",
+        &[
+            "worktree",
+            "add",
+            "-q",
+            d_worktree.to_str().expect("wt"),
+            "D",
+        ],
+    );
+    std::fs::write(d_worktree.join("scratch.txt"), "untracked\n").expect("dirty");
+
+    let output = run_ez(&repo, &repo.path, &["delete", "D", "--yes"]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(5), "{err}");
+    assert!(err.contains("ez delete D --force"), "{err}");
+    assert!(d_worktree.join("scratch.txt").exists(), "{err}");
+    assert!(branch_exists(&repo, "D"));
+}
