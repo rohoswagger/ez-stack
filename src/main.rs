@@ -35,6 +35,7 @@ fn exit_code_for(e: &anyhow::Error) -> i32 {
             | EzError::BranchAlreadyExists(_)
             | EzError::AlreadyInitialized
             | EzError::NotInitialized
+            | EzError::DetachedHead
             | EzError::UserMessage(_) => 5,
             EzError::NothingToCommit | EzError::UnstagedChanges => 6,
             _ => 1,
@@ -111,6 +112,19 @@ fn handle_clap_error(e: clap::Error, start: Instant) {
     }
 }
 
+/// `ez create --hook` alone is hook discovery and needs no branch name; every
+/// other `ez create` invocation does.
+fn create_name(name: Option<String>, hook: Option<&str>) -> Result<String> {
+    match name {
+        Some(name) => Ok(name),
+        None if hook == Some("") => Ok(String::new()),
+        None => Err(error::EzError::UserMessage(
+            "missing branch name — usage: `ez create <name> [--hook <hook>]`\n  → `--hook` takes the next word as its value, so put the branch name first".to_string(),
+        )
+        .into()),
+    }
+}
+
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Init { trunk, yes } => cmd::init::run(trunk, yes),
@@ -130,7 +144,7 @@ fn run(cli: Cli) -> Result<()> {
             scope_mode,
             hook,
         } => cmd::create::run(
-            &name,
+            &create_name(name, hook.as_deref())?,
             message.as_deref(),
             all,
             all_files,

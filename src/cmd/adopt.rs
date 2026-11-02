@@ -621,7 +621,10 @@ fn adopt_receipt_value(
 }
 
 pub fn run(pr: Option<u64>, specific_branches: &[String], no_worktrees: bool) -> Result<()> {
-    let mut state = StackState::load().or_else(|_| {
+    let mut state = StackState::load().or_else(|e| {
+        if !matches!(e.downcast_ref::<EzError>(), Some(EzError::NotInitialized)) {
+            return Err(e);
+        }
         let trunk = git::default_branch().unwrap_or_else(|_| "main".to_string());
         let state = StackState::new(trunk.clone());
         state.save()?;

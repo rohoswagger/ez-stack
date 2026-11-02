@@ -66,7 +66,11 @@ impl StackState {
     }
 
     pub fn meta_dir() -> Result<PathBuf> {
-        Ok(git::git_common_dir()?.join("ez"))
+        match git::git_common_dir() {
+            Ok(dir) => Ok(dir.join("ez")),
+            Err(_) if !git::is_repo() => bail!(EzError::NotARepo),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn state_path() -> Result<PathBuf> {
@@ -83,7 +87,12 @@ impl StackState {
             bail!(EzError::NotInitialized);
         }
         let data = fs::read_to_string(&path)?;
-        let state: StackState = serde_json::from_str(&data)?;
+        let state: StackState = serde_json::from_str(&data).map_err(|e| {
+            EzError::UserMessage(format!(
+                "could not parse `{}`: {e}\n  → Fix the JSON by hand, or move it aside and run `ez init` then `ez track <branch>` to rebuild it",
+                path.display()
+            ))
+        })?;
         Ok(state)
     }
 
@@ -233,13 +242,16 @@ impl StackState {
                 return;
             }
             visited.insert(name.to_string());
-            if let Some(meta) = state.branches.get(name) {
-                visit(&meta.parent, state, visited, result);
-            }
+            let Some(meta) = state.branches.get(name) else {
+                return;
+            };
+            visit(&meta.parent, state, visited, result);
             result.push(name.to_string());
         }
 
-        for name in self.branches.keys() {
+        let mut names: Vec<&String> = self.branches.keys().collect();
+        names.sort();
+        for name in names {
             visit(name, self, &mut visited, &mut result);
         }
         result

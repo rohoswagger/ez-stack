@@ -121,6 +121,9 @@ pub fn clear() -> Result<()> {
 }
 
 fn current_branch_meta<'a>(state: &'a StackState, current: &str) -> Result<&'a BranchMeta> {
+    if current == "HEAD" {
+        bail!(EzError::DetachedHead);
+    }
     if state.is_trunk(current) {
         bail!(EzError::OnTrunk);
     }

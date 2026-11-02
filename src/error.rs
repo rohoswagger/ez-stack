@@ -8,6 +8,11 @@ pub enum EzError {
     )]
     NotARepo,
 
+    #[error(
+        "HEAD is detached — not on any branch\n  → Run `ez switch <branch>` (or `git switch <branch>`) to check out a branch, then retry"
+    )]
+    DetachedHead,
+
     #[error("ez is not initialized in this repo — run `ez init` first")]
     NotInitialized,
 

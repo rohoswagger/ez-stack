@@ -67,7 +67,8 @@ Examples:
   ez create feat/auth --no-worktree")]
     Create {
         /// Name for the new branch
-        name: String,
+        #[arg(required_unless_present = "hook")]
+        name: Option<String>,
 
         /// Commit selected changes with this message
         #[arg(short, long)]

@@ -863,7 +863,7 @@ pub fn remote_url(remote: &str) -> Result<String> {
 }
 
 pub fn branch_list() -> Result<Vec<String>> {
-    let output = run_git(&["branch", "--format=%(refname:short)"])?;
+    let output = run_git(&["for-each-ref", "--format=%(refname:short)", "refs/heads"])?;
     Ok(output.lines().map(|s| s.to_string()).collect())
 }
 
@@ -1392,6 +1392,22 @@ pub fn working_tree_status_at(dir: &str) -> (usize, usize, usize) {
 
 pub fn working_tree_status_at_checked(dir: &str) -> Result<(usize, usize, usize)> {
     working_tree_status_for_args(&["-C", dir, "status", "--porcelain"])
+}
+
+/// Commits in `range`, oldest first, as (full sha, subject).
+///
+/// Oldest-first is the order a stack is built in — the bottom layer is the first commit — and full
+/// SHAs are what stack metadata records, so callers do not have to re-resolve abbreviations.
+pub fn log_commits_oldest_first(range: &str) -> Result<Vec<(String, String)>> {
+    let output = run_git(&["log", "--reverse", "--format=%H%x1f%s", range])?;
+    Ok(output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let (sha, subject) = line.split_once('\x1f').unwrap_or((line, ""));
+            (sha.trim().to_string(), subject.to_string())
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -2358,20 +2374,4 @@ exit 0
             "-C /repo/worktree stash pop --index\n-C /repo/worktree stash pop\n"
         );
     }
-}
-
-/// Commits in `range`, oldest first, as (full sha, subject).
-///
-/// Oldest-first is the order a stack is built in — the bottom layer is the first commit — and full
-/// SHAs are what stack metadata records, so callers do not have to re-resolve abbreviations.
-pub fn log_commits_oldest_first(range: &str) -> Result<Vec<(String, String)>> {
-    let output = run_git(&["log", "--reverse", "--format=%H%x1f%s", range])?;
-    Ok(output
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            let (sha, subject) = line.split_once('\x1f').unwrap_or((line, ""));
-            (sha.trim().to_string(), subject.to_string())
-        })
-        .collect())
 }

@@ -9,6 +9,22 @@ use crate::github;
 use crate::stack::StackState;
 use crate::ui;
 
+/// Commit range for the branch's own commits. A recorded parent that no longer
+/// exists is stale metadata: count against the parent git implies instead of
+/// failing on an unknown revision.
+fn commit_range(state: &StackState, current: &str, parent: &str) -> String {
+    if state.is_trunk(parent) || git::branch_exists(parent) {
+        return format!("{parent}..{current}");
+    }
+    let base =
+        crate::cmd::track::infer_parent(current, state).unwrap_or_else(|_| state.trunk.clone());
+    ui::warn(&format!(
+        "Recorded parent `{parent}` of `{current}` no longer exists; counting commits against `{base}`"
+    ));
+    ui::hint("Run `ez restack` to re-derive the parent from git");
+    format!("{base}..{current}")
+}
+
 pub fn run(json: bool, native_stack: bool) -> Result<()> {
     let state = StackState::load()?;
     let current = git::current_branch()?;
@@ -50,6 +66,9 @@ pub fn run(json: bool, native_stack: bool) -> Result<()> {
             return Ok(());
         }
 
+        if current == "HEAD" {
+            anyhow::bail!(EzError::DetachedHead);
+        }
         if !state.is_managed(&current) {
             anyhow::bail!(EzError::BranchNotInStack(current.clone()));
         }
@@ -58,7 +77,7 @@ pub fn run(json: bool, native_stack: bool) -> Result<()> {
 
         let depth = state.path_to_trunk(&current).len().saturating_sub(1);
 
-        let range = format!("{}..{}", meta.parent, current);
+        let range = commit_range(&state, &current, &meta.parent);
         let commits = git::log_oneline(&range, 50)?;
         let commit_count = commits.len();
 
@@ -179,9 +198,13 @@ pub fn run(json: bool, native_stack: bool) -> Result<()> {
     }
 
     // Branch must be managed
+    if current == "HEAD" {
+        anyhow::bail!(EzError::DetachedHead);
+    }
     if !state.is_managed(&current) {
         ui::warn(&format!("Branch `{current}` is not tracked by ez."));
-        ui::hint("Run `ez create <name>` from a tracked branch to add it to the stack.");
+        ui::hint(&format!("Run `ez track {current}` to add it to the stack."));
+        ui::hint("Run `ez create <name>` from a tracked branch to start a new one.");
         return Ok(());
     }
 
@@ -262,7 +285,7 @@ pub fn run(json: bool, native_stack: bool) -> Result<()> {
     ));
 
     // Commits on this branch
-    let range = format!("{}..{}", meta.parent, current);
+    let range = commit_range(&state, &current, &meta.parent);
     let commits = git::log_oneline(&range, 50)?;
     if commits.is_empty() {
         ui::info("Commits: none");
