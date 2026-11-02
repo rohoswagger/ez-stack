@@ -322,7 +322,7 @@ fn create_am_commits_tracked_change_and_moves_untracked_file_without_staging_it(
     let worktree = expected_worktree(&repo.path, "feat/am");
     assert!(worktree.join("untracked.txt").exists());
     assert!(status_porcelain(&worktree).contains("?? untracked.txt"));
-    assert_eq!(status_porcelain(&repo.path), "?? .worktrees/");
+    assert_eq!(status_porcelain(&repo.path), "");
     assert!(
         git_output(&worktree, &["show", "--name-only", "--format=%s", "HEAD"])
             .contains("tracked.txt")

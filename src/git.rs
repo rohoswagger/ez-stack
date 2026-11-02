@@ -1087,7 +1087,7 @@ pub fn worktree_add_locked_no_checkout(path: &str, branch: &str, reason: &str) -
         path,
         branch,
     ])?;
-    Ok(())
+    exclude_ez_worktrees_dir(path)
 }
 
 pub fn worktree_checkout(path: &str, branch: &str) -> Result<()> {
@@ -1397,6 +1397,29 @@ pub fn worktree_remove_force(path: &str) -> Result<()> {
 /// The branch must already exist.
 pub fn worktree_add(path: &str, branch: &str) -> Result<()> {
     run_git(&["worktree", "add", path, branch])?;
+    exclude_ez_worktrees_dir(path)
+}
+
+fn exclude_ez_worktrees_dir(path: &str) -> Result<()> {
+    if !Path::new(path)
+        .components()
+        .any(|c| c.as_os_str() == ".worktrees")
+    {
+        return Ok(());
+    }
+    let info = git_common_dir()?.join("info");
+    let exclude = info.join("exclude");
+    let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if existing.lines().any(|line| line.trim() == "/.worktrees/") {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&info)?;
+    let separator = if existing.is_empty() || existing.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    std::fs::write(&exclude, format!("{existing}{separator}/.worktrees/\n"))?;
     Ok(())
 }
 

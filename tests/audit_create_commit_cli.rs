@@ -268,3 +268,16 @@ fn checkout_without_name_and_without_tty_is_a_usage_error() {
     assert_eq!(exit_code(&output), 5, "{}", stderr_text(&output));
     assert!(stderr_text(&output).contains("ez checkout <branch>"));
 }
+
+#[test]
+fn worktrees_dir_is_excluded_so_commit_all_files_never_stages_it() {
+    let repo = init_repo("wt-excluded");
+    run_ez(&repo.path, &["create", "in-worktree"]);
+    run_ez(&repo.path, &["create", "here", "--no-worktree"]);
+
+    assert_eq!(git_output(&repo.path, &["status", "--short"]), "");
+    write_file(&repo.path, "f.txt", "x\n");
+    run_ez(&repo.path, &["commit", "-Am", "add f"]);
+    let files = git_output(&repo.path, &["show", "--name-only", "--format=", "HEAD"]);
+    assert_eq!(files.trim(), "f.txt");
+}
