@@ -11,8 +11,20 @@ const GITHUB_JSON_ACCEPT_HEADER: &str = "Accept: application/vnd.github+json";
 const MAX_NATIVE_STACK_MUTATION_ATTEMPTS: usize = 3;
 const NATIVE_STACK_RETRY_BACKOFF: Duration = Duration::from_millis(50);
 
+/// A `gh` command that can never wait on the user: stdin is `/dev/null`
+/// unless a caller pipes it explicitly, prompts are disabled (gh errors
+/// instead of asking), and the update notifier stays off the network.
+fn gh_command() -> Command {
+    let mut cmd = Command::new("gh");
+    cmd.stdin(Stdio::null())
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GH_NO_UPDATE_NOTIFIER", "1");
+    crate::git::apply_non_interactive_env(&mut cmd);
+    cmd
+}
+
 fn run_gh(args: &[&str]) -> Result<String> {
-    let output = Command::new("gh")
+    let output = gh_command()
         .args(args)
         .output()
         .with_context(|| format!("failed to run gh {}", args.join(" ")))?;
@@ -37,7 +49,7 @@ fn run_gh_in_repo(args: &[&str], repo: Option<&str>) -> Result<String> {
 }
 
 fn run_gh_with_stdin(args: &[&str], stdin: &str) -> Result<String> {
-    let mut child = Command::new("gh")
+    let mut child = gh_command()
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

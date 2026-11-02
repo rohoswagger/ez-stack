@@ -22,8 +22,28 @@ pub enum RebaseOutcome {
     Conflict(RebaseConflict),
 }
 
+/// A `git` command that can never wait on the user: stdin is `/dev/null`
+/// (`.status()`/`.spawn()` would otherwise hand git ez's own stdin), and when
+/// ez has no terminal on stdin, git must fail instead of prompting on
+/// `/dev/tty` for credentials.
+pub(crate) fn git_command() -> Command {
+    let mut cmd = Command::new("git");
+    cmd.stdin(Stdio::null());
+    apply_non_interactive_env(&mut cmd);
+    cmd
+}
+
+/// Environment that keeps git (and git run by gh) from prompting when ez is
+/// not driven from a terminal.
+pub(crate) fn apply_non_interactive_env(cmd: &mut Command) {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+    }
+}
+
 fn run_git(args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(args)
         .output()
         .with_context(|| format!("failed to run git {}", args.join(" ")))?;
@@ -37,7 +57,7 @@ fn run_git(args: &[&str]) -> Result<String> {
 }
 
 fn run_git_with_status(args: &[&str]) -> Result<(bool, String, String)> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(args)
         .output()
         .with_context(|| format!("failed to run git {}", args.join(" ")))?;
@@ -67,7 +87,7 @@ where
 }
 
 fn run_git_streaming(args: &[&str]) -> Result<()> {
-    let mut child = Command::new("git")
+    let mut child = git_command()
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -132,8 +152,10 @@ pub fn rev_parse(refspec: &str) -> Result<String> {
 
 pub fn branch_exists(name: &str) -> bool {
     let reference = format!("refs/heads/{name}");
-    Command::new("git")
+    git_command()
         .args(["show-ref", "--verify", "--quiet", reference.as_str()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -292,7 +314,7 @@ pub fn working_tree_status() -> (usize, usize, usize) {
 }
 
 fn working_tree_status_for_args(args: &[&str]) -> Result<(usize, usize, usize)> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(args)
         .output()
         .with_context(|| format!("failed to run git {}", args.join(" ")))?;

@@ -77,14 +77,26 @@ pub fn run(title: Option<&str>, body: Option<&str>, body_file: Option<&str>) -> 
 
     let meta = state.get_branch(&current)?;
     let pr_number = meta.pr_number.ok_or_else(|| {
-        anyhow::anyhow!("No PR found for branch `{current}` — run `ez push` to create one first")
+        EzError::UserMessage(format!(
+            "No PR found for branch `{current}` — run `ez push` to create one first"
+        ))
     })?;
 
     // If no explicit edits, open $EDITOR with the current PR body.
     if title.is_none() && body.is_none() && body_file.is_none() {
-        let editor = std::env::var("VISUAL")
+        let configured_editor = std::env::var("VISUAL")
             .or_else(|_| std::env::var("EDITOR"))
-            .unwrap_or_else(|_| "vi".to_string());
+            .ok();
+        // Falling back to `vi` without a terminal waits on stdin forever.
+        if configured_editor.is_none() && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            bail!(EzError::UserMessage(
+                "No terminal to open an editor in and $EDITOR/$VISUAL is not set\n  \
+                 → Pass the new content directly: `ez pr-edit --body \"...\"`, \
+                 `--body-file <path>`, or `--title \"...\"`"
+                    .to_string()
+            ));
+        }
+        let editor = configured_editor.unwrap_or_else(|| "vi".to_string());
 
         let body_current = github::get_pr_body(pr_number, state.repo.as_deref())?;
         let edit_buffer = EditBuffer::create(pr_number, &body_current)?;

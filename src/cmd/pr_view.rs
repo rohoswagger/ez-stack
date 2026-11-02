@@ -20,7 +20,7 @@ pub fn run() -> Result<()> {
         ))
     })?;
 
-    ui::success(&format!("Opened PR for `{current}`"));
     github::open_pr_in_browser(&pr_number.to_string(), state.repo.as_deref())?;
+    ui::success(&format!("Opened PR for `{current}`"));
     Ok(())
 }
