@@ -519,6 +519,65 @@ pub fn cascade_restack_with_options(
     Ok(report.restacked)
 }
 
+/// Find tracked branches whose PR is merged and move their children past them.
+///
+/// A squash- or rebase-merged branch is not an ancestor of trunk, so rebasing it onto trunk
+/// replays work trunk already has and usually conflicts. Its children instead go onto the merged
+/// branch's own parent, keeping their recorded `parent_head` (the merged branch's old tip) as the
+/// upstream so only their own commits are replayed. The merged branches stay tracked and are not
+/// rebased; `ez sync` deletes them.
+fn skip_merged_branches(
+    state: &mut StackState,
+    fetch_remote: &str,
+) -> Result<std::collections::HashSet<String>> {
+    let mut merged = std::collections::HashSet::new();
+    let order: Vec<String> = state
+        .topo_order()
+        .into_iter()
+        .filter(|branch| state.branches.contains_key(branch))
+        .collect();
+    if !order
+        .iter()
+        .any(|branch| state.branches[branch].pr_number.is_some())
+    {
+        return Ok(merged);
+    }
+    let statuses = crate::cmd::sync::lookup_pr_statuses(state, fetch_remote, &order);
+    for branch in &order {
+        if !statuses.get(branch).is_some_and(|pr| pr.merged) {
+            continue;
+        }
+        let parent = state.get_branch(branch)?.parent.clone();
+        let merged_tip = git::rev_parse(branch).ok();
+        let children = state.reparent_children_preserving_parent_head(branch, &parent)?;
+        if let Some(tip) = merged_tip.as_deref().map(str::trim) {
+            for child in &children {
+                if git::is_ancestor(tip, child)
+                    && let Ok(meta) = state.get_branch_mut(child)
+                {
+                    meta.parent_head = tip.to_string();
+                }
+            }
+        }
+        ui::info(&format!(
+            "Skipping `{branch}` — its PR is merged (run `ez sync` to delete it)"
+        ));
+        for child in &children {
+            ui::info(&format!("  → Reparented `{child}` onto `{parent}`"));
+        }
+        ui::receipt(&serde_json::json!({
+            "cmd": "restack",
+            "branch": branch,
+            "action": "skipped",
+            "reason": "merged",
+            "reparented": children,
+            "parent": parent,
+        }));
+        merged.insert(branch.clone());
+    }
+    Ok(merged)
+}
+
 pub fn run(force: bool) -> Result<()> {
     let mut state = StackState::load()?;
     if let Some(root) = git::current_linked_worktree_root()? {
@@ -541,7 +600,12 @@ pub fn run(force: bool) -> Result<()> {
         Err(e) => ui::warn(&format!("Could not update `{}` — {e}", state.trunk)),
     }
 
-    let order = state.topo_order();
+    let merged = skip_merged_branches(&mut state, &fetch_remote)?;
+    let order: Vec<String> = state
+        .topo_order()
+        .into_iter()
+        .filter(|branch| !merged.contains(branch))
+        .collect();
     let candidates = preflight::restack_candidates(&state, &order);
     preflight::run("restack", force, &candidates)?;
     let report = restack_branches_with_options(

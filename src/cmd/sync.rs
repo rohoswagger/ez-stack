@@ -41,6 +41,58 @@ fn cleanup_reason(
     }
 }
 
+/// PR status for each cleanup candidate, via one lookup. Read-only, so `--dry-run` uses it too.
+pub(crate) fn lookup_pr_statuses(
+    state: &StackState,
+    fetch_remote: &str,
+    candidates: &[String],
+) -> std::collections::HashMap<String, github::PrInfo> {
+    if candidates.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let sp = ui::spinner("Checking PR states...");
+    let statuses = if state.is_fork_workflow() {
+        let numbered_branches: Vec<(&str, u64)> = candidates
+            .iter()
+            .filter_map(|branch| {
+                state
+                    .branches
+                    .get(branch)
+                    .and_then(|meta| meta.pr_number.map(|number| (branch.as_str(), number)))
+            })
+            .collect();
+        github::get_pr_statuses_by_number(fetch_remote, state.repo.as_deref(), &numbered_branches)
+    } else {
+        let branch_refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
+        github::get_pr_statuses_for(fetch_remote, state.repo.as_deref(), &branch_refs)
+    };
+    sp.finish_and_clear();
+    statuses
+}
+
+/// Why sync would clean up an existing local branch, or `None` to keep it.
+///
+/// A PR's state is authoritative when there is one. Without a PR, the branch counts as merged
+/// when its tip is in `trunk_ref`, or — only when it never had a PR — when its diff against
+/// trunk is empty (an empty diff alongside a PR may just be a cherry-pick).
+pub(crate) fn branch_cleanup_reason(
+    branch_name: &str,
+    trunk_ref: &str,
+    pr_number: Option<u64>,
+    pr_info: Option<&github::PrInfo>,
+) -> Option<&'static str> {
+    let merged_via_git = pr_info.is_none() && git::is_ancestor(branch_name, trunk_ref);
+    let merged_via_diff = if pr_info.is_none() && !merged_via_git && pr_number.is_none() {
+        let range = format!("{trunk_ref}...{branch_name}");
+        git::diff(&range, true, false)
+            .map(|stat| stat.trim().is_empty())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    cleanup_reason(pr_info, merged_via_git, merged_via_diff)
+}
+
 fn inside_worktree_path(current_dir: &str, worktree_path: &str) -> bool {
     fn normalize(path: &str) -> std::path::PathBuf {
         std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path))
@@ -400,30 +452,86 @@ pub fn run(dry_run: bool, autostash: bool, force: bool, repair_native_stack: boo
             .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
             .collect();
 
-        let managed_branches: Vec<String> = state.branches.keys().cloned().collect();
-        for branch_name in &managed_branches {
-            let meta = state.get_branch(branch_name)?;
-            if meta.pr_number.is_some() {
+        // Plan with the same decisions the real run makes: one read-only PR lookup, the shared
+        // cleanup rule, and the same reparenting, applied to a scratch copy of the state. A
+        // worktree is only ever listed for removal when its own branch is being cleaned up.
+        let fetch_remote = state.fetch_remote().to_string();
+        let remote_trunk = format!("{fetch_remote}/{}", state.trunk);
+        let trunk_ref = if git::rev_parse(&remote_trunk).is_ok() {
+            remote_trunk
+        } else {
+            state.trunk.clone()
+        };
+        let mut plan = state.clone();
+        let managed_branches: Vec<String> = {
+            let mut order: Vec<String> = state
+                .topo_order()
+                .into_iter()
+                .filter(|branch| state.branches.contains_key(branch))
+                .collect();
+            for key in state.branches.keys() {
+                if !order.contains(key) {
+                    order.push(key.clone());
+                }
+            }
+            order
+        };
+        let cleanup_candidates = cleanup_candidate_branches(&state.trunk, &managed_branches);
+        let pr_statuses = lookup_pr_statuses(&state, &fetch_remote, &cleanup_candidates);
+        for branch_name in &cleanup_candidates {
+            let meta = plan.get_branch(branch_name)?.clone();
+            let new_parent = if git::branch_exists(branch_name) {
+                let pr_info = pr_statuses.get(branch_name.as_str());
+                let pr_number = meta.pr_number.or(pr_info.map(|pr| pr.number));
+                let Some(reason) =
+                    branch_cleanup_reason(branch_name, &trunk_ref, pr_number, pr_info)
+                else {
+                    continue;
+                };
+                let label = if reason == "pr_closed" {
+                    "PR closed"
+                } else {
+                    "merged"
+                };
                 ui::info(&format!(
-                    "Would check if PR for `{branch_name}` is merged or closed"
+                    "Would clean up `{branch_name}` ({label}) and delete the local branch"
                 ));
                 if let Some(wt_path) = dry_worktree_map.get(branch_name.as_str()) {
                     ui::info(&format!("  → Would remove worktree at `{wt_path}`"));
                 }
+                meta.parent.clone()
+            } else {
+                ui::info(&format!(
+                    "Would clean up `{branch_name}` (deleted outside ez)"
+                ));
+                if git::branch_exists(&meta.parent) {
+                    meta.parent.clone()
+                } else {
+                    plan.trunk.clone()
+                }
+            };
+            for child in plan.reparent_children_preserving_parent_head(branch_name, &new_parent)? {
+                ui::info(&format!("  → Would reparent `{child}` onto `{new_parent}`"));
             }
+            plan.remove_branch(branch_name);
         }
 
-        let order = state.topo_order();
         let mut any_restack = false;
-        for branch_name in &order {
-            let meta = state.get_branch(branch_name)?;
+        let mut moving = std::collections::HashSet::new();
+        for branch_name in &plan.topo_order() {
+            let Ok(meta) = plan.get_branch(branch_name) else {
+                continue;
+            };
             let parent = &meta.parent;
-            let stored_head = &meta.parent_head;
-            if let Ok(current_tip) = git::rev_parse(parent) {
-                if current_tip != *stored_head {
-                    ui::info(&format!("Would restack `{branch_name}` onto `{parent}`"));
-                    any_restack = true;
-                }
+            let parent_ref = if *parent == plan.trunk {
+                trunk_ref.as_str()
+            } else {
+                parent.as_str()
+            };
+            if moving.contains(parent) || restack::branch_needs_restack(branch_name, parent_ref) {
+                ui::info(&format!("Would restack `{branch_name}` onto `{parent}`"));
+                moving.insert(branch_name.clone());
+                any_restack = true;
             }
         }
 
@@ -557,33 +665,7 @@ fn run_sync_inner(force: bool, repair_native_stack: bool) -> Result<()> {
     };
     let cleanup_candidates = cleanup_candidate_branches(&state.trunk, &managed_branches);
     let mut cleaned = Vec::new();
-    let has_any_prs = !cleanup_candidates.is_empty();
-    let pr_statuses = if has_any_prs {
-        let sp = ui::spinner("Checking PR states...");
-        let statuses = if state.is_fork_workflow() {
-            let numbered_branches: Vec<(&str, u64)> = cleanup_candidates
-                .iter()
-                .filter_map(|branch| {
-                    state
-                        .branches
-                        .get(branch)
-                        .and_then(|meta| meta.pr_number.map(|number| (branch.as_str(), number)))
-                })
-                .collect();
-            github::get_pr_statuses_by_number(
-                &fetch_remote,
-                state.repo.as_deref(),
-                &numbered_branches,
-            )
-        } else {
-            let branch_refs: Vec<&str> = cleanup_candidates.iter().map(String::as_str).collect();
-            github::get_pr_statuses_for(&fetch_remote, state.repo.as_deref(), &branch_refs)
-        };
-        sp.finish_and_clear();
-        statuses
-    } else {
-        std::collections::HashMap::new()
-    };
+    let pr_statuses = lookup_pr_statuses(&state, &fetch_remote, &cleanup_candidates);
 
     for branch_name in &cleanup_candidates {
         let meta = state.get_branch(branch_name)?.clone();
@@ -617,31 +699,11 @@ fn run_sync_inner(force: bool, repair_native_stack: bool) -> Result<()> {
             continue;
         }
 
-        let merged_via_git = if pr_info.is_none() {
-            git::is_ancestor(branch_name, &state.trunk)
-        } else {
-            false
-        };
-
-        // Diff-level check: only for branches WITHOUT a PR.
-        // If a PR exists, the PR status is authoritative. An empty diff might just
-        // mean someone cherry-picked the changes, not that the PR was merged.
-        let merged_via_diff = if pr_info.is_none() && !merged_via_git && pr_number.is_none() {
-            let range = format!("{}...{}", state.trunk, branch_name);
-            git::diff(&range, true, false)
-                .map(|stat| stat.trim().is_empty())
-                .unwrap_or(false)
-        } else {
-            false
-        };
-
-        let cleanup_reason = cleanup_reason(pr_info, merged_via_git, merged_via_diff);
-
-        if cleanup_reason.is_none() {
+        let Some(cleanup_reason) =
+            branch_cleanup_reason(branch_name, &state.trunk, pr_number, pr_info)
+        else {
             continue;
-        }
-
-        let cleanup_reason = cleanup_reason.unwrap_or("merged");
+        };
 
         // Remove worktree for this branch (if any) before mutating stack state.
         // If cleanup fails, keep the branch tracked so `ez sync --force` or `ez delete`
