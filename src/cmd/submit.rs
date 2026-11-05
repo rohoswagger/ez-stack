@@ -53,11 +53,6 @@ pub fn run(
     let path = state.path_to_trunk(&current);
     let branches_to_submit = branches_to_submit(&path, &state.trunk);
 
-    if branches_to_submit.is_empty() {
-        ui::info("No branches to submit.");
-        return Ok(());
-    }
-
     let effective_remote = remote_override
         .map(str::to_string)
         .unwrap_or_else(|| state.remote.clone());
@@ -174,6 +169,26 @@ mod tests {
         write_file,
     };
 
+    fn is_missing_remote_error(message: &str) -> bool {
+        message.contains("missing-origin")
+            || message.contains("does not appear to be a git repository")
+            || message.contains("Could not read from remote repository")
+    }
+
+    #[test]
+    fn missing_remote_error_recognizes_supported_git_wording() {
+        assert!(is_missing_remote_error(
+            "fatal: 'missing-origin' unavailable"
+        ));
+        assert!(is_missing_remote_error(
+            "fatal: origin does not appear to be a git repository"
+        ));
+        assert!(is_missing_remote_error(
+            "fatal: Could not read from remote repository"
+        ));
+        assert!(!is_missing_remote_error("permission denied"));
+    }
+
     #[test]
     fn branches_to_submit_orders_bottom_to_top_and_skips_trunk() {
         let path = vec![
@@ -212,8 +227,7 @@ mod tests {
 
         assert!(
             err.downcast_ref::<EzError>()
-                .is_some_and(|err| matches!(err, EzError::OnTrunk)),
-            "unexpected error: {err:#}"
+                .is_some_and(|err| matches!(err, EzError::OnTrunk))
         );
     }
 
@@ -230,12 +244,9 @@ mod tests {
         let err = run(false, false, None, None, None, None, None, None)
             .expect_err("submit on unmanaged branch should fail");
 
-        assert!(
-            err.downcast_ref::<EzError>().is_some_and(
-                |err| matches!(err, EzError::BranchNotInStack(branch) if branch == "feat/unmanaged")
-            ),
-            "unexpected error: {err:#}"
-        );
+        assert!(err.downcast_ref::<EzError>().is_some_and(
+            |err| matches!(err, EzError::BranchNotInStack(branch) if branch == "feat/unmanaged")
+        ));
     }
 
     #[test]
@@ -268,10 +279,7 @@ mod tests {
         )
         .expect_err("missing body file should fail");
 
-        assert!(
-            err.to_string().contains("missing-body.md"),
-            "unexpected error: {err:#}"
-        );
+        assert!(err.to_string().contains("missing-body.md"));
         let after = std::fs::read_to_string(StackState::state_path().expect("state path"))
             .expect("state after");
         assert_eq!(after, before, "submit state should not change");
@@ -327,20 +335,8 @@ exit 0
         unsafe {
             std::env::remove_var("EZ_FAKE_GH_LOG");
         }
-        assert!(
-            err.to_string().contains("missing-origin")
-                || err
-                    .to_string()
-                    .contains("does not appear to be a git repository")
-                || err
-                    .to_string()
-                    .contains("Could not read from remote repository"),
-            "unexpected error: {err:#}"
-        );
-        assert!(
-            !gh_log.exists(),
-            "GitHub mutation should not occur before a successful atomic push"
-        );
+        assert!(is_missing_remote_error(&err.to_string()));
+        assert!(!gh_log.exists());
         let after = std::fs::read_to_string(StackState::state_path().expect("state path"))
             .expect("state after");
         assert_eq!(after, before, "submit state should not change");
