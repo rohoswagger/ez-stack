@@ -267,6 +267,54 @@ fn prune_orphaned_ez_worktrees(
     cleaned
 }
 
+fn prune_merged_local_branches(state: &StackState, fetch_remote: &str) -> Vec<String> {
+    let (Ok(branches), Ok(worktrees)) = (git::branch_list(), git::worktree_list()) else {
+        return Vec::new();
+    };
+    let default_branch = git::default_branch().ok();
+    let candidates: Vec<String> = branches
+        .into_iter()
+        .filter(|branch| {
+            !state.is_trunk(branch)
+                && default_branch.as_ref() != Some(branch)
+                && !state.branches.contains_key(branch)
+                && !worktrees
+                    .iter()
+                    .any(|wt| wt.branch.as_ref() == Some(branch))
+        })
+        .collect();
+    let statuses = lookup_pr_statuses(state, fetch_remote, &candidates);
+    let mut cleaned = Vec::new();
+    for branch in candidates {
+        let tip = git::rev_parse(&branch).unwrap_or_default();
+        if !orphan_work_is_in_trunk(
+            statuses.get(&branch),
+            git::is_ancestor(&branch, &state.trunk),
+            tip.trim(),
+        ) {
+            ui::info(&format!(
+                "Kept unmanaged branch `{branch}` (not proven merged)"
+            ));
+            continue;
+        }
+        if let Err(error) = git::delete_branch(&branch, true) {
+            ui::warn(&format!(
+                "Could not remove merged local branch `{branch}`: {error}"
+            ));
+            continue;
+        }
+        ui::info(&format!(
+            "Cleaned up `{branch}` (merged, no longer tracked)"
+        ));
+        ui::receipt(&serde_json::json!({
+            "cmd": "sync", "branch": branch, "action": "cleaned",
+            "reason": "orphaned_merged_branch",
+        }));
+        cleaned.push(branch);
+    }
+    cleaned
+}
+
 /// Delegates to the shared reconciler so `ez sync` and `ez move` restructure GitHub stacks the
 /// same way. `--repair-native-stack` is what allows a divergent stack to be dissolved and rebuilt.
 fn reconcile_native_stacks(state: &StackState, repair_native_stack: bool) -> Result<()> {
@@ -850,6 +898,8 @@ fn run_sync_inner(force: bool, repair_native_stack: bool) -> Result<()> {
         force,
         &mut shell_cd_path,
     ));
+
+    cleaned.extend(prune_merged_local_branches(&state, &fetch_remote));
 
     let order = state.topo_order();
     let candidates = crate::cmd::preflight::restack_candidates(&state, &order);

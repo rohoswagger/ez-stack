@@ -248,8 +248,9 @@ with Git, including worktrees outside `.worktrees/` (such as T3 worktrees).
 For an untracked worktree, cleanup requires either its local tip to be an
 ancestor of trunk or a merged PR whose head commit matches that tip. Dirty
 worktrees are preserved unless `--force` is supplied; unmerged worktrees remain
-untouched. Plain unmanaged local branches without a worktree remain outside
-cleanup until you use `ez track` or `ez adopt`.
+untouched. Merged unmanaged local branches without worktrees are cleaned using the same
+proof. The default branch, trunk, and branches checked out in worktrees are
+protected from this branch-only cleanup.
 
 Sync applies changes in a deliberate order: fetch and refresh trunk, clean
 finished managed layers, reparent their surviving children, preflight the
