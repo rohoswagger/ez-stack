@@ -103,30 +103,18 @@ fn inside_worktree_path(current_dir: &str, worktree_path: &str) -> bool {
     current == worktree || current.starts_with(&worktree)
 }
 
-/// Worktrees ez created that no longer have a stack entry pointing at them.
-///
-/// A branch normally leaves the stack and its worktree in the same step. When something fails in
-/// between — a merge that drops the entry and then hits a restack error before cleanup — the
-/// worktree survives with no metadata left to find it by, so neither the cleanup loop above (which
-/// only walks `state.branches`) nor `ez log` will ever mention it again.
-///
-/// Scope is deliberately narrow: only worktrees under *this repo's* `.worktrees/`, which ez
-/// creates and owns. A branch checked out in an external worktree, or a plain local branch with
-/// no worktree at all, is somebody else's and is left alone no matter how merged it looks.
+/// Registered linked worktrees whose branches no longer have stack metadata.
 fn orphaned_ez_worktrees(
     state: &StackState,
     main_root: &str,
     worktree_map: &std::collections::HashMap<String, String>,
 ) -> Vec<(String, String)> {
-    // Anchored to the repo root, not a bare `contains`: a checkout that itself lives under some
-    // `.worktrees/` directory would otherwise make every external worktree look ez-owned.
-    let owned_prefix = format!("{}/.worktrees/", main_root.trim_end_matches('/'));
     let mut orphans: Vec<(String, String)> = worktree_map
         .iter()
         .filter(|(branch, path)| {
             !state.branches.contains_key(*branch)
                 && !state.is_trunk(branch)
-                && path.starts_with(&owned_prefix)
+                && path.as_str() != main_root
         })
         .map(|(branch, path)| (branch.clone(), path.clone()))
         .collect();
@@ -931,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn orphaned_ez_worktrees_only_claims_untracked_branches_in_ez_owned_worktrees() {
+    fn orphaned_ez_worktrees_includes_untracked_external_worktrees() {
         let mut state = StackState::new("main".to_string());
         state.add_branch("feat/tracked", "main", "aaa", None, None);
 
@@ -946,7 +934,7 @@ mod tests {
                 "feat/tracked".to_string(),
                 "/repo/.worktrees/feat-tracked".to_string(),
             ),
-            // Someone else's worktree (Superconductor, a manual `git worktree add`). Not ours.
+            // External worktrees are also registered with this repository.
             (
                 "feat/external".to_string(),
                 "/elsewhere/feat-external".to_string(),
@@ -959,10 +947,16 @@ mod tests {
 
         assert_eq!(
             orphans,
-            vec![(
-                "feat/orphan".to_string(),
-                "/repo/.worktrees/feat-orphan".to_string()
-            )]
+            vec![
+                (
+                    "feat/external".to_string(),
+                    "/elsewhere/feat-external".to_string()
+                ),
+                (
+                    "feat/orphan".to_string(),
+                    "/repo/.worktrees/feat-orphan".to_string()
+                ),
+            ]
         );
     }
 
@@ -1019,32 +1013,23 @@ mod tests {
     }
 
     #[test]
-    fn orphaned_ez_worktrees_anchors_ownership_to_this_repo_root() {
+    fn orphaned_ez_worktrees_excludes_main_worktree_even_on_a_feature_branch() {
         let state = StackState::new("main".to_string());
 
-        // A checkout that itself lives under a `.worktrees/` directory. A bare substring test
-        // would claim every sibling worktree in that directory as ez's to delete.
         let main_root = "/home/dev/.worktrees/project";
         let worktrees = std::collections::HashMap::from([
+            ("feat/current".to_string(), main_root.to_string()),
             (
-                "feat/ours".to_string(),
-                "/home/dev/.worktrees/project/.worktrees/feat-ours".to_string(),
-            ),
-            (
-                "feat/theirs".to_string(),
-                "/home/dev/.worktrees/some-other-tool".to_string(),
+                "feat/external".to_string(),
+                "/elsewhere/feature".to_string(),
             ),
         ]);
-
-        let orphans = orphaned_ez_worktrees(&state, main_root, &worktrees);
-
         assert_eq!(
-            orphans,
+            orphaned_ez_worktrees(&state, main_root, &worktrees),
             vec![(
-                "feat/ours".to_string(),
-                "/home/dev/.worktrees/project/.worktrees/feat-ours".to_string()
-            )],
-            "only worktrees under this repo's own .worktrees/ are ez-owned"
+                "feat/external".to_string(),
+                "/elsewhere/feature".to_string()
+            )]
         );
     }
 
