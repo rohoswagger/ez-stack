@@ -763,3 +763,86 @@ fn sync_skips_cleanup_for_leased_worktree_and_preserves_retryable_state() {
     assert!(stderr.contains(r#""action":"cleanup_skipped""#), "{stderr}");
     assert!(stderr.contains(r#""reason":"worktree_locked""#), "{stderr}");
 }
+
+#[test]
+fn sync_cleans_only_merged_clean_untracked_external_worktrees() {
+    for (merged, dirty) in [(true, false), (true, true), (false, false)] {
+        let repo = init_repo("sync-external-orphan", "main", serde_json::json!({}));
+        add_branch(&repo, "feat/orphan", "main", "orphan.txt", 101);
+        let worktree = add_external_worktree(&repo, "feat/orphan");
+        if merged {
+            run(&repo.path, "git", &["merge", "--ff-only", "feat/orphan"]);
+            run(&repo.path, "git", &["push", "origin", "main"]);
+        }
+        let mut state = stack_state(&repo);
+        state["branches"].as_object_mut().unwrap().clear();
+        save_stack_state(&repo, &state);
+        if dirty {
+            write_file(&worktree, "unsaved.txt", "keep this work\n");
+        }
+        let output = run_ez(&repo, &repo.path, &["sync"], r#"{"data":{}}"#);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let keep = !merged || dirty;
+        assert_eq!(worktree.exists(), keep, "merged={merged}, dirty={dirty}");
+        assert_eq!(branch_exists(&repo, "feat/orphan"), keep);
+        assert!(repo.path.exists());
+        if dirty {
+            assert_eq!(
+                std::fs::read_to_string(worktree.join("unsaved.txt")).unwrap(),
+                "keep this work\n"
+            );
+        }
+        let _ = std::fs::remove_dir_all(worktree);
+    }
+}
+
+#[test]
+fn sync_cleans_merged_unmanaged_local_branch_and_keeps_unmerged_tip() {
+    for merged in [true, false] {
+        let repo = init_repo("sync-local-orphan", "main", serde_json::json!({}));
+        add_branch(&repo, "feat/orphan", "main", "orphan.txt", 101);
+        if merged {
+            run(&repo.path, "git", &["merge", "--ff-only", "feat/orphan"]);
+            run(&repo.path, "git", &["push", "origin", "main"]);
+        }
+        let mut state = stack_state(&repo);
+        state["branches"].as_object_mut().unwrap().clear();
+        save_stack_state(&repo, &state);
+        let output = run_ez(&repo, &repo.path, &["sync"], r#"{"data":{}}"#);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(branch_exists(&repo, "feat/orphan"), !merged);
+        assert!(branch_exists(&repo, "main"));
+    }
+}
+
+#[test]
+fn sync_cleans_squash_merged_local_branch_only_when_pr_head_matches() {
+    for matches in [true, false] {
+        let repo = init_repo("sync-local-squash", "main", serde_json::json!({}));
+        add_branch(&repo, "feat/orphan", "main", "orphan.txt", 101);
+        let tip = git_output(&repo.path, &["rev-parse", "feat/orphan"]);
+        let mut state = stack_state(&repo);
+        state["branches"].as_object_mut().unwrap().clear();
+        save_stack_state(&repo, &state);
+        let response = serde_json::json!({"data":{"repository":{"b0":{"nodes":[{
+            "number":101,"state":"MERGED","mergedAt":"2026-11-05T00:00:00Z",
+            "headRefOid": if matches { tip.as_str() } else { "different-tip" }
+        }]}}}})
+        .to_string();
+        let output = run_ez(&repo, &repo.path, &["sync"], &response);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(branch_exists(&repo, "feat/orphan"), !matches);
+    }
+}

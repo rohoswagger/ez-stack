@@ -243,10 +243,14 @@ Intended workflow:
 
 #### Sync safety contract
 
-`ez sync` treats `.git/ez/stack.json` as its ownership boundary. It may inspect
-and clean only branches recorded there; an ordinary local Git branch is never a
-cleanup candidate until you explicitly bring it under ez with `ez track` or
-`ez adopt`.
+`ez sync` cleans managed branches and merged orphaned linked worktrees registered
+with Git, including worktrees outside `.worktrees/` (such as T3 worktrees).
+For an untracked worktree, cleanup requires either its local tip to be an
+ancestor of trunk or a merged PR whose head commit matches that tip. Dirty
+worktrees are preserved unless `--force` is supplied; unmerged worktrees remain
+untouched. Merged unmanaged local branches without worktrees are cleaned using the same
+proof. The default branch, trunk, and branches checked out in worktrees are
+protected from this branch-only cleanup.
 
 Sync applies changes in a deliberate order: fetch and refresh trunk, clean
 finished managed layers, reparent their surviving children, preflight the
